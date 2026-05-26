@@ -204,6 +204,8 @@ def clean_trajectories(input_file: str, out_dir: str):
     if pc_flights:
         # FIX: Use to_dataframe() to extract the pd.DataFrame from pycontrails.Flight objects
         df_clean = pd.concat([f.to_dataframe() for f in pc_flights], ignore_index=True)
+        # Clear DataFrame attributes to prevent pyarrow JSON serialization errors with pandas Timestamp attributes
+        df_clean.attrs = {}
         out_path = out_dir_path / Path(input_file).name.replace('_raw.parquet', '_clean_si.parquet')
         
         df_clean.to_parquet(out_path, index=False)
