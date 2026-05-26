@@ -10,9 +10,9 @@ Loop 1: Acquisition (src/acquisition/) - Slices master lists and downloads raw s
 
 Loop 2: Processing (src/processing/) - Filters noise, drops ground-state data, and applies Extended Kalman Filter (EKF) mathematical smoothing. Converts non-SI aviation units to strict SI metric units.
 
-Loop 3a: Weather (src/weather/era5_manager.py) - Determines the spatial bounding box needed, connects to Copernicus, and lazily downloads/updates a shared NetCDF disk cache.
+Loop 3a: Weather (src/weather/era5_manager.py) - Determines the spatial bounding box needed, connects to Copernicus, and downloads/updates a shared NetCDF disk cache. Spatially pads the flight's bounding box by 30° and temporally pads the end date by 48 hours to fully accommodate CoCiP's contrail advection drift.
 
-Loop 3b: Simulation (src/physics/simulation.py) - Maps the flight trajectories over the 3D weather grids, evaluates engine fuel flow/emissions, and calculates contrail radiative forcing.
+Loop 3b: Simulation (src/physics/simulation.py) - Maps the flight trajectories over the 3D weather grids, evaluates engine fuel flow/emissions, and calculates contrail radiative forcing. Automatically computes the exact required weather time window from the flight data if omitted.
 
 Executing the Pipeline
 

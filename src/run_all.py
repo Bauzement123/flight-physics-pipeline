@@ -62,11 +62,11 @@ def main():
     # ---------------------------------------------------------
     # ADVECTION PADDING CALCULATION (Temporal)
     # ---------------------------------------------------------
-    # Cocip requires future weather to advect contrails after the flight lands.
+    # Cocip requires future weather (up to 48h) to advect contrails after the flight lands.
     try:
         end_dt = datetime.strptime(args.end_date, "%Y-%m-%d")
-        weather_end_date = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        logging.info(f"Advection Padding: Weather bounds extended from {args.end_date} to {weather_end_date}")
+        weather_end_date = (end_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+        logging.info(f"Advection Padding: Weather bounds extended from {args.end_date} to {weather_end_date} (48h padding)")
     except ValueError:
         weather_end_date = args.end_date
         logging.warning("Could not parse end-date format. Using unpadded end-date for weather.")
@@ -120,7 +120,8 @@ def main():
     # LOOP 3a: WEATHER INTEGRATION (DYNAMIC BOUNDS)
     # ---------------------------------------------------------
     logging.info("=== STARTING LOOP 3a: Weather Cache Updates ===")
-    bbox_str = calculate_dynamic_bbox(clean_file, padding=15.0)
+    # Spatial padding increased to 30.0 degrees to cover 48h contrail advection drift
+    bbox_str = calculate_dynamic_bbox(clean_file, padding=30.0)
     
     cmd_weather = [
         "python", "src/weather/era5_manager.py",
@@ -135,13 +136,12 @@ def main():
     # LOOP 3b: PHYSICS SIMULATION (PSFLIGHT & COCIP)
     # ---------------------------------------------------------
     logging.info("=== STARTING LOOP 3b: Physics Simulation ===")
+    # simulation.py automatically calculates flight bounds and 48h advection weather window dynamically
     cmd_sim = [
         "python", "src/physics/simulation.py",
         "--input-file", clean_file,
         "--out-dir", "data/results/run_all_temp/",
-        "--weather-cache", "data/weather/",
-        "--start-date", args.start_date,
-        "--end-date", weather_end_date  # Note: Simulation reads padded cache bounds
+        "--weather-cache", "data/weather/"
     ]
     subprocess.run(cmd_sim, check=True)
 

@@ -38,9 +38,47 @@ REQUIRED_PRESSURE_LEVELS = [
     450, 400, 350, 300, 250, 225, 200, 150
 ]
 
-def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, start_date: str, end_date: str):
+def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, start_date: str = None, end_date: str = None, max_age_hours: int = 48):
     logger.info(f"Loading cleaned trajectories: {Path(input_path).name}")
     
+    # Load Flight Groupings first to inspect time bounds
+    flights_dict = extract_flights_from_parquet(input_path)
+    if not flights_dict:
+        logger.error("No flights found in the input parquet file.")
+        return
+        
+    # Dynamically compute weather temporal window if not provided
+    if not start_date or not end_date:
+        min_time = None
+        max_time = None
+        for flight_id, group_df in flights_dict.items():
+            for col in ['time', 'timestamp']:
+                if col in group_df.columns:
+                    f_min = pd.to_datetime(group_df[col]).min()
+                    f_max = pd.to_datetime(group_df[col]).max()
+                    if min_time is None or f_min < min_time:
+                        min_time = f_min
+                    if max_time is None or f_max > max_time:
+                        max_time = f_max
+                    break
+        
+        if min_time is None or max_time is None:
+            logger.error("Could not determine flight time bounds from coordinates.")
+            return
+            
+        # Add 1 hour buffer to start, and max_age_hours plus 1 hour buffer to end
+        weather_start = (min_time - pd.Timedelta(hours=1)).floor('h').tz_localize(None)
+        weather_end = (max_time + pd.Timedelta(hours=max_age_hours + 1)).ceil('h').tz_localize(None)
+        
+        if not start_date:
+            start_date = weather_start.strftime('%Y-%m-%dT%H:%M:%S')
+        if not end_date:
+            end_date = weather_end.strftime('%Y-%m-%dT%H:%M:%S')
+            
+        logger.info(f"Dynamically calculated weather window:")
+        logger.info(f"  -> Flight bounds: {min_time} to {max_time}")
+        logger.info(f"  -> Weather bounds: {start_date} to {end_date} (includes {max_age_hours}h advection padding)")
+        
     # 1. Load Weather Sources (Points to Cache, does not trigger API downloads)
     cache_path = Path(cache_dir).resolve()
     disk_cache = DiskCacheStore(cache_dir=str(cache_path))
@@ -84,7 +122,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, start_da
         "process_emissions": True,
         "verbose_outputs": False,
         "humidity_scaling": ConstantHumidityScaling(rhi_adj=0.97),
-        "max_age": pd.Timedelta(hours=48),
+        "max_age": pd.Timedelta(hours=max_age_hours),
         "dt_integration": np.timedelta64(30, "m"),
         "dz_m": 200.0,
         "effective_vertical_resolution": 2000.0,
@@ -96,8 +134,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, start_da
     }
     cocip_model = Cocip(met=met, rad=rad, params=cocip_params, aircraft_performance=ps_model)
 
-    # 3. Load Flight Groupings
-    flights_dict = extract_flights_from_parquet(input_path)
+    # 3. Load Flight Groupings (already loaded at start of function)
     simulated_dataframes = []
     
     logger.info(f"Found {len(flights_dict)} flights to simulate.")
@@ -196,8 +233,9 @@ if __name__ == "__main__":
     parser.add_argument("--input-file", required=True, help="Path to cleaned SI trajectory Parquet file or directory containing cleaned Parquet files")
     parser.add_argument("--out-dir", required=True, help="Output directory for simulation results")
     parser.add_argument("--weather-cache", required=True, help="Directory containing ERA5 NetCDF cache files")
-    parser.add_argument("--start-date", required=True, help="Simulation start date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
-    parser.add_argument("--end-date", required=True, help="Simulation end date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
+    parser.add_argument("--start-date", default=None, help="Simulation start date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). Defaults to dynamic calculation based on flight times.")
+    parser.add_argument("--end-date", default=None, help="Simulation end date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). Defaults to dynamic calculation based on flight times.")
+    parser.add_argument("--max-age", type=int, default=48, help="Maximum contrail simulation/advection age in hours (default: 48)")
     
     args = parser.parse_args()
     
@@ -226,7 +264,8 @@ if __name__ == "__main__":
                     out_dir=args.out_dir,
                     cache_dir=args.weather_cache,
                     start_date=args.start_date,
-                    end_date=args.end_date
+                    end_date=args.end_date,
+                    max_age_hours=args.max_age
                 )
             except Exception as e:
                 logger.error(f"Failed to simulate {clean_file.name}: {e}")
@@ -236,5 +275,6 @@ if __name__ == "__main__":
             out_dir=args.out_dir,
             cache_dir=args.weather_cache,
             start_date=args.start_date,
-            end_date=args.end_date
+            end_date=args.end_date,
+            max_age_hours=args.max_age
         )
