@@ -10,7 +10,7 @@ from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MANIFEST BUILDER] - %(message)s')
 
 def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, description: str):
-    logging.info(f"--- Rebuilding {description} Registry ---")
+    logging.info(f"--- Rebuilding/Updating {description} Registry ---")
     
     # 1. Search directories for matching parquet files
     found_files = []
@@ -19,16 +19,34 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
             glob_pattern = str(s_dir / "**" / pattern)
             found_files.extend(glob.glob(glob_pattern, recursive=True))
             
-    logging.info(f"Found {len(found_files)} files matching '{pattern}' to inspect.")
+    logging.info(f"Found {len(found_files)} files matching '{pattern}' on disk.")
     
+    # Load existing registry if it exists
+    existing_df = None
+    indexed_files = set()
+    if registry_file.exists():
+        try:
+            existing_df = pd.read_parquet(registry_file)
+            if not existing_df.empty and 'file_path' in existing_df.columns:
+                indexed_files = set(existing_df['file_path'].unique())
+                logging.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+        except Exception as e:
+            logging.warning(f"Could not load existing registry {registry_file.name} ({e}). Rebuilding from scratch.")
+
     new_mappings = []
     
-    # 2. Read flight_ids from each file
+    # 2. Read flight_ids from only the new/unindexed files
+    skipped_count = 0
     for filepath_str in found_files:
         filepath = Path(filepath_str)
         rel_path = filepath.resolve().relative_to(BASE_DIR).as_posix()
         
+        if rel_path in indexed_files:
+            skipped_count += 1
+            continue
+            
         try:
+            logging.info(f"Indexing new file: {filepath.name}")
             # Read only flight_id column to keep memory usage low
             df = pd.read_parquet(filepath, columns=['flight_id'])
             unique_ids = df['flight_id'].dropna().unique()
@@ -41,21 +59,33 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
         except Exception as e:
             logging.error(f"Error reading Parquet file {filepath.name}: {e}")
             
+    if skipped_count > 0:
+        logging.info(f"Skipped {skipped_count} files that were already indexed.")
+
+    # 3. Merge and save
     if not new_mappings:
-        logging.warning(f"No flight IDs were extracted for {description}.")
-        df_new = pd.DataFrame(columns=["flight_id", "file_path"])
+        if existing_df is not None:
+            logging.info(f"No new files to index. Registry is up to date.")
+            df_updated = existing_df
+        else:
+            logging.warning(f"No flight IDs were extracted for {description}.")
+            df_updated = pd.DataFrame(columns=["flight_id", "file_path"])
     else:
         df_new = pd.DataFrame(new_mappings)
+        if existing_df is not None:
+            df_updated = pd.concat([existing_df, df_new])
+        else:
+            df_updated = df_new
         # Deduplicate (keep first)
-        df_new = df_new.drop_duplicates(subset=['flight_id'], keep='first')
+        df_updated = df_updated.drop_duplicates(subset=['flight_id'], keep='first')
         
     # Ensure parent folder exists
     FLIGHT_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     
     # Save registry
-    df_new.to_parquet(registry_file, index=False)
+    df_updated.to_parquet(registry_file, index=False)
     logging.info(f"Successfully generated/updated {description} registry at: {registry_file}")
-    logging.info(f"Total flight IDs mapped: {len(df_new):,}\n")
+    logging.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
 
 
 def build_global_manifest():

@@ -51,7 +51,10 @@ def generate_dataset_name(
     strategy=None,
     value=None,
     seed=None,
-    fetch_format=None
+    fetch_format=None,
+    start_date=None,
+    end_date=None,
+    typecode=None
 ) -> str:
     """
     Generates a unique dataset name incorporating all CLI parameters to make it human-readable,
@@ -87,6 +90,20 @@ def generate_dataset_name(
     # 5. Format part (oneway/roundtrip)
     if fetch_format is not None:
         parts.append(f"format_{fetch_format}")
+        
+    # 6. Start date part
+    if start_date is not None:
+        clean_start = str(start_date).replace(":", "-").replace(" ", "_")
+        parts.append(f"start_{clean_start}")
+        
+    # 7. End date part
+    if end_date is not None:
+        clean_end = str(end_date).replace(":", "-").replace(" ", "_")
+        parts.append(f"end_{clean_end}")
+        
+    # 8. Typecode part
+    if typecode is not None:
+        parts.append(f"type_{typecode}")
         
     base_prefix = "_".join(parts)
     

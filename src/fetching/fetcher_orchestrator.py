@@ -82,8 +82,16 @@ def extract_target_routes(summary_path: str, lower: int = None, upper: int = Non
     return filtered_df[['rank', 'dep', 'arr', 'no_of_flights']]
 
 
-def compute_fetch_targets(routes_df: pd.DataFrame, input_dir: str, strategy: str, value: float) -> list:
-    """Verifies file existence and calculates sample size quotas."""
+def compute_fetch_targets(
+    routes_df: pd.DataFrame, 
+    input_dir: str, 
+    strategy: str, 
+    value: float,
+    start_date: str = None,
+    end_date: str = None,
+    typecode: str = None
+) -> list:
+    """Verifies file existence and calculates sample size quotas after applying filters."""
     execution_plan = []
     base_dir = Path(input_dir)
     
@@ -92,7 +100,6 @@ def compute_fetch_targets(routes_df: pd.DataFrame, input_dir: str, strategy: str
     for _, row in routes_df.iterrows():
         rank = row['rank']
         dep, arr = row['dep'], row['arr']
-        capacity = int(row['no_of_flights'])
         
         expected_filename = f"{dep}-{arr}.parquet"
         file_path = base_dir / expected_filename
@@ -102,8 +109,19 @@ def compute_fetch_targets(routes_df: pd.DataFrame, input_dir: str, strategy: str
             logging.error(f"Flight list missing: {expected_filename}. Slicing must be run first. Skipping corridor {dep} -> {arr}.")
             continue
 
+        # Load and filter in-memory to get actual capacity
+        try:
+            df_flights = pd.read_parquet(file_path)
+            from src.fetching.opensky_fetcher import filter_flight_list
+            df_filtered = filter_flight_list(df_flights, start_date=start_date, end_date=end_date, typecode=typecode)
+            capacity = len(df_filtered)
+            logging.info(f"Corridor {dep} -> {arr}: filtered from {len(df_flights)} to {capacity} flights.")
+        except Exception as e:
+            logging.error(f"Error reading/filtering flight list {expected_filename}: {e}")
+            continue
+
         if capacity == 0:
-            logging.warning(f"Rank {rank} ({dep}->{arr}) has 0 flights listed. Skipping.")
+            logging.warning(f"Rank {rank} ({dep}->{arr}) has 0 flights matching the filters. Skipping.")
             continue
 
         # Quota Strategy
@@ -129,7 +147,14 @@ def compute_fetch_targets(routes_df: pd.DataFrame, input_dir: str, strategy: str
     return execution_plan
 
 
-def execute_batch_fetch(execution_plan: list, out_dir: str, seed: int):
+def execute_batch_fetch(
+    execution_plan: list, 
+    out_dir: str, 
+    seed: int,
+    start_date: str = None,
+    end_date: str = None,
+    typecode: str = None
+):
     """Executes the batch fetching loop sequentially."""
     if not execution_plan:
         logging.error("Execution plan is empty. Aborting batch fetch.")
@@ -153,7 +178,10 @@ def execute_batch_fetch(execution_plan: list, out_dir: str, seed: int):
                 input_list_path=item['file_path'],
                 out_dir=out_dir,
                 sample_size=item['target'],
-                seed=seed
+                seed=seed,
+                start_date=start_date,
+                end_date=end_date,
+                typecode=typecode
             )
             if success:
                 success_count += 1
@@ -182,6 +210,11 @@ if __name__ == "__main__":
     parser.add_argument("--strategy", choices=['fixed', 'percent', 'all'], default='fixed', help="Sampling strategy")
     parser.add_argument("--value", type=float, default=50, help="Value for fixed/percent strategies")
     parser.add_argument("--seed", type=int, default=42, help="Seed value for randomized sampling state")
+    
+    # Optional filtering parameters
+    parser.add_argument("--start-date", default=None, help="Start bounds of flight departure window (ISO format)")
+    parser.add_argument("--end-date", default=None, help="End bounds of flight departure window (ISO format)")
+    parser.add_argument("--typecode", default=None, help="Aircraft model code (e.g. B738, A320)")
 
     args = parser.parse_args()
 
@@ -211,7 +244,10 @@ if __name__ == "__main__":
             routes_df=routes, 
             input_dir=args.input_dir, 
             strategy=args.strategy, 
-            value=args.value
+            value=args.value,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            typecode=args.typecode
         )
         
         if plan:
@@ -223,7 +259,10 @@ if __name__ == "__main__":
                 strategy=args.strategy,
                 value=args.value,
                 seed=args.seed,
-                fetch_format=args.format
+                fetch_format=args.format,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                typecode=args.typecode
             )
             out_dir_path = get_dataset_dir(dataset_name)
             setup_file_logger(out_dir_path)
@@ -235,7 +274,10 @@ if __name__ == "__main__":
             execute_batch_fetch(
                 execution_plan=plan, 
                 out_dir=str(out_dir_path),
-                seed=args.seed
+                seed=args.seed,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                typecode=args.typecode
             )
             duration = time.time() - start_time
             logging.info(f"Batch fetch run completed in {duration:.2f} seconds ({duration/60:.2f} minutes).")

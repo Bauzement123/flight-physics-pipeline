@@ -36,7 +36,71 @@ def fetch_with_backoff(trino_client, query, max_retries=10):
     logging.error("Max retries reached. Query failed permanently.")
     return None
 
-def fetch_trajectories(input_list_path: str, out_dir: str, sample_size: int = None, seed: int = 42):
+def filter_flight_list(df: pd.DataFrame, start_date=None, end_date=None, **kwargs) -> pd.DataFrame:
+    """
+    Filters a flight list DataFrame.
+    Filters by:
+    - start_date (inclusive, matches firstseen): df['firstseen'] >= pd.to_datetime(start_date)
+    - end_date (inclusive, matches firstseen): df['firstseen'] <= pd.to_datetime(end_date)
+    - **kwargs: Matches column-value equality. Standard columns like typecode, estdepartureairport, etc.
+    """
+    if df.empty:
+        return df
+        
+    filtered_df = df.copy()
+    
+    if start_date is not None:
+        start_dt = pd.to_datetime(start_date)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.tz_localize('UTC')
+        else:
+            start_dt = start_dt.tz_convert('UTC')
+            
+        firstseen_dt = pd.to_datetime(filtered_df['firstseen'])
+        if firstseen_dt.dt.tz is None:
+            firstseen_dt = firstseen_dt.dt.localize('UTC')
+        else:
+            firstseen_dt = firstseen_dt.dt.tz_convert('UTC')
+            
+        filtered_df = filtered_df[firstseen_dt >= start_dt]
+        
+    if end_date is not None:
+        end_dt = pd.to_datetime(end_date)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.tz_localize('UTC')
+        else:
+            end_dt = end_dt.tz_convert('UTC')
+            
+        firstseen_dt = pd.to_datetime(filtered_df['firstseen'])
+        if firstseen_dt.dt.tz is None:
+            firstseen_dt = firstseen_dt.dt.localize('UTC')
+        else:
+            firstseen_dt = firstseen_dt.dt.tz_convert('UTC')
+            
+        filtered_df = filtered_df[firstseen_dt <= end_dt]
+        
+    for col, value in kwargs.items():
+        if value is not None:
+            if col in filtered_df.columns:
+                if col == 'typecode' and isinstance(value, str):
+                    val_to_use = value.upper()
+                else:
+                    val_to_use = value
+                filtered_df = filtered_df[filtered_df[col] == val_to_use]
+            else:
+                logging.warning(f"Column '{col}' not found in flight list DataFrame. Skipping this filter.")
+                
+    return filtered_df
+
+def fetch_trajectories(
+    input_list_path: str,
+    out_dir: str,
+    sample_size: int = None,
+    seed: int = 42,
+    start_date: str = None,
+    end_date: str = None,
+    typecode: str = None
+):
     start_time = time.time()
     out_dir_path = Path(out_dir)
     setup_file_logger(out_dir_path)
@@ -45,11 +109,19 @@ def fetch_trajectories(input_list_path: str, out_dir: str, sample_size: int = No
     
     if not Path(input_list_path).exists():
         logging.error(f"File not found: {input_list_path}")
-        return
+        return False
 
     # Read the target population list
     target_flights = pd.read_parquet(input_list_path)
     logging.info(f"Found {len(target_flights)} flights in the list.")
+
+    # Apply date and typecode filtering in-memory
+    target_flights = filter_flight_list(target_flights, start_date=start_date, end_date=end_date, typecode=typecode)
+    logging.info(f"Found {len(target_flights)} flights in the list after applying filters.")
+
+    if target_flights.empty:
+        logging.warning("No flights left in the list after filtering. Skipping corridor.")
+        return False
 
     # Sample a random subset if requested
     if sample_size and sample_size > 0:
@@ -247,6 +319,9 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Output directory for raw trajectories")
     parser.add_argument("--sample-size", type=int, default=None, help="Number of random flights to sample")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic cohort sampling")
+    parser.add_argument("--start-date", default=None, help="Start bounds of flight departure window (ISO format)")
+    parser.add_argument("--end-date", default=None, help="End bounds of flight departure window (ISO format)")
+    parser.add_argument("--typecode", default=None, help="Aircraft model code (e.g. B738, A320)")
 
     args = parser.parse_args()
     
@@ -254,5 +329,8 @@ if __name__ == "__main__":
         input_list_path=args.input_list,
         out_dir=args.out_dir,
         sample_size=args.sample_size,
-        seed=args.seed
+        seed=args.seed,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        typecode=args.typecode
     )
