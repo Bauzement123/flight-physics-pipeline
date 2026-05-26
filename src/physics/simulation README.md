@@ -42,23 +42,20 @@ python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
     --out-dir "data/results/test_scenario" `
     --weather-cache "data/weather" `
-    --start-date "2025-01-01T11:00:00" `
-    --end-date "2025-01-01T13:00:00"
+    --age 48
 
 # 2. Process an entire directory of clean files:
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean" `
     --out-dir "data/results/test_scenario" `
     --weather-cache "data/weather" `
-    --start-date "2025-01-01T11:00:00" `
-    --end-date "2025-01-01T13:00:00"
+    --age 48
 
 **Parameters**:
 - `--input-file`: Path to cleaned SI trajectory Parquet file OR directory containing multiple cleaned Parquet files (scans for `*_clean_si.parquet`).
 - `--out-dir`: Output directory for simulated results.
 - `--weather-cache`: Directory containing ERA5 NetCDF cache files.
-- `--start-date` & `--end-date`: Optional custom temporal window for weather query lookup. Defaults to dynamic flight bounds calculation.
-- `--max-age`: Maximum contrail simulation/advection age in hours (default: 48). Automatically pads the dynamically computed weather date window.
+- `--age` / `--max-age`: Maximum contrail simulation/advection age in hours (default: 48). This parameter is passed directly to the CoCiP model and is used to dynamically construct the temporal window bounds for the ERA5 weather datalib constructor.
 
 Prerequisites
 
