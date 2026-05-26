@@ -23,6 +23,7 @@ Serialization: Re-flattens the enriched trajectory objects and exports a single,
 
 Usage:
 
+# 1. Process a single clean file:
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
     --out-dir "data/results/test_scenario" `
@@ -30,6 +31,19 @@ python -m src.physics.simulation `
     --start-date "2025-01-01T11:00:00" `
     --end-date "2025-01-01T13:00:00"
 
+# 2. Process an entire directory of clean files:
+python -m src.physics.simulation `
+    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean" `
+    --out-dir "data/results/test_scenario" `
+    --weather-cache "data/weather" `
+    --start-date "2025-01-01T11:00:00" `
+    --end-date "2025-01-01T13:00:00"
+
+**Parameters**:
+- `--input-file`: Path to cleaned SI trajectory Parquet file OR directory containing multiple cleaned Parquet files (scans for `*_clean_si.parquet`).
+- `--out-dir`: Output directory for simulated results.
+- `--weather-cache`: Directory containing ERA5 NetCDF cache files.
+- `--start-date` & `--end-date`: Temporal window for weather query lookup (supports YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
 
 Prerequisites
 

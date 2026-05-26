@@ -193,18 +193,48 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, start_da
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run PSFlight and Cocip Physics Simulation")
-    parser.add_argument("--input-file", required=True, help="Path to cleaned SI trajectory Parquet file")
+    parser.add_argument("--input-file", required=True, help="Path to cleaned SI trajectory Parquet file or directory containing cleaned Parquet files")
     parser.add_argument("--out-dir", required=True, help="Output directory for simulation results")
     parser.add_argument("--weather-cache", required=True, help="Directory containing ERA5 NetCDF cache files")
-    parser.add_argument("--start-date", required=True, help="Simulation start date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", required=True, help="Simulation end date (YYYY-MM-DD)")
+    parser.add_argument("--start-date", required=True, help="Simulation start date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
+    parser.add_argument("--end-date", required=True, help="Simulation end date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     
     args = parser.parse_args()
     
-    run_physics_pipeline(
-        input_path=args.input_file,
-        out_dir=args.out_dir,
-        cache_dir=args.weather_cache,
-        start_date=args.start_date,
-        end_date=args.end_date
-    )
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        logger.error(f"Input path does not exist: {input_path}")
+        exit(1)
+        
+    if input_path.is_dir():
+        clean_files = list(input_path.glob("*_clean_si.parquet"))
+        if not clean_files:
+            logger.warning(f"No *_clean_si.parquet files found in directory: {input_path}")
+            exit(0)
+            
+        logger.info(f"Found {len(clean_files)} cleaned files in directory: {input_path}")
+        for clean_file in clean_files:
+            expected_out_name = clean_file.name.replace('_clean_si.parquet', '_simulated.parquet')
+            expected_out_path = Path(args.out_dir) / expected_out_name
+            if expected_out_path.exists():
+                logger.info(f"Simulation output file already exists: {expected_out_path}. Skipping.")
+                continue
+                
+            try:
+                run_physics_pipeline(
+                    input_path=str(clean_file),
+                    out_dir=args.out_dir,
+                    cache_dir=args.weather_cache,
+                    start_date=args.start_date,
+                    end_date=args.end_date
+                )
+            except Exception as e:
+                logger.error(f"Failed to simulate {clean_file.name}: {e}")
+    else:
+        run_physics_pipeline(
+            input_path=args.input_file,
+            out_dir=args.out_dir,
+            cache_dir=args.weather_cache,
+            start_date=args.start_date,
+            end_date=args.end_date
+        )
