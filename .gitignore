@@ -1,0 +1,28 @@
+# Large data directories and caches
+data/
+weather_cache/
+
+# Python compiler outputs and caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Runtime log files
+*.log
+cleaning.log
+simulation.log
+extraction.log
+
+# Local environment credentials
+.env
+.env.local
+
+# IDE and OS configurations
+.vscode/
+.idea/
+*.code-workspace
+desktop.ini
