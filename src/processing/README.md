@@ -8,7 +8,6 @@ This module represents the second step in the Flight Physics Pipeline. It is res
 src/processing/
 ├── README.md                      # This primary documentation
 ├── kalman_filter.py               # EKF filtering & resampling engine
-├── traffic_adapter.py             # Formatter: traffic.Flight -> pycontrails.Flight
 └── TRAFFIC_LIBRARY_EKF_ANALYSIS.md # Advanced EKF mathematical reference
 ```
 
@@ -87,7 +86,7 @@ During the EKF post-processing workflow:
 - **`x` and `y`** (`float64`): Standard geographic coordinates (`latitude` / `longitude`) are projected onto a 2D Cartesian plane using a Lambert Azimuthal Equal Area projection (`laea`) centered dynamically at the mean latitude/longitude of the flight. This allows the kinematic equations inside the Extended Kalman Filter (EKF) to work with flat Cartesian distances and speeds in meters/seconds, minimizing distortion.
 - **`track_unwrapped`** (`float64`): Standard heading values range between 0 and 360 degrees. If an aircraft flies close to North (crossing 359° to 0°), the EKF's state estimation will see a massive discontinuity. Unwrapping standardizes this track by making the angles continuous (e.g. crossing to 361° instead of resetting to 1°), which prevents the Kalman filter from breaking.
 
-**Filtering**: The `traffic_adapter.py` utility automatically prunes the EKF's mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating the final `pycontrails.Flight` objects, returning a clean dataframe conforming strictly to the physical variables expected by downstream physics simulations.
+**Filtering**: The shared adapter in `src/common/adapters.py` automatically prunes the EKF's mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating the final `pycontrails.Flight` objects, returning a clean dataframe conforming strictly to the physical variables expected by downstream physics simulations.
 
 ---
 
