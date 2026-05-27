@@ -19,6 +19,7 @@ MASTER_FLIGHT_PATHS_DIR = BASE_DIR / "data" / "master_flight_paths"
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = BASE_DIR / "data" / "trajectories"
 SIMULATION_PROFILES_DIR = BASE_DIR / "data" / "simulation_profiles"
+SYNTHESIZED_FLIGHT_PATHS_DIR = BASE_DIR / "data" / "synthesized_paths"
 RESULTS_DIR = BASE_DIR / "data" / "results"
 
 def get_dataset_dir(dataset_name: str) -> Path:
