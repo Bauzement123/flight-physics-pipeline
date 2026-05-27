@@ -1,62 +1,128 @@
-Loop 3b: Physics Simulation Module
+# Module 3: Physics & Cloned Simulation Component
 
-This module represents the final execution engine of the Flight Physics Pipeline. It mathematically bridges the geodetic flight paths with the atmospheric cache to compute real-world aircraft performance and contrail radiative forcing.
+This component handles the physical simulation of aircraft trajectories under the **CoCiP** (Contrail Cirrus Prediction) and **PSFlight** (Performance-based System Flight) models in `pycontrails`. It contains two primary entrypoints:
 
-Module Structure
+1. **Standard Simulation (`simulation.py`)**: Runs weather-canned physics evaluations on already-recorded and cleaned trajectories.
+2. **Batch Clone Simulation (`clone_simulation.py`)**: A fault-tolerant engine that takes a single synthesized corridor trajectory, clones it, shifts it to match real flight schedules in timezone-aware UTC, and batch-simulates them against ECMWF ERA5 weather grids.
 
+---
+
+## Component Directory Structure
+
+```text
 src/physics/
-├── simulation.py          # Runs the PSFlight and Cocip models sequentially
-└── README.md              # This file
+├── simulation.py          # Runs CoCiP and PSFlight models on standard clean trajectories
+├── clone_simulation.py    # Batch clones, shifts, and simulates synthesized corridor flights
+└── README.md              # This documentation
+```
 
+---
 
-## Workflow
-
-The simulation engine is designed as a functional executor. It does not download data.
-
-> [!NOTE]
-> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
+## Workflow & Architecture
 
 ```mermaid
 graph TD
-    A[data/trajectories/<dataset_name>/clean/<route>_clean_si.parquet] -->|Loaded by| B[simulation.py]
-    C[data/weather/*.nc] -->|Weather Cache| B
-    B -->|1. Parse flight_id groups| D[Grouped DataFrames]
-    D -->|2. Convert via traffic_adapter.py| E[pycontrails.Flight Objects]
-    E -->|3. Evaluate Aircraft Performance| F[PSFlight Model]
-    F -->|True Airspeed, Fuel Flow, Emissions| G[Contrail Modeling]
-    G -->|4. CoCiP Model| H[Contrail Cirrus Prediction]
-    H -->|Radiative Forcing & Persistence| I[Flatten Flight Data]
-    I -->|5. Save Results| J[data/results/<scenario>/<route>_simulated.parquet]
-    I -->|6. Update registry| K[global_simulation_registry.parquet]
+    A[Synthesized Base Path] -->|1. Load & Clone| B(clone_simulation.py)
+    C[data/flight_lists/<route>.parquet] -->|2. Resolve schedules| B
+    D[data/weather/*.nc] -->|3. ERA5 Cache| B
+    
+    B -->|4. Normalize to UTC| E[Time-Shift Trajectory]
+    E -->|5. Evaluate Performance| F[PSFlight Model]
+    F -->|True Airspeed, Fuel Flow, Emissions| G[CoCiP Model]
+    G -->|6. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
+    
+    H -->|7. Incremental Save| I[data/results/cloned_simulations/<route>_cloned_simulated/]
+    H -->|8. Update global registry| J[global_cloned_simulation_registry.parquet]
 ```
 
-1. **Hydration**: Uses the `traffic_adapter.py` utility to load flat `.parquet` data and structure it into dictionaries of `pycontrails.Flight` objects.
-2. **Aircraft Performance (PSFlight)**: Computes True Airspeed (TAS), fuel mass flow rates, and dynamic engine emissions indices (NOx, soot) based on the aircraft typecode and the ambient 3D ERA5 weather grids loaded from the cache.
-3. **Contrail Modeling (Cocip)**: Feeds the aerodynamically-enriched flights into the Contrail Cirrus Prediction model to evaluate the Schmidt-Appleman criterion, contrail persistence, and total Radiative Forcing (RF).
-4. **Serialization**: Re-flattens the enriched trajectory objects and exports a single, high-fidelity `_simulated.parquet` file to your output directory, then registers it in the cache index.
+### Key Architectural Designs
 
-Usage:
+#### 1. Fault-Tolerant, Resume-Ready Execution
+Batch simulation of corridors can process hundreds of flights, making it susceptible to interruption or crashes. 
+- The engine uses **incremental saving**: each simulated flight is saved to its own individual Parquet file immediately upon completion.
+- If run again, the script checks for the existence of `<flight_id>_simulated.parquet` and automatically **skips** already-simulated flights.
+- Completed runs are registered in `global_cloned_simulation_registry.parquet` to avoid directory scans for downstream analytics.
 
-# 1. Process a single clean file:
+#### 2. Timezone-Aware UTC Design
+To prevent timezone mismatch errors (e.g., `TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects`), the clone engine:
+- Normalizes all input schedules and baseline synthesized time-series coordinates to **timezone-aware UTC**.
+- Computes time-shift offsets as timezone-neutral `pd.Timedelta` objects.
+- Safely strips the timezone *only* during the final string formatting for ERA5 queries, ensuring the CoCiP model receives clean dates.
+
+#### 3. Shared Weather Optimization
+Loading weather data is highly resource-intensive. If the flight corridor batch spans a short temporal window (e.g., $\le$ 72 hours, such as in `--test-mode`), the script loads the ERA5 meteorological and radiative datasets **once** into memory and shares them across all flights in the batch, drastically reducing execution time.
+
+---
+
+## Usage Guide
+
+### 1. Standard Simulation
+
+Use `simulation.py` to evaluate individual cleaned trajectories.
+
+```powershell
+# Run simulation on a single cleaned trajectory file
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
     --out-dir "data/results/test_scenario" `
     --weather-cache "data/weather" `
     --age 48
 
-# 2. Process an entire directory of clean files:
+# Run simulation on an entire directory of cleaned trajectories
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean" `
     --out-dir "data/results/test_scenario" `
     --weather-cache "data/weather" `
     --age 48
+```
 
-**Parameters**:
-- `--input-file`: Path to cleaned SI trajectory Parquet file OR directory containing multiple cleaned Parquet files (scans for `*_clean_si.parquet`).
-- `--out-dir`: Output directory for simulated results.
-- `--weather-cache`: Directory containing ERA5 NetCDF cache files.
-- `--age` / `--max-age`: Maximum contrail simulation/advection age in hours (default: 48). This parameter is passed directly to the CoCiP model and is used to dynamically construct the temporal window bounds for the ERA5 weather datalib constructor.
+### 2. Cloned Batch Simulation
 
-Prerequisites
+Use `clone_simulation.py` to clone, shift, and batch-simulate synthetic flight paths.
 
-Your data/weather/ directory must be populated (Loop 3a) with ERA5 NetCDF weather data covering the temporal bounds of the trajectory.
+```powershell
+# Run standard corridor simulation for specific ranks (e.g., ranks 1 and 3)
+python -m src.physics.clone_simulation `
+    --ranks 1,3 `
+    --weather-cache "data/weather" `
+    --out-dir "data/results/cloned_simulations"
+
+# Run corridor simulation across a range of ranks (e.g., ranks 1 to 5 inclusive)
+python -m src.physics.clone_simulation `
+    --lower-rank 1 `
+    --upper-rank 5 `
+    --weather-cache "data/weather"
+
+# Offline Test Mode (verifies logic using cached January weather data)
+python -m src.physics.clone_simulation `
+    --ranks 3 `
+    --weather-cache "data/weather" `
+    --test-mode
+```
+
+---
+
+## Parameter Reference
+
+### `clone_simulation.py`
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--ranks` | `str` | *None* | Comma-separated list of route ranks to process (e.g., `"1,3"`). Mutually exclusive with `--lower-rank`. |
+| `--lower-rank` | `int` | *None* | Start of a corridor rank range to simulate. Requires `--upper-rank`. |
+| `--upper-rank` | `int` | *None* | End of a corridor rank range to simulate. Requires `--lower-rank`. |
+| `--weather-cache` | `str` | `data/weather` | Path to the NetCDF ERA5 weather files directory. |
+| `--out-dir` | `str` | `data/results/cloned_simulations` | Output directory for simulation results and logs. |
+| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
+| `--test-mode` | `flag` | *False* | Limit to the first 3 flights of each corridor, and override departure dates starting at `2025-01-01 00:00:00 UTC` spaced 2 hours apart. |
+
+> [!TIP]
+> **Test Mode Advantage**: `--test-mode` ensures the simulation runs against the local cached weather data (`2024-12-31` to `2025-01-10`), avoiding the need to fetch new ERA5 data from Copernicus API during verification.
+
+---
+
+## Prerequisites & Data Requirements
+
+- **Weather Cache**: The cache directory (specified by `--weather-cache`) must be populated with ERA5 pressure-level and surface variables covering the duration of the flight(s) plus the `--max-age` advection window.
+- **Flight Lists**: A Parquet flight list must exist under `data/flight_lists/<DEP>-<ARR>.parquet` for each route to resolve schedules.
+- **Synthesized Baseline**: The target route must have a synthesized trajectory pre-generated and registered in `data/flight_registry/global_synthesized_registry.parquet`.

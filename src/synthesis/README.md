@@ -60,7 +60,7 @@ graph TD
 ```
 
 1.  **Route Rank Resolution**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`) using the `master_flights_RouteSummary.pkl`.
-2.  **Registry Query**: The script queries `global_clean_registry.parquet` to locate all cleaned Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`).
+2.  **Registry Query**: The script queries `global_clean_registry.parquet` to locate all cleaned Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`). If the clean registry contains no entries for the route corridor, it automatically falls back to the raw trajectory manifest (`global_trajectory_registry.parquet`).
 3.  **Spatial Standardization**: For each flight in the cohort, the cumulative distance is calculated and normalized from `0.0` (Departure) to `1.0` (Arrival) across 1,000 spatial checkpoints. Coordinates (`latitude`, `longitude`, `altitude`) and elapsed time are linearly interpolated onto this grid.
 4.  **Aggregation & Noise Filtering**: 
     *   `latitude` & `longitude` use the median value to filter out weather deviations and runway alignment noise.
@@ -68,6 +68,7 @@ graph TD
 5.  **Climb & Descent Linearization**: Coordinates between departure and Top of Climb (TOC) and coordinates after Top of Descent (TOD) are overwritten with straight 3D lines (`np.linspace`) to provide a clean average climb/descent baseline.
 6.  **Baseline Temporal Resampling**: The spatial trajectory is resampled onto a uniform temporal grid (e.g. 60s steps) starting at a fixed baseline datetime (**`2025-01-01 00:00:00 UTC`**). This baseline is used by downstream scripts to shift time coordinates to match any target flight's actual departure time.
 7.  **Export and Registration**: The final trajectory is converted to a `pycontrails.Flight` object, saved to `data/synthesized_paths/`, and registered in `global_synthesized_registry.parquet`.
+    *   *Velocity and Vertical Rate Derivation*: The raw speed (`velocity` / `groundspeed`) and vertical rate (`vertrate` / `vertical_rate`) columns are deliberately ignored during coordinate-level aggregation. Instead, when the clean synthesized coordinate DataFrame is loaded into PyContrails, ground speed (`gs`) and rate of climb/descent (`rocd`) are dynamically derived directly from the resampled 4D coordinates. This ensures that the velocity vectors are physically consistent with the synthesized path.
 
 ---
 

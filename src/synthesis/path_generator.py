@@ -1,6 +1,6 @@
 """
 Module 2.3: Synthesized Trajectory Generator
-Aggregates a cohort of cleaned EKF trajectories for a given route rank
+Aggregates a cohort of cleaned or raw trajectories for a given route rank
 into a single idealized 'synthesized' route, mapped onto a uniform temporal grid
 starting at a fixed baseline date (2025-01-01 00:00:00 UTC).
 """
@@ -59,6 +59,64 @@ def update_synthesized_registry(registry_file: Path, route: str, rank: int, file
     df_updated.to_parquet(registry_file, index=False)
     logger.info(f"Updated global synthesized registry {registry_file.name} for route {route}.")
 
+def read_flights_from_parquet_custom(parquet_path: str, use_raw: bool = False) -> dict:
+    """
+    Reads a Parquet file, optionally normalizes raw OpenSky column schemas to PyContrails standard coordinates,
+    groups by flight_id, and returns a dictionary of flight_id -> pycontrails.Flight.
+    """
+    df = pd.read_parquet(parquet_path)
+    
+    if use_raw:
+        # Map raw column names to PyContrails standards
+        rename_raw = {
+            'lat': 'latitude',
+            'lon': 'longitude',
+            'baroaltitude': 'altitude'
+        }
+        df = df.rename(columns=rename_raw)
+        
+        # Ensure time column is parsed to datetime
+        if 'time' in df.columns:
+            if pd.api.types.is_numeric_dtype(df['time']):
+                df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+            else:
+                df['time'] = pd.to_datetime(df['time'])
+        elif 'timestamp' in df.columns:
+            if pd.api.types.is_numeric_dtype(df['timestamp']):
+                df['time'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
+            else:
+                df['time'] = pd.to_datetime(df['timestamp'])
+                
+        # Drop ground-level waypoints
+        if 'onground' in df.columns:
+            df = df[df['onground'] == False]
+
+        # Drop rows with NaN in critical columns
+        df = df.dropna(subset=['latitude', 'longitude', 'altitude', 'time'])
+            
+    flights = {}
+    for flight_id, group_df in df.groupby('flight_id'):
+        group_df = group_df.drop_duplicates(subset=['time'])
+        if group_df.empty or len(group_df) < 5:
+            continue
+            
+        typecode = group_df['typecode'].iloc[0] if 'typecode' in group_df.columns else 'B738'
+        
+        attrs = {
+            "flight_id": flight_id,
+            "aircraft_type": typecode,
+            "icao24": group_df['icao24'].iloc[0] if 'icao24' in group_df.columns else 'UNK',
+            "callsign": group_df['callsign'].iloc[0] if 'callsign' in group_df.columns else 'UNK',
+        }
+        
+        try:
+            fl = Flight(data=group_df, drop_duplicated_times=True, crs="EPSG:4326", **attrs)
+            flights[flight_id] = fl
+        except Exception as e:
+            logger.debug(f"Failed to create flight {flight_id} from raw data: {e}")
+            
+    return flights
+
 # --- 2. Main Processing Pipeline ---
 
 def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60) -> str:
@@ -82,24 +140,38 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
     
-    # 2. Query global_clean_registry.parquet to find trajectory files
+    # 2. Query registries to find trajectory files
     clean_registry_file = FLIGHT_REGISTRY_DIR / "global_clean_registry.parquet"
-    if not clean_registry_file.exists():
-        logger.error(f"Global clean registry does not exist at: {clean_registry_file}. Run EKF processing first.")
-        return None
-        
-    df_clean_reg = pd.read_parquet(clean_registry_file)
+    raw_registry_file = FLIGHT_REGISTRY_DIR / "global_trajectory_registry.parquet"
+    
+    df_reg = None
+    use_raw = False
     route_pattern = f"_{dep}-{arr}_"
     
-    # Find all matching flight entries in the registry
-    matching_flights = df_clean_reg[df_clean_reg['flight_id'].str.contains(route_pattern, na=False)]
-    if matching_flights.empty:
-        logger.error(f"No cleaned flights found in registry matching route pattern '{route_pattern}'.")
+    # Check clean registry first
+    if clean_registry_file.exists():
+        df_clean_reg = pd.read_parquet(clean_registry_file)
+        matching_flights = df_clean_reg[df_clean_reg['flight_id'].str.contains(route_pattern, na=False)]
+        if not matching_flights.empty:
+            df_reg = df_clean_reg
+            logger.info(f"Found cleaned flights in global_clean_registry.")
+            
+    # Fallback to raw registry
+    if df_reg is None and raw_registry_file.exists():
+        df_raw_reg = pd.read_parquet(raw_registry_file)
+        matching_flights = df_raw_reg[df_raw_reg['flight_id'].str.contains(route_pattern, na=False)]
+        if not matching_flights.empty:
+            df_reg = df_raw_reg
+            use_raw = True
+            logger.info(f"Clean registry has no entries for route. Falling back to global_trajectory_registry (raw).")
+            
+    if df_reg is None:
+        logger.error(f"No cleaned or raw flights found in registries matching route pattern '_{dep}-{arr}_'.")
         return None
         
-    # Retrieve unique clean trajectory Parquet files containing these flights
+    matching_flights = df_reg[df_reg['flight_id'].str.contains(route_pattern, na=False)]
     unique_file_paths = matching_flights['file_path'].unique()
-    logger.info(f"Found {len(matching_flights)} matching flights across {len(unique_file_paths)} clean parquet files.")
+    logger.info(f"Found {len(matching_flights)} matching flights across {len(unique_file_paths)} parquet files.")
     
     # 3. Load flights from Parquet files
     spatial_grid_size = 1000
@@ -114,19 +186,41 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             continue
             
         try:
-            flights_dict = read_flights_from_parquet(str(abs_path))
+            if use_raw:
+                flights_dict = read_flights_from_parquet_custom(str(abs_path), use_raw=True)
+            else:
+                flights_dict = read_flights_from_parquet(str(abs_path))
+                
             for flight_id, fl in flights_dict.items():
                 if route_pattern in flight_id:
+                    # Apply PyContrails gap filling and temporal 1-minute resampling
+                    try:
+                        fl = fl.resample_and_fill(freq="1min")
+                    except Exception as e:
+                        logger.warning(f"resample_and_fill failed for {flight_id}: {e}. Using raw spacing.")
+                        
                     df_fl = fl.to_dataframe()
                     df_fl = df_fl.sort_values('time').reset_index(drop=True)
                     df_fl['elapsed_time'] = (df_fl['time'] - df_fl['time'].iloc[0]).dt.total_seconds()
                     
                     typecode = fl.attrs.get('aircraft_type', 'B738')
-                    typecodes.append(typecode)
                     
                     lats = df_fl['latitude'].values
                     lons = df_fl['longitude'].values
                     alts = df_fl['altitude'].values
+                    times = df_fl['elapsed_time'].values
+                    
+                    # Drop any indices that contain NaN in latitude, longitude, altitude, or time
+                    valid_nan = ~(np.isnan(lats) | np.isnan(lons) | np.isnan(alts) | np.isnan(times))
+                    lats = lats[valid_nan]
+                    lons = lons[valid_nan]
+                    alts = alts[valid_nan]
+                    times = times[valid_nan]
+                    
+                    if len(lats) < 5:
+                        continue
+                        
+                    typecodes.append(typecode)
                     
                     dists = haversine_distance(lats[:-1], lons[:-1], lats[1:], lons[1:])
                     cum_dist = np.insert(np.cumsum(dists), 0, 0)
@@ -143,7 +237,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
                     interp_lat = interp1d(norm_cum_dist, lats[valid_idx], kind='linear')(normalized_distance_grid)
                     interp_lon = interp1d(norm_cum_dist, lons[valid_idx], kind='linear')(normalized_distance_grid)
                     interp_alt = interp1d(norm_cum_dist, alts[valid_idx], kind='linear')(normalized_distance_grid)
-                    interp_time = interp1d(norm_cum_dist, df_fl['elapsed_time'].values[valid_idx], kind='linear')(normalized_distance_grid)
+                    interp_time = interp1d(norm_cum_dist, times[valid_idx], kind='linear')(normalized_distance_grid)
                     
                     interpolated_flights.append({
                         'lat': interp_lat, 'lon': interp_lon, 'alt': interp_alt, 'time': interp_time
@@ -157,7 +251,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         
     # 4. Check if altitude reaches FL250 threshold
     max_alt_val = max(np.max(f['alt']) for f in interpolated_flights)
-    # EKF output in clean_si.parquet is strictly in meters.
+    # EKF/OpenSky output altitude is in meters.
     min_threshold_m = 25000 / 3.28084
     
     if max_alt_val < min_threshold_m:
