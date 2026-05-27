@@ -56,6 +56,19 @@ def clean_trajectories(input_file: str, out_dir: str):
     df['altitude'] = df['altitude'] * 3.28084             # meters to feet
     df['vertical_rate'] = df['vertical_rate'] * 196.8504  # m/s to ft/min
     
+    # Load clean EKF registry to support flight-level cache hits
+    from src.common.config import FLIGHT_REGISTRY_DIR, BASE_DIR
+    clean_registry_file = FLIGHT_REGISTRY_DIR / "global_clean_registry.parquet"
+    cached_clean_flights = {}
+    if clean_registry_file.exists():
+        try:
+            df_reg = pd.read_parquet(clean_registry_file)
+            if not df_reg.empty and 'flight_id' in df_reg.columns and 'file_path' in df_reg.columns:
+                cached_clean_flights = dict(zip(df_reg['flight_id'], df_reg['file_path']))
+                logging.info(f"Loaded clean registry index containing {len(cached_clean_flights):,} cleaned flights.")
+        except Exception as e:
+            logging.warning(f"Could not load clean registry index: {e}")
+
     t = Traffic(df)
     pc_flights = []
     
@@ -66,6 +79,27 @@ def clean_trajectories(input_file: str, out_dir: str):
     logging.info(f"EKF initialized with smooth=True (RTS backward pass enabled)")
     
     for flight in t:
+        # Check if flight has already been cleaned and is in the cache
+        flight_id = flight.data['flight_id'].iloc[0] if 'flight_id' in flight.data.columns else None
+        
+        if flight_id and flight_id in cached_clean_flights:
+            cached_file_path = BASE_DIR / cached_clean_flights[flight_id]
+            if cached_file_path.exists():
+                try:
+                    df_cached = pd.read_parquet(cached_file_path)
+                    df_flight_cached = df_cached[df_cached['flight_id'] == flight_id].copy()
+                    if not df_flight_cached.empty:
+                        pc_flight = dataframe_to_pycontrails(df_flight_cached)
+                        if pc_flight:
+                            pc_flights.append(pc_flight)
+                            msg = f"Flight {flight.callsign}: Cache Hit (loaded from EKF clean cache)"
+                            logging.info(msg)
+                            with open(cleaning_log_path, "a") as log_f:
+                                log_f.write(f"[{pd.Timestamp.now()}] {msg}\n")
+                            continue
+                except Exception as e:
+                    logging.warning(f"Failed to load cached flight {flight.callsign} from {cached_clean_flights[flight_id]}: {e}. Falling back to EKF smoothing.")
+
         # Check typecode before cleaning
         typecode = flight.data['typecode'].iloc[0] if 'typecode' in flight.data.columns else None
         if not typecode or typecode == "UNKNOWN" or pd.isna(typecode):

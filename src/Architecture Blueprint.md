@@ -123,12 +123,15 @@ Acquires raw ADS-B telemetry coordinates (state vectors) for flight cohorts.
 Applies the Extended Kalman Filter (EKF) to clean ground noise, smooth out GPS anomalies, and resample coordinates.
 - **Command**: `python -m src.processing.kalman_filter --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"`
 - **Workflow**:
-  1. Projects coordinates from degrees to a local flat Cartesian plane (LAEA) centered dynamically at the mean position of each individual flight, adding columns `x` and `y`.
-  2. Unwraps track/heading angles to a continuous representation (`track_unwrapped`).
-  3. Applies EKF backwards smoothing (RTS backward pass).
-  4. Resamples coordinates to a uniform 1-minute frequency.
-  5. Drops intermediate mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating `pycontrails.Flight` objects.
-  6. Saves cleaned coordinates as `clean/{DEP}-{ARR}_{cohort_hash}_clean_si.parquet` (by default saving in the sibling `clean/` subdirectory).
+  1. **Pre-Execution File Check**: Checks if the target `*_clean_si.parquet` file already exists on disk. If yes, it skips the entire raw file batch.
+  2. **Flight-Level Cache Check**: For each flight in the raw dataset, the loop checks the clean manifest (`global_clean_registry.parquet`) for a matching `flight_id`. If a cache hit is detected and the clean file exists, the cleaned coordinates are loaded directly from disk, bypassing EKF calculations.
+  3. **Airborne Extraction**: Extracts airborne waypoints and filters out tracks with fewer than 10 points.
+  4. **Spatial Projection**: Projects coordinates from degrees to a local flat Cartesian plane (LAEA) centered dynamically at the mean position of each individual flight, adding columns `x` and `y`.
+  5. **Continuous track unwrapping**: Unwraps track/heading angles to a continuous representation (`track_unwrapped`).
+  6. **EKF smoothing**: Applies Extended Kalman Filter backwards smoothing (RTS backward pass).
+  7. **Grid resampling**: Resamples coordinates to a uniform 1-minute frequency.
+  8. **PyContrails Adaptation**: Drops intermediate EKF projection columns (`x`, `y`, `track_unwrapped`) and converts data to `pycontrails.Flight` objects.
+  9. **Export & Registration**: Saves cleaned coordinates as `clean/{DEP}-{ARR}_{cohort_hash}_clean_si.parquet` and registers the cleaned flights in the clean registry.
 
 ### Loop 4: Weather & Physical Simulation (Cocip)
 Downloads matching Copernicus weather files and runs PyContrails.
