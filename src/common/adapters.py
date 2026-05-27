@@ -112,7 +112,7 @@ def write_flights_to_parquet(flights: list, out_path: Path):
     if not flights:
         logger.warning("No flights provided to write.")
         return
- 
+
     dataframes = []
     for fl in flights:
         df_fl = fl.to_dataframe()
