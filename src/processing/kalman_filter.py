@@ -11,7 +11,7 @@ from pathlib import Path
 import warnings
 from traffic.core import Traffic, Flight
 from traffic.algorithms.filters.ekf import EKF
-from src.processing.traffic_adapter import dataframe_to_pycontrails
+from src.common.adapters import dataframe_to_pycontrails, write_flights_to_parquet
 from pyproj import CRS, Transformer, Geod
 
 # Threshold in meters (100 km). Gaps larger than this will use geodesic interpolation.
@@ -236,14 +236,8 @@ def clean_trajectories(input_file: str, out_dir: str):
 
     # 5. Save the adapted pycontrails objects
     if pc_flights:
-        # FIX: Use to_dataframe() to extract the pd.DataFrame from pycontrails.Flight objects
-        df_clean = pd.concat([f.to_dataframe() for f in pc_flights], ignore_index=True)
-        # Clear DataFrame attributes to prevent pyarrow JSON serialization errors with pandas Timestamp attributes
-        df_clean.attrs = {}
         out_path = out_dir_path / Path(input_file).name.replace('_raw.parquet', '_clean_si.parquet')
-        
-        df_clean.to_parquet(out_path, index=False)
-        logging.info(f"✓ Saved {len(df_clean):,} SI-converted waypoints to {out_path}")
+        write_flights_to_parquet(pc_flights, out_path)
         
         # Update Clean EKF Registry Cache Index
         from src.common.config import FLIGHT_REGISTRY_DIR, BASE_DIR
@@ -251,7 +245,7 @@ def clean_trajectories(input_file: str, out_dir: str):
         
         clean_registry_file = FLIGHT_REGISTRY_DIR / "global_clean_registry.parquet"
         rel_clean_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
-        new_entries = [{"flight_id": fid, "file_path": rel_clean_path} for fid in df_clean['flight_id'].unique()]
+        new_entries = [{"flight_id": fid, "file_path": rel_clean_path} for fid in [f.attrs['flight_id'] for f in pc_flights]]
         update_global_registry(clean_registry_file, new_entries)
     else:
         logging.warning("No flights successfully processed by EKF")

@@ -20,9 +20,9 @@ from pycontrails.models.ps_model import PSFlight
 from pycontrails.models.cocip import Cocip
 from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 
-# Ensure we can import the adapter from the processing module
+# Ensure we can import the adapter from the common module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.processing.traffic_adapter import extract_flights_from_parquet, dataframe_to_pycontrails
+from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     logger.info(f"Loading cleaned trajectories: {Path(input_path).name}")
     
     # Load Flight Groupings first to inspect time bounds
-    flights_dict = extract_flights_from_parquet(input_path)
+    flights_dict = read_flights_from_parquet(input_path)
     if not flights_dict:
         logger.error("No flights found in the input parquet file.")
         return
@@ -50,16 +50,13 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     # Dynamically compute weather temporal window based on flight bounds and max_age_hours
     min_time = None
     max_time = None
-    for flight_id, group_df in flights_dict.items():
-        for col in ['time', 'timestamp']:
-            if col in group_df.columns:
-                f_min = pd.to_datetime(group_df[col]).min()
-                f_max = pd.to_datetime(group_df[col]).max()
-                if min_time is None or f_min < min_time:
-                    min_time = f_min
-                if max_time is None or f_max > max_time:
-                    max_time = f_max
-                break
+    for flight_id, fl in flights_dict.items():
+        f_min = pd.to_datetime(fl['time']).min()
+        f_max = pd.to_datetime(fl['time']).max()
+        if min_time is None or f_min < min_time:
+            min_time = f_min
+        if max_time is None or f_max > max_time:
+            max_time = f_max
     
     if min_time is None or max_time is None:
         logger.error("Could not determine flight time bounds from coordinates.")
@@ -132,7 +129,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     cocip_model = Cocip(met=met, rad=rad, params=cocip_params, aircraft_performance=ps_model)
 
     # 3. Load Flight Groupings (already loaded at start of function)
-    simulated_dataframes = []
+    simulated_flights = []
     
     logger.info(f"Found {len(flights_dict)} flights to simulate.")
 
@@ -147,11 +144,11 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     
     ps_supported_types = list(ps_model.aircraft_engine_params.keys())
     
-    for flight_id, group_df in flights_dict.items():
+    for flight_id, fl in flights_dict.items():
         logger.info(f"Simulating {flight_id}...")
         
         # Get typecode dynamically from metadata or default to B738
-        typecode = group_df['typecode'].iloc[0] if 'typecode' in group_df.columns else "B738"
+        typecode = fl.attrs.get('aircraft_type', 'B738')
         
         # Validate typecode and resolve fallback mappings
         if typecode not in ps_supported_types:
@@ -163,28 +160,14 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
             logger.warning(f"Aircraft type '{typecode}' is not supported by PSFlight. Falling back to '{fallback}'.")
             log_messages.append(f"[{flight_id}] Warning: aircraft type '{typecode}' not supported. Falling back to '{fallback}'.")
             typecode = fallback
-            
-        # Adapt to pycontrails Flight
-        fl = dataframe_to_pycontrails(group_df, typecode)
-        if fl is None:
-            failure_count += 1
-            log_messages.append(f"[{flight_id}] Failed: Adapter returned None.")
-            continue
+            fl.attrs['aircraft_type'] = typecode
             
         try:
             # Evaluate aircraft performance and contrail modeling
             fl = ps_model.eval(fl)
             fl_out = cocip_model.eval(source=fl)
             
-            # Convert back to DataFrame
-            df_sim = fl_out.to_dataframe()
-            
-            # Reinject metadata attributes
-            for attr in ['flight_id', 'icao24', 'callsign', 'typecode', 'estdepartureairport', 'estarrivalairport', 'firstseen', 'lastseen']:
-                if attr in group_df.columns:
-                    df_sim[attr] = group_df[attr].iloc[0]
-                    
-            simulated_dataframes.append(df_sim)
+            simulated_flights.append(fl_out)
             success_count += 1
             log_messages.append(f"[{flight_id}] Success: Simulated successfully.")
         except Exception as e:
@@ -207,12 +190,10 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     logger.info(f"Simulation run complete. Status details written to {sim_log_path}")
 
     # 5. Save the simulated flight paths
-    if simulated_dataframes:
-        consolidated_df = pd.concat(simulated_dataframes, ignore_index=True)
+    if simulated_flights:
         out_name = Path(input_path).name.replace('_clean_si.parquet', '_simulated.parquet')
         out_path = Path(out_dir) / out_name
-        consolidated_df.to_parquet(out_path, index=False)
-        logger.info(f"✓ Saved {len(consolidated_df):,} simulated waypoints to {out_path}")
+        write_flights_to_parquet(simulated_flights, out_path)
         
         # Update simulation registry cache index
         from src.common.config import FLIGHT_REGISTRY_DIR, BASE_DIR
@@ -220,7 +201,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         
         sim_registry_file = FLIGHT_REGISTRY_DIR / "global_simulation_registry.parquet"
         rel_sim_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
-        new_entries = [{"flight_id": fid, "file_path": rel_sim_path} for fid in consolidated_df['flight_id'].unique()]
+        new_entries = [{"flight_id": fid, "file_path": rel_sim_path} for fid in [f.attrs['flight_id'] for f in simulated_flights]]
         update_global_registry(sim_registry_file, new_entries)
     else:
         logger.warning("No flights were successfully simulated.")

@@ -40,13 +40,13 @@ Usage:
 # 1. Process a single clean file:
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
-    --out-dir "data/results/test_scenario" `
+    --out-dir "data/results/test_scenario/" `
     --weather-cache "data/weather" `
     --age 48
 
 # 2. Process an entire directory of clean files:
 python -m src.physics.simulation `
-    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean" `
+    --input-file "data\trajectories\ranks_1-76_strat_fixed_val_1.0_seed_43_format_oneway_start_2025-01-02_end_2025-01-05_36d19e\clean" `
     --out-dir "data/results/test_scenario" `
     --weather-cache "data/weather" `
     --age 48

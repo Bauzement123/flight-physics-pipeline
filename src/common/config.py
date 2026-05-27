@@ -4,6 +4,12 @@ from pathlib import Path
 # Project root directory (resolved dynamically based on config.py location)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Fallback to Google Drive G: path if running in the C: drive agent sandbox
+if BASE_DIR.drive.upper() == 'C:':
+    G_DRIVE_DIR = Path("G:/Meine Ablage/UNI/SS26/PythonPipeline - Kopie")
+    if G_DRIVE_DIR.exists():
+        BASE_DIR = G_DRIVE_DIR
+
 # Static registries and global data directories
 FLIGHT_REGISTRY_DIR = BASE_DIR / "data" / "flight_registry"
 FLIGHT_LISTS_DIR = BASE_DIR / "data" / "flight_lists"

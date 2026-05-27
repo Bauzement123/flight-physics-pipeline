@@ -114,7 +114,7 @@ Orchestrates downloading trajectories for ranks corridors, automatically resolvi
 
 ```bash
 # Fetch 5 random A320 flights per corridor for rank 1 within a date range
-python -m src.fetching.fetcher_orchestrator --ranks "1" --strategy fixed --value 5 --seed 42 --start-date "2025-01-01T11:00:00" --end-date "2025-01-01T13:00:00" --typecode "A320"
+python -m src.fetching.fetcher_orchestrator --ranks "1, 76" --strategy fixed --value 1 --seed 43 --start-date "2025-01-02" --end-date "2025-01-05" --typecode "A320"
 ```
 
 **Parameters**:
