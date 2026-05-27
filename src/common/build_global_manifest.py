@@ -28,8 +28,19 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
         try:
             existing_df = pd.read_parquet(registry_file)
             if not existing_df.empty and 'file_path' in existing_df.columns:
-                indexed_files = set(existing_df['file_path'].unique())
-                logging.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+                # Verify that all files in the manifest still exist on disk
+                original_len = len(existing_df)
+                existing_df = existing_df[existing_df['file_path'].apply(lambda p: (BASE_DIR / p).exists())]
+                pruned_count = original_len - len(existing_df)
+                
+                if pruned_count > 0:
+                    logging.info(f"Pruned {pruned_count} stale entries from {registry_file.name} (associated files were deleted).")
+                
+                if not existing_df.empty:
+                    indexed_files = set(existing_df['file_path'].unique())
+                    logging.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+                else:
+                    existing_df = None
         except Exception as e:
             logging.warning(f"Could not load existing registry {registry_file.name} ({e}). Rebuilding from scratch.")
 

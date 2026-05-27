@@ -90,3 +90,18 @@ python -m src.processing.kalman_filter --input-file "data\trajectories\ranks_1-7
 **Parameters**:
 - `--input-file`: Path to the input raw trajectory parquet file OR a directory containing multiple raw parquet files.
 - `--out-dir`: Directory where the clean output Parquet file(s) will be written (defaults to a sibling `clean/` folder if parent is `raw/`, otherwise parent directory). If batch processing a directory, it checks for existing files in the resolved clean directory to skip reprocessing them.
+
+---
+
+## Caching & Pre-Execution Checks
+
+To prevent redundant EKF calculations and minimize write operations, the trajectory processing module implements file-level cache hit detection:
+
+1. **Pre-Execution File Check**:
+   * When `kalman_filter.py` runs (in either single-file or directory mode), it resolves the target path for the output `*_clean_si.parquet` file.
+   * If that file already exists on disk, EKF smoothing is bypassed entirely for that batch, printing: `Clean file already exists: <path>. Skipping.`
+
+2. **Manifest Registry Registration**:
+   * Upon successfully smoothing a batch of trajectories, the EKF engine extracts all unique `flight_id`s from the output dataset.
+   * It registers these identifiers along with their relative file path in the central manifest database at `data/flight_registry/global_clean_registry.parquet` using the `update_global_registry()` helper.
+   * This central index allows downstream physics simulations to verify in-memory if a cleaned flight path is available for modeling.
