@@ -9,7 +9,8 @@ This module represents the trajectory synthesis step in the Flight Physics Pipel
 ```text
 src/synthesis/
 ├── README.md                  # This documentation file
-└── path_generator.py          # Synthesized trajectory generator engine (refactored)
+├── path_generator.py          # Synthesized trajectory generator engine (refactored)
+└── synthesis_orchestrator.py  # Batch synthesis orchestrator with skip capability
 ```
 
 ---
@@ -111,6 +112,34 @@ python -m src.synthesis.path_generator `
 *   `--rank` (Required): The route rank in `master_flights_RouteSummary.pkl` to process.
 *   `--out-dir` (Optional): Directory where the synthesized Parquet file is saved (defaults to `data/synthesized_paths/`).
 *   `--grid-seconds` (Optional): The resampling temporal grid resolution in seconds (default: `60`).
+
+### 2. `synthesis_orchestrator.py` (Batch Synthesis Orchestrator)
+Orchestrates synthesized trajectory generation across multiple ranks (list or range), with built-in skip checks.
+
+#### Bash
+```bash
+# 1. Generate synthesized trajectories for a list of ranks (skips existing by default)
+python -m src.synthesis.synthesis_orchestrator --ranks "1,76,177"
+
+# 2. Generate synthesized trajectories for a range of ranks, forcing overwrite
+python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --overwrite
+```
+
+#### PowerShell
+```powershell
+# 1. Generate synthesized trajectories for a list of ranks (skips existing by default)
+python -m src.synthesis.synthesis_orchestrator --ranks "1,76,177"
+
+# 2. Generate synthesized trajectories for a range of ranks, forcing overwrite
+python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --overwrite
+```
+
+**Parameters**:
+*   `--ranks`: Comma-separated list of route ranks to process.
+*   `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to process.
+*   `--out-dir` (Optional): Output directory for synthesized trajectories (default: `data/synthesized_paths/`).
+*   `--grid-seconds` (Optional): Time grid resolution in seconds (default: `60`).
+*   `--overwrite`: If set, deletes existing synthesized parquets and forces recalculation.
 
 ---
 

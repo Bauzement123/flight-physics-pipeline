@@ -30,8 +30,13 @@ PythonPipeline/
 │   ├── weather/                        # Meteorology acquisition
 │   │   └── era5_manager.py             # Downloads & caches NetCDF files from Copernicus (ERA5)
 │   │
+│   ├── synthesis/                      # Trajectory synthesis
+│   │   ├── path_generator.py           # Synthesized trajectory generator engine (refactored)
+│   │   └── synthesis_orchestrator.py   # Batch synthesis orchestrator with skip capability
+│   │
 │   └── physics/                        # Environmental modeling
-│       └── simulation.py               # Runs PyContrails CoCiP simulation loop
+│       ├── simulation.py               # Runs PyContrails CoCiP simulation loop
+│       └── clone_simulation.py         # Batch clones, shifts, and simulates corridor flights
 │
 ├── data/                               # Data Directory
 │   ├── flight_registry/                # Global static master databases (flight catalogs)
@@ -134,6 +139,17 @@ Applies the Extended Kalman Filter (EKF) to clean ground noise, smooth out GPS a
   7. **Grid resampling**: Resamples coordinates to a uniform 1-minute frequency.
   8. **PyContrails Adaptation**: Drops intermediate EKF projection columns (`x`, `y`, `track_unwrapped`) and converts data to `pycontrails.Flight` objects.
   9. **Export & Registration**: Saves cleaned coordinates as `clean/{DEP}-{ARR}_{cohort_hash}_clean_si.parquet` and registers the cleaned flights in the clean registry.
+
+### Loop 3b: Reference Trajectory Synthesis (synthesis_orchestrator.py)
+Aggregates a cohort of clean historical flight trajectories for a route rank into a single typical synthesized baseline path.
+- **Command**: `python -m src.synthesis.synthesis_orchestrator --ranks 76`
+- **Workflow**:
+  1. Resolves ranks list and queries `global_trajectory_registry.parquet` for matching raw flights.
+  2. Applies OpenAP FlightPhase classifier to identify climb, cruise, and descent phases.
+  3. Corrects holding-pattern outliers by straightening climbs/descents to clean cohort medians.
+  4. Projects coordinates to local LAEA Cartesian grids and extracts the Dynamic Time Warping (DTW) spatial centroid.
+  5. Uniformly resamples the centroid trajectory, normalizes its timeline to the `2025-01-01 00:00:00 UTC` baseline, and saves it.
+  6. Registers the synthesized route inside `global_synthesized_registry.parquet`.
 
 ### Loop 4: Weather & Physical Simulation (Cocip)
 Downloads matching Copernicus weather files and runs PyContrails.
