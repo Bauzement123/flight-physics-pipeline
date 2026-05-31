@@ -53,6 +53,17 @@ def main():
             parser.error("--lower-rank cannot be greater than --upper-rank.")
         ranks_list = list(range(args.lower_rank, args.upper_rank + 1))
         
+    # Load synthesized registry once at startup to find existing ranks
+    registry_file = FLIGHT_REGISTRY_DIR / "registries" / "global_synthesized_registry.parquet"
+    existing_ranks = set()
+    if registry_file.exists():
+        try:
+            df_reg = pd.read_parquet(registry_file)
+            if 'rank' in df_reg.columns:
+                existing_ranks = set(df_reg['rank'].unique())
+        except Exception as e:
+            logger.warning(f"Could not load global synthesized registry at startup: {e}")
+
     logger.info(f"Targeting {len(ranks_list)} rank(s) for synthesized flight path generation.")
     
     # Load RouteSummary once
@@ -88,17 +99,25 @@ def main():
         out_file = out_dir_path / f"{dep}-{arr}_synthesized.parquet"
         
         # 2. Check skip or overwrite conditions
-        if out_file.exists():
+        if rank in existing_ranks:
             if not args.overwrite:
-                logger.info(f"Synthesized trajectory for rank {rank} ({dep}-{arr}) already exists at {out_file.name}. Skipping.")
+                logger.info(f"Synthesized trajectory for rank {rank} ({dep}-{arr}) already exists in registry. Skipping.")
                 skipped_count += 1
                 continue
             else:
-                logger.info(f"Overwrite flag is active. Deleting existing file: {out_file.name}")
-                try:
-                    out_file.unlink(missing_ok=True)
-                except Exception as del_err:
-                    logger.error(f"Failed to delete existing file {out_file.name}: {del_err}. Attempting generation anyway.")
+                logger.info(f"Overwrite flag is active. Regenerating rank {rank} ({dep}-{arr}).")
+                # Clean up existing files from disk for this rank/route
+                if registry_file.exists():
+                    try:
+                        df_reg = pd.read_parquet(registry_file)
+                        matched = df_reg[df_reg['rank'] == rank]
+                        for _, row in matched.iterrows():
+                            p = BASE_DIR / row['file_path']
+                            if p.exists():
+                                logger.info(f"Deleting old synthesized file: {p.name}")
+                                p.unlink(missing_ok=True)
+                    except Exception as clean_err:
+                        logger.warning(f"Failed to clean up old files for rank {rank}: {clean_err}")
                     
         # 3. Call synthesis engine
         try:

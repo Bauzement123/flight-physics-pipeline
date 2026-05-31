@@ -70,10 +70,17 @@ def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str = "UNKNOWN")
         attrs["firstseen"] = firstseen
     if pd.notna(lastseen):
         attrs["lastseen"] = lastseen
+    route_class = df_flight['route_class'].iloc[0] if 'route_class' in df_flight.columns else None
+    cluster_id = df_flight['cluster_id'].iloc[0] if 'cluster_id' in df_flight.columns else None
+
     if pd.notna(dep):
         attrs["estdepartureairport"] = dep
     if pd.notna(arr):
         attrs["estarrivalairport"] = arr
+    if pd.notna(route_class):
+        attrs["route_class"] = int(route_class)
+    if pd.notna(cluster_id):
+        attrs["cluster_id"] = int(cluster_id)
     
     # 3. Instantiate and return the Pycontrails Flight
     try:
@@ -123,9 +130,9 @@ def write_flights_to_parquet(flights: list, out_path: Path):
         df_fl['callsign'] = fl.attrs.get('callsign', 'UNK')
         df_fl['typecode'] = fl.attrs.get('aircraft_type', 'UNK')
         
-        for date_attr in ['firstseen', 'lastseen', 'estdepartureairport', 'estarrivalairport']:
-            if date_attr in fl.attrs:
-                df_fl[date_attr] = fl.attrs[date_attr]
+        for attr in ['firstseen', 'lastseen', 'estdepartureairport', 'estarrivalairport', 'route_class', 'cluster_id']:
+            if attr in fl.attrs:
+                df_fl[attr] = fl.attrs[attr]
                 
         dataframes.append(df_fl)
         

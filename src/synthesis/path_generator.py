@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 import pyproj
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 from pycontrails import Flight
 from traffic.core import Traffic, Flight as TrafficFlight
@@ -27,26 +29,37 @@ from src.common.adapters import (
     pycontrails_to_parquet
 )
 
+# Clustering Config
+MIN_FLIGHTS_FOR_CLUSTERING = 10
+SILHOUETTE_THRESHOLD = 0.35
+MAX_K = 4
+CHAOS_THRESHOLD = 200.0
+
 # Configure logging to match pipeline standards
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def update_synthesized_registry(registry_file: Path, route: str, rank: int, file_path: str):
+def update_synthesized_registry(registry_file: Path, route: str, rank: int, file_path: str, route_class: int, cluster_id: int):
     """
     Appends a new synthesized flight mapping to the global registry Parquet.
-    Deduplicates on route to ensure only one synthesized path per route.
+    Deduplicates on route and cluster_id.
     """
     new_entry = {
         "route": route,
         "rank": rank,
-        "file_path": file_path
+        "file_path": file_path,
+        "route_class": route_class,
+        "cluster_id": cluster_id
     }
     df_new = pd.DataFrame([new_entry])
     if registry_file.exists():
         try:
             df_reg = pd.read_parquet(registry_file)
-            df_updated = pd.concat([df_reg, df_new]).drop_duplicates(subset=['route'], keep='last')
+            for col in ["route_class", "cluster_id"]:
+                if col not in df_reg.columns:
+                    df_reg[col] = 1 if col == "route_class" else 0
+            df_updated = pd.concat([df_reg, df_new]).drop_duplicates(subset=['route', 'cluster_id'], keep='last')
         except Exception as e:
             logger.warning(f"Could not read existing synthesized registry, overwriting: {e}")
             df_updated = df_new
@@ -55,7 +68,122 @@ def update_synthesized_registry(registry_file: Path, route: str, rank: int, file
     
     registry_file.parent.mkdir(parents=True, exist_ok=True)
     df_updated.to_parquet(registry_file, index=False)
-    logger.info(f"Updated global synthesized registry {registry_file.name} for route {route}.")
+    logger.info(f"Updated global synthesized registry {registry_file.name} for route {route} cluster {cluster_id} (Class {route_class}).")
+
+
+def update_flight_cluster_map(registry_file: Path, flight_mappings: list[dict]):
+    """
+    Appends flight_id to cluster_id mappings to a global registry.
+    """
+    if not flight_mappings:
+        return
+    df_new = pd.DataFrame(flight_mappings)
+    if registry_file.exists():
+        try:
+            df_reg = pd.read_parquet(registry_file)
+            df_updated = pd.concat([df_reg, df_new]).drop_duplicates(subset=['flight_id'], keep='last')
+        except Exception as e:
+            logger.warning(f"Could not read flight cluster map, overwriting: {e}")
+            df_updated = df_new
+    else:
+        df_updated = df_new
+        
+    registry_file.parent.mkdir(parents=True, exist_ok=True)
+    df_updated.to_parquet(registry_file, index=False)
+    logger.info(f"Updated flight cluster map with {len(flight_mappings)} entries.")
+
+
+def classify_and_cluster_cohort(resampled_traffic_collection):
+    """
+    Classifies a cohort of spatially resampled trajectories into 1 of 4 route classes:
+    Class 1: Single Track
+    Class 2: Binary Split
+    Class 3: Multi-Track
+    Class 4: Chaos (high spatial variance without distinct clusters)
+    
+    Returns:
+        route_class (int): 1, 2, 3, or 4
+        best_k (int): Number of optimal clusters (1 to 4)
+        sub_cohorts (dict): Map of cluster_id (int) -> list of TrafficFlight objects
+    """
+    n_flights = len(resampled_traffic_collection)
+    
+    # 1. Fallback for low sample size
+    if n_flights < MIN_FLIGHTS_FOR_CLUSTERING:
+        logger.info(f"Cohort size {n_flights} < {MIN_FLIGHTS_FOR_CLUSTERING}. Skipping clustering (Class 1, k=1).")
+        return 1, 1, {0: list(resampled_traffic_collection)}
+    
+    # 2. Extract and Flatten Features (resampled to exactly 100 points per flight to align features)
+    features = []
+    for flight in resampled_traffic_collection:
+        try:
+            resampled_flight = flight.resample(100)
+            lats = resampled_flight.data['latitude'].values
+            lons = resampled_flight.data['longitude'].values
+            
+            if len(lats) != 100 or len(lons) != 100:
+                lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
+                lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
+                
+            features.append(np.concatenate([lats, lons]))
+        except Exception as e:
+            logger.warning(f"Failed to resample flight {flight.callsign or flight.flight_id} for clustering features: {e}")
+            lats = flight.data['latitude'].values
+            lons = flight.data['longitude'].values
+            lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
+            lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
+            features.append(np.concatenate([lats, lons]))
+            
+    X = np.array(features)
+    
+    # Calculate total variance of coordinates across all flights
+    total_variance = np.var(X, axis=0).sum()
+    
+    # 3. K-Means Silhouette Loop
+    best_k = 1
+    best_score = -1
+    best_labels = np.zeros(n_flights, dtype=int)
+    
+    max_k_possible = min(MAX_K, n_flights - 1)
+    
+    if max_k_possible >= 2:
+        for k in range(2, max_k_possible + 1):
+            try:
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+                labels = kmeans.fit_predict(X)
+                score = silhouette_score(X, labels)
+                
+                logger.info(f"K-Means k={k} Silhouette score: {score:.4f}")
+                
+                if score > best_score and score >= SILHOUETTE_THRESHOLD:
+                    best_k = k
+                    best_score = score
+                    best_labels = labels
+            except Exception as e:
+                logger.warning(f"Error running KMeans for k={k}: {e}")
+                
+    # 4. Determine Class
+    if best_k == 1:
+        if total_variance > CHAOS_THRESHOLD:
+            route_class = 4  # Chaos
+            logger.info(f"Classified as Class 4 (Chaos) with total variance {total_variance:.2f} > {CHAOS_THRESHOLD}")
+        else:
+            route_class = 1  # Single Baseline
+            logger.info(f"Classified as Class 1 (Single Baseline) with total variance {total_variance:.2f}")
+    elif best_k == 2:
+        route_class = 2  # Binary Split
+        logger.info(f"Classified as Class 2 (Binary Split) with score {best_score:.4f}")
+    else:
+        route_class = 3  # Multi-Track
+        logger.info(f"Classified as Class {route_class} (Multi-Track) with k={best_k} and score {best_score:.4f}")
+        
+    sub_cohorts = {}
+    for i, label in enumerate(best_labels):
+        if label not in sub_cohorts:
+            sub_cohorts[label] = []
+        sub_cohorts[label].append(resampled_traffic_collection[i])
+        
+    return route_class, best_k, sub_cohorts
 
 
 def find_toc_tod(flight: TrafficFlight, labels: list) -> tuple:
@@ -92,12 +220,7 @@ def find_toc_tod(flight: TrafficFlight, labels: list) -> tuple:
     return toc_idx, tod_idx
 
 
-def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60) -> str:
-    out_path = Path(output_parquet)
-    if out_path.exists():
-        logger.info(f"Synthesized trajectory already exists at {out_path.name}. Skipping computation.")
-        return str(out_path)
-
+def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60) -> list:
     # 1. Resolve Rank to Route
     logger.info(f"Resolving rank {rank} to route...")
     df_summary = load_route_summary()
@@ -117,6 +240,18 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         return None
         
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
+    
+    # Registry-based Skip check
+    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
+    if synthesized_registry_file.exists():
+        try:
+            df_reg = pd.read_parquet(synthesized_registry_file)
+            if rank in df_reg['rank'].values:
+                logger.info(f"Synthesized trajectory for rank {rank} already exists in registry. Skipping computation.")
+                matched_paths = df_reg[df_reg['rank'] == rank]['file_path'].tolist()
+                return [str(BASE_DIR / p) for p in matched_paths]
+        except Exception as e:
+            logger.warning(f"Could not check synthesized registry skip: {e}")
     
     # 2. Query registry to find raw flight files
     raw_registry_file = REGISTRIES_DIR / "global_trajectory_registry.parquet"
@@ -146,15 +281,11 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             continue
             
         try:
-            # Parse raw file to pycontrails flight objects dict
             flights_dict = parquet_to_pycontrails(str(abs_path))
             
             for flight_id, fl in flights_dict.items():
                 if route_pattern in flight_id:
-                    # Convert to traffic flight
                     trf_flight = pycontrails_to_traffic(fl)
-                    
-                    # Strip ground segments
                     airborne_flight = trf_flight.airborne()
                     if airborne_flight is not None and len(airborne_flight) >= 10:
                         raw_flights.append(airborne_flight)
@@ -175,18 +306,16 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         try:
             df = flight.data
             ts = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds().values
-            alt = df['altitude'].values  # in feet
-            spd = df['groundspeed'].values  # in knots
-            roc = df['vertical_rate'].values  # in feet/min
+            alt = df['altitude'].values
+            spd = df['groundspeed'].values
+            roc = df['vertical_rate'].values
             
-            # Apply OpenAP FlightPhase classifier
             fp = FlightPhase()
             fp.set_trajectory(ts, alt, spd, roc)
             labels = fp.phaselabel()
             
             toc_idx, tod_idx = find_toc_tod(flight, labels)
             
-            # Calculate average ROCD values (feet / minute)
             climb_dur_min = (ts[toc_idx] - ts[0]) / 60.0
             climb_rocd = (alt[toc_idx] - alt[0]) / climb_dur_min if climb_dur_min > 0 else 0.0
             
@@ -202,7 +331,6 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             })
         except Exception as e:
             logger.warning(f"Failed phase identification on flight {idx}: {e}")
-            # Fallback metric entry using heuristical TOC/TOD
             df = flight.data
             toc_idx = int(len(df) * 0.2)
             tod_idx = int(len(df) * 0.8)
@@ -215,13 +343,11 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             })
             
     # 5. Classify cohort into clean flights vs holding-pattern outliers
-    # Standard baseline thresholds for direct climb/descent profiles
-    min_descent_rate = 1200.0  # ft/min (1.2k)
-    min_climb_rate = 1800.0    # ft/min (1.8k)
+    min_descent_rate = 1200.0
+    min_climb_rate = 1800.0
     
     clean_metrics = [m for m in flight_metrics if m['descent_rocd'] >= min_descent_rate and m['climb_rocd'] >= min_climb_rate]
     
-    # Fallback: if less than 30% of the flights meet standard, take top 60% by descent rate
     if len(clean_metrics) < max(1, len(flight_metrics) * 0.3):
         threshold_count = max(1, int(len(flight_metrics) * 0.6))
         sorted_by_descent = sorted(flight_metrics, key=lambda x: x['descent_rocd'], reverse=True)
@@ -231,7 +357,6 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     median_clean_climb_rocd = np.median([m['climb_rocd'] for m in clean_metrics])
     median_clean_descent_rocd = np.median([m['descent_rocd'] for m in clean_metrics])
     
-    # Fallback to defaults if stats are non-physical
     if pd.isna(median_clean_climb_rocd) or median_clean_climb_rocd < 500:
         median_clean_climb_rocd = 1800.0
     if pd.isna(median_clean_descent_rocd) or median_clean_descent_rocd < 500:
@@ -239,19 +364,18 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         
     logger.info(f"Baseline clean rates calculated: Climb={median_clean_climb_rocd:.1f} ft/min, Descent={median_clean_descent_rocd:.1f} ft/min")
     
-    # 6. Apply Hybrid Normalization to holding-pattern flights (outliers)
+    # 6. Apply Hybrid Normalization to holding-pattern flights
     normalized_flights = []
     clean_flight_ids = {m['flight'].callsign for m in clean_metrics}
     
     for metric in flight_metrics:
         flight = metric['flight']
         
-        # If flight belongs to the clean cohort, keep its original trajectory intact
         if flight.callsign in clean_flight_ids:
             normalized_flights.append(flight)
             continue
             
-        logger.info(f"Normalizing holding-pattern flight {flight.callsign} (Climb ROCD={metric['climb_rocd']:.1f}, Descent ROCD={metric['descent_rocd']:.1f})...")
+        logger.info(f"Normalizing holding-pattern flight {flight.callsign}...")
         
         df_new = flight.data.copy()
         times = (df_new['timestamp'] - df_new['timestamp'].iloc[0]).dt.total_seconds().values
@@ -262,38 +386,31 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         toc_idx = metric['toc_idx']
         tod_idx = metric['tod_idx']
         
-        # Correct climb segment if below threshold
         if metric['climb_rocd'] < min_climb_rate:
             alt_diff_climb = altitudes[toc_idx] - altitudes[0]
             new_climb_duration = (alt_diff_climb / median_clean_climb_rocd) * 60.0
             old_climb_duration = times[toc_idx] - times[0]
             time_shift_climb = new_climb_duration - old_climb_duration
             
-            # Linearize spatial climb segment
             climb_len = toc_idx + 1
             latitudes[:climb_len] = np.linspace(latitudes[0], latitudes[toc_idx], climb_len)
             longitudes[:climb_len] = np.linspace(longitudes[0], longitudes[toc_idx], climb_len)
             altitudes[:climb_len] = np.linspace(altitudes[0], altitudes[toc_idx], climb_len)
             
-            # Re-distribute elapsed time linearly and shift subsequent timeline
             times[:climb_len] = np.linspace(times[0], times[0] + new_climb_duration, climb_len)
             times[climb_len:] = times[climb_len:] + time_shift_climb
             
-        # Correct descent segment if below threshold
         if metric['descent_rocd'] < min_descent_rate:
             alt_diff_descent = altitudes[tod_idx] - altitudes[-1]
             new_descent_duration = (alt_diff_descent / median_clean_descent_rocd) * 60.0
             
-            # Linearize spatial descent segment
             descent_len = len(df_new) - tod_idx
             latitudes[tod_idx:] = np.linspace(latitudes[tod_idx], latitudes[-1], descent_len)
             longitudes[tod_idx:] = np.linspace(longitudes[tod_idx], longitudes[-1], descent_len)
             altitudes[tod_idx:] = np.linspace(altitudes[tod_idx], altitudes[-1], descent_len)
             
-            # Re-distribute elapsed time linearly
             times[tod_idx:] = np.linspace(times[tod_idx], times[tod_idx] + new_descent_duration, descent_len)
             
-        # Update DataFrame fields
         df_new['latitude'] = latitudes
         df_new['longitude'] = longitudes
         df_new['altitude'] = altitudes
@@ -312,81 +429,134 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     logger.info(f"Oversampling spatial grid: nb_samples={nb_samples} (spacing={min_sample_spacing_seconds:.1f}s)")
     resampled_traffic = traffic_cohort.resample(nb_samples).eval()
     
-    # Set up dynamic local LAEA projection centered on cohort mean
-    all_dfs = pd.concat([f.data for f in resampled_traffic])
-    mean_lat = all_dfs['latitude'].mean()
-    mean_lon = all_dfs['longitude'].mean()
+    # Route Sameness Classification & Clustering (Sub-objective 3.5)
+    route_class, optimal_k, sub_cohorts = classify_and_cluster_cohort(resampled_traffic)
     
-    proj4_str = f"+proj=laea +lat_0={mean_lat} +lon_0={mean_lon} +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
-    projection = pyproj.Proj(proj4_str)
+    final_output_paths = []
+    flight_mappings = []
     
-    # 8. Compute the spatial centroid
-    logger.info("Computing spatial track centroid using DTW...")
-    centroid_flight = resampled_traffic.centroid(nb_samples=nb_samples, projection=projection)
+    # Setup base output path details
+    base_out_path = Path(output_parquet)
+    filename = base_out_path.name
+    if filename.endswith("_synthesized.parquet"):
+        stem = filename[:-20]
+    elif filename.endswith(".parquet"):
+        stem = filename.replace(".parquet", "").replace("_synthesized", "")
+    else:
+        stem = f"{dep}-{arr}"
+    out_dir = base_out_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
     
-    # 9. Snap Centroid to PyContrails grid
-    centroid_df = centroid_flight.data.copy()
-    
-    # Convert Units back to SI from standard aviation units
-    rename_si = {
-        'timestamp': 'time',
-        'track': 'heading',
-        'groundspeed': 'gs',
-        'vertical_rate': 'rocd'
-    }
-    centroid_df = centroid_df.rename(columns=rename_si)
-    
-    centroid_df['altitude'] = centroid_df['altitude'] / 3.28084             # feet to meters
-    if 'gs' in centroid_df.columns:
-        centroid_df['gs'] = centroid_df['gs'] / 1.9438447                   # knots to m/s
-    if 'rocd' in centroid_df.columns:
-        centroid_df['rocd'] = centroid_df['rocd'] / 196.8504                # ft/min to m/s
-        
-    # Re-verify that altitudes reach contrail relevant levels (FL250 threshold)
-    max_alt_m = centroid_df['altitude'].max()
-    min_threshold_m = 25000.0 / 3.28084
-    if max_alt_m < min_threshold_m:
-        logger.warning(f"Synthesis aborted: Synthesized cruise altitude {max_alt_m*3.28084:.0f} ft is below FL250.")
-        return None
-        
-    # Find most common typecode to use as representative type
     representative_typecode = Counter(typecodes).most_common(1)[0][0] if typecodes else "B738"
     
-    # Build Flight object attributes
-    attrs = {
-        "flight_id": f"{dep}-{arr}_synthesized",
-        "aircraft_type": representative_typecode,
-        "icao24": "SYNTH",
-        "callsign": "SYNTH"
-    }
+    # Process each cluster
+    for cluster_id, flights_list in sub_cohorts.items():
+        logger.info(f"Processing cluster {cluster_id} with {len(flights_list)} flights...")
+        
+        # Convert flights list back to a Traffic collection
+        sub_collection_df = pd.concat([f.data for f in flights_list], ignore_index=True)
+        sub_collection = Traffic(sub_collection_df)
+        
+        # Projection centered on this sub-cohort's mean coordinates
+        all_sub_dfs = sub_collection.data
+        mean_lat = all_sub_dfs['latitude'].mean()
+        mean_lon = all_sub_dfs['longitude'].mean()
+        
+        proj4_str = f"+proj=laea +lat_0={mean_lat} +lon_0={mean_lon} +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+        projection = pyproj.Proj(proj4_str)
+        
+        # Compute DTW spatial centroid (Sub-objective 4)
+        logger.info(f"Computing spatial track centroid for cluster {cluster_id} using DTW...")
+        centroid_flight = sub_collection.centroid(nb_samples=nb_samples, projection=projection)
+        
+        centroid_df = centroid_flight.data.copy()
+        
+        # Snap Centroid to PyContrails grid & convert to SI
+        rename_si = {
+            'timestamp': 'time',
+            'track': 'heading',
+            'groundspeed': 'gs',
+            'vertical_rate': 'rocd'
+        }
+        centroid_df = centroid_df.rename(columns=rename_si)
+        
+        centroid_df['altitude'] = centroid_df['altitude'] / 3.28084
+        if 'gs' in centroid_df.columns:
+            centroid_df['gs'] = centroid_df['gs'] / 1.9438447
+        if 'rocd' in centroid_df.columns:
+            centroid_df['rocd'] = centroid_df['rocd'] / 196.8504
+            
+        # Re-verify altitude threshold (FL250) (Sub-objective 5)
+        max_alt_m = centroid_df['altitude'].max()
+        min_threshold_m = 25000.0 / 3.28084
+        if max_alt_m < min_threshold_m:
+            logger.warning(f"Cluster {cluster_id} synthesis aborted: Synthesized cruise altitude {max_alt_m*3.28084:.0f} ft is below FL250.")
+            continue
+            
+        # Inject metadata columns
+        centroid_df['route_class'] = route_class
+        centroid_df['cluster_id'] = cluster_id
+        
+        # Build Flight attributes
+        attrs = {
+            "flight_id": f"{dep}-{arr}_synthesized_c{cluster_id}",
+            "aircraft_type": representative_typecode,
+            "icao24": "SYNTH",
+            "callsign": "SYNTH",
+            "route_class": route_class,
+            "cluster_id": cluster_id
+        }
+        
+        pyc_centroid = Flight(data=centroid_df, crs="EPSG:4326", drop_duplicated_times=True, **attrs)
+        
+        # Uniform temporal interpolation
+        logger.info(f"Resampling synthesized trajectory to uniform {time_grid_seconds}s grid...")
+        synthesized_flight = pyc_centroid.resample_and_fill(freq=f"{time_grid_seconds}s")
+        
+        # Timeline normalization (Sub-objective 6)
+        df_final = synthesized_flight.to_dataframe()
+        delta_time = df_final['time'] - df_final['time'].min()
+        df_final['time'] = pd.Timestamp("2025-01-01 00:00:00", tz="UTC") + delta_time
+        
+        # Re-inject metadata in final df
+        df_final['route_class'] = route_class
+        df_final['cluster_id'] = cluster_id
+        
+        final_flight = Flight(data=df_final, crs="EPSG:4326", **attrs)
+        
+        out_path = out_dir / f"{stem}_synthesized_c{cluster_id}.parquet"
+        
+        # Save Parquet
+        pycontrails_to_parquet(final_flight, out_path)
+        
+        # Register in synthesized registry
+        rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
+        update_synthesized_registry(
+            synthesized_registry_file,
+            route=f"{dep}-{arr}",
+            rank=rank,
+            file_path=rel_path_to_save,
+            route_class=route_class,
+            cluster_id=cluster_id
+        )
+        
+        # Track mappings
+        for fl_item in flights_list:
+            flight_mappings.append({
+                "flight_id": fl_item.flight_id,
+                "route": f"{dep}-{arr}",
+                "cluster_id": cluster_id,
+                "route_class": route_class
+            })
+            
+        final_output_paths.append(str(out_path))
+        logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
+        
+    # Write flight-to-cluster mappings registry
+    cluster_map_file = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+    update_flight_cluster_map(cluster_map_file, flight_mappings)
     
-    pyc_centroid = Flight(data=centroid_df, crs="EPSG:4326", drop_duplicated_times=True, **attrs)
-    
-    # Uniform temporal interpolation
-    logger.info(f"Resampling synthesized trajectory to uniform {time_grid_seconds}s grid...")
-    synthesized_flight = pyc_centroid.resample_and_fill(freq=f"{time_grid_seconds}s")
-    
-    # 10. Timeline Normalization & Save
-    df_final = synthesized_flight.to_dataframe()
-    delta_time = df_final['time'] - df_final['time'].min()
-    df_final['time'] = pd.Timestamp("2025-01-01 00:00:00", tz="UTC") + delta_time
-    
-    # Re-instantiate final flight
-    final_flight = Flight(data=df_final, crs="EPSG:4326", **attrs)
-    
-    out_path = Path(output_parquet)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Save parquet via adapter
-    pycontrails_to_parquet(final_flight, out_path)
-    
-    # Register output file
-    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
-    rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
-    update_synthesized_registry(synthesized_registry_file, route=f"{dep}-{arr}", rank=rank, file_path=rel_path_to_save)
-    
-    logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
-    return str(out_path)
+    return final_output_paths
 
 
 if __name__ == "__main__":

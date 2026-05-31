@@ -473,16 +473,31 @@ def run_batch_clone_simulation(
     
     new_registry_entries = []
     
+    # Load flight-to-cluster mappings
+    cluster_map_file = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+    flight_to_cluster = {}
+    if cluster_map_file.exists():
+        try:
+            df_map = pd.read_parquet(cluster_map_file)
+            flight_to_cluster = dict(zip(df_map['flight_id'], df_map['cluster_id']))
+            logger.info(f"Loaded {len(flight_to_cluster)} flight-to-cluster mappings.")
+        except Exception as e:
+            logger.warning(f"Could not load flight cluster map: {e}")
+
     # Pre-resolve synthesized files dictionary to avoid reloading manifest file repeatedly
     valid_synthesized_files = {}
     if synthesized_registry_file.exists():
         df_synth_reg = pd.read_parquet(synthesized_registry_file)
+        for col in ["cluster_id"]:
+            if col not in df_synth_reg.columns:
+                df_synth_reg[col] = 0
         for _, row in df_synth_reg.iterrows():
             route = row['route']
             rel_path = row['file_path']
+            cluster_id = int(row['cluster_id'])
             abs_path = BASE_DIR / rel_path
             if abs_path.exists():
-                valid_synthesized_files[route] = abs_path
+                valid_synthesized_files[(route, cluster_id)] = abs_path
                 
     # 3. Outer Loop: Day-by-Day (or Single Batch if day_by_day=False)
     if not day_by_day:
@@ -560,20 +575,28 @@ def run_batch_clone_simulation(
                 new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
                 continue
                 
+            # Get cluster_id for this flight
+            cluster_id = flight_to_cluster.get(flight_id, 0)
+            
             # Get synthesized base flight
-            base_flight = cached_base_flights.get(route_key)
+            base_flight = cached_base_flights.get((route_key, cluster_id))
             if base_flight is None:
-                synth_path = valid_synthesized_files.get(route_key)
+                synth_path = valid_synthesized_files.get((route_key, cluster_id))
                 if not synth_path:
-                    logger.error(f"Synthesized base path missing for route {route_key}. Skipping.")
+                    # Fallback to cluster 0 if specific cluster file is missing
+                    synth_path = valid_synthesized_files.get((route_key, 0))
+                    
+                if not synth_path:
+                    logger.error(f"Synthesized base path missing for route {route_key} cluster {cluster_id}. Skipping.")
                     continue
+                    
                 # Load Synthetic Flight
                 synth_flights = read_flights_from_parquet(str(synth_path))
                 if not synth_flights:
-                    logger.error(f"Empty synthesized file for route {route_key}. Skipping.")
+                    logger.error(f"Empty synthesized file for route {route_key} cluster {cluster_id}. Skipping.")
                     continue
                 base_flight = list(synth_flights.values())[0]
-                cached_base_flights[route_key] = base_flight
+                cached_base_flights[(route_key, cluster_id)] = base_flight
                 
             logger.info(f"Simulating flight {flight_id}...")
             

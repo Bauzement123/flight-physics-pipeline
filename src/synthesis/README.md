@@ -45,20 +45,28 @@ Module Objectives
       │         ├── Spacing: Calculate min_sample_spacing_seconds = max(grid_seconds / 10.0, 1.0).
       │         └── Resample: Traffic.resample(nb_samples = max_duration_seconds / min_sample_spacing_seconds)
       │
-      ├── Sub-objective 4: Spatial Track Centroid Generation
-      │    └── Solution: Extract the median spatial track using traffic's DTW centroid method
-      │         └── Traffic.centroid(nb_samples=nb_samples, projection=projection)
+      ├── Sub-objective 3.5: [NEW] Route Sameness Classification & Clustering
+      │    └── Solution: Flatten spatial checkpoints and evaluate multi-track signatures using K-Means
+      │         ├── Resample Features: Resample each flight to 100 points to extract 100 lats/lons (200-dim feature vector).
+      │         ├── Cluster Search: Run KMeans for k=2, 3, 4 and calculate Silhouette scores.
+      │         ├── Classify: Assign Class 1 (Single), 2 (Binary Split), 3 (Multi-Track), or 4 (Chaos, if variance > 200.0).
+      │         └── Split: Group the cohort flights into k sub-cohorts based on optimal cluster labels.
       │
-      ├── Sub-objective 5: Kinematic Validation & Temporal Gridding
+      ├── Sub-objective 4: [MODIFIED] Spatial Track Centroid Generation
+      │    └── Solution: Extract median spatial tracks using traffic's DTW centroid method per sub-cohort
+      │         └── Loop: For each of the k sub-cohorts, calculate Traffic.centroid()
+      │
+      ├── Sub-objective 5: Kinematic Validation & Temporal Gridding (APPLIED TO ALL K)
       │    └── Solution: Snap the centroid back to a uniform temporal grid using pycontrails
-      │         ├── pycontrails.Flight(centroid_df) -> Ingest back to PyContrails (converting back to SI units).
+      │         ├── pycontrails.Flight(centroid_df) -> Ingest back to PyContrails (converting back to SI units, stamping route_class and cluster_id).
       │         └── Flight.resample_and_fill(freq=f"{grid_seconds}s") -> Snap to uniform CLI temporal grid.
       │
-      └── Sub-objective 6: Timeline Normalization & File Output Updates
-           └── Solution: Shift timeline to baseline, write to disk, and update local registry
+      └── Sub-objective 6: [MODIFIED] Timeline Normalization & File Output Updates
+           └── Solution: Write multiple outputs if k > 1 and update metadata registries
                 ├── Shift: Shift timeline to project baseline (2025-01-01 00:00:00 UTC).
-                ├── Serialize: pycontrails_to_parquet(resampled_flight, out_path).
-                └── Register: Append route, rank, and relative filepath to global_synthesized_registry.parquet.
+                ├── Serialize: Save as DEP-ARR_synthesized_c{cluster_id}.parquet.
+                ├── Register: Append route, rank, filepath, route_class, and cluster_id to global_synthesized_registry.parquet.
+                └── Map: Save raw flight ID mappings inside global_flight_cluster_map.parquet.
 ```
 
 ---
@@ -67,28 +75,36 @@ Module Objectives
 
 ```mermaid
 graph TD
-    A[Route Rank Input] --> B[1. RouteSummary Resolution]
+    A[Route Rank Input] --> B[1. RouteSummary Resolution & Registry Skip Check]
     B -->|Origin-Destination DEP -> ARR| C[2. Raw Registry Query]
     C -->|global_trajectory_registry.parquet| D[3. Load Raw Parquet Files]
     D -->|Cohort flights matching route| E[4. OpenAP Phase Labeling]
     E --> F[5. Hybrid ROCD Normalization]
-    F -->|Straightened climbs/descents for outliers| G[6. Spatial Resampling & Dynamic LAEA Projection]
-    G --> H[7. Spatial DTW Centroid Generation]
-    H --> I[8. Temporal Resampling to Fixed Baseline]
-    I -->|2025-01-01 00:00:00 UTC Baseline| J[9. Save Synthesized Parquet]
-    J -->|adapters.py pycontrails_to_parquet| K[data/synthesized_paths/DEP-ARR_synthesized.parquet]
-    K --> L[10. Update Synthesized Manifest]
-    L -->|global_synthesized_registry.parquet| M[Registered Entry]
+    F -->|Straightened climbs/descents| G[6. Spatial Resampling & Dynamic LAEA Projection]
+    G --> H[7. K-Means Route Clustering & Classification]
+    H -->|Split into K sub-cohorts| I[8. Multi-Centroid Spatial DTW Centroid Generation]
+    I --> J[9. Temporal Resampling to Fixed Baseline]
+    J -->|2025-01-01 00:00:00 UTC Baseline + Metadata| K[10. Save Synthesized Parquet files]
+    K -->|adapters.py pycontrails_to_parquet| L[data/synthesized_paths/DEP-ARR_synthesized_cID.parquet]
+    L --> M[11. Update Registries]
+    M -->|global_synthesized_registry.parquet & global_flight_cluster_map.parquet| N[Registered Entries]
 ```
 
-1.  **Route Rank Resolution**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`) using the `master_flights_RouteSummary.pkl`.
+1.  **Route Rank Resolution & Skip Check**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`). The orchestrator queries `global_synthesized_registry.parquet` to check if this rank's synthesis was already completed.
 2.  **Registry Query**: The script queries `global_trajectory_registry.parquet` directly to locate all raw Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`).
 3.  **Phase Identification & ROCD Calculation**: For each flight in the cohort, `openap.phase.FlightPhase` classifies waypoints and locates the Top of Climb (TOC) and Top of Descent (TOD). The average climb and descent rates of climb/descent (ROCD) are computed.
 4.  **Holding Pattern Correction**: Flights are classified into clean baseline flights and holding-pattern outliers (e.g. descent ROCD $< 1200$ ft/min). For outliers, their climb/descent segments are replaced with direct 3D lines scaled to the median clean ROCD duration, removing circles, loops, and delay times while maintaining realistic ground speeds.
 5.  **Spatial Standardization**: Trajectories are projected to a dynamic local Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the cohort's average coordinates. Flights are resampled to a dense set of spatial checkpoints (with spacing at `1/10` of the grid resolution).
-6.  **Centroid Generation**: A pairwise Dynamic Time Warping (DTW) distance matrix is computed over the spatial checkpoints to extract the geometric track centroid, avoiding coordinate median warping.
-7.  **Baseline Temporal Resampling**: The spatial centroid is converted back to SI units and resampled to a uniform temporal grid (e.g. 60s steps) starting at a fixed baseline datetime (**`2025-01-01 00:00:00 UTC`**).
-8.  **Cache Skip Check**: If the output file already exists on disk, the script skips the DTW and phase calculations entirely to optimize execution time in pipeline loops.
+6.  **K-Means Route Clustering & Classification**:
+    * Resamples trajectories specifically to 100 checkpoints to build a 200-dimensional coordinate feature vector.
+    * Runs K-Means for $k \in [2, 4]$ and calculates Silhouette scores.
+    * Configures `route_class` based on best clustering score: `Class 1` (Single Track), `Class 2` (Binary Split), `Class 3` (Multi-Track), or `Class 4` (Chaos if variance is high but clustering score is low).
+7.  **Multi-Centroid DTW Centroid Generation**: Loops over the identified clusters and computes a spatial track centroid using Dynamic Time Warping (DTW) for each sub-cohort independently.
+8.  **Baseline Temporal Resampling**: Snaps each centroid to SI units, stamps `route_class` and `cluster_id` columns, and temporal-interpolates to a uniform grid (default 60s) starting at `2025-01-01 00:00:00 UTC`.
+9.  **Serialization & Registration**:
+    * Saves each track to `<DEP-ARR>_synthesized_c{cluster_id}.parquet`.
+    * Updates `global_synthesized_registry.parquet` with the new route files, class, and cluster ID.
+    * Updates `global_flight_cluster_map.parquet` mapping flight IDs to their cluster assignments.
 
 ---
 
@@ -149,6 +165,7 @@ python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --o
 *   `pandas` & `pyarrow` (for Parquet I/O operations)
 *   `numpy` & `scipy` (for arrays and interpolation)
 *   `pyproj` (for dynamic localized projection transformations)
+*   `scikit-learn` (for K-Means clustering and Silhouette analysis)
 *   `traffic` (for spatial resampling, airborne filtering, and DTW track centroids)
 *   `openap` (for fuzzy logic flight phase labeling and TOC/TOD detection)
 *   `pycontrails` (for Flight container structures and temporal interpolation engines)

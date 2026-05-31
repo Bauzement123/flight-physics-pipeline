@@ -105,7 +105,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
         logging.info("Synthesized folder does not exist. Skipping.")
         return
         
-    found_files = glob.glob(str(search_dir / "**" / "*_synthesized.parquet"), recursive=True)
+    found_files = glob.glob(str(search_dir / "**" / "*_synthesized_c*.parquet"), recursive=True)
     logging.info(f"Found {len(found_files)} synthesized files on disk.")
     
     # Load RouteSummary to resolve rank for each route
@@ -124,16 +124,35 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
         rel_path = filepath.resolve().relative_to(BASE_DIR).as_posix()
         
         name = filepath.name
-        if name.endswith("_synthesized.parquet"):
-            route = name.replace("_synthesized.parquet", "").strip()
-            rank = route_to_rank.get(route, -1)
-            new_entries.append({
-                "route": route,
-                "rank": rank,
-                "file_path": rel_path
-            })
+        if name.endswith(".parquet") and "_synthesized_c" in name:
+            try:
+                base_part = name.replace(".parquet", "")
+                route_part, c_part = base_part.split("_synthesized_c")
+                route = route_part.strip()
+                cluster_id = int(c_part.strip())
+                rank = route_to_rank.get(route, -1)
+                
+                # Load route_class column from file to get metadata
+                try:
+                    df_first = pd.read_parquet(filepath, columns=['route_class'])
+                    route_class = int(df_first['route_class'].iloc[0])
+                except Exception:
+                    route_class = 1 # fallback
+                    
+                new_entries.append({
+                    "route": route,
+                    "rank": rank,
+                    "file_path": rel_path,
+                    "route_class": route_class,
+                    "cluster_id": cluster_id
+                })
+            except Exception as e:
+                logging.warning(f"Failed to parse or read synthesized file {name}: {e}")
             
     df_updated = pd.DataFrame(new_entries)
+    if df_updated.empty:
+        df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
+        
     registry_file.parent.mkdir(parents=True, exist_ok=True)
     df_updated.to_parquet(registry_file, index=False)
     logging.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")

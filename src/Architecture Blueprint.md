@@ -43,11 +43,13 @@ PythonPipeline/
 │   │   ├── master_flights.csv          # Master 3.5M flight catalog
 │   │   ├── master_flights.parquet      # Compressed master database
 │   │   ├── master_flights_RouteSummary.pkl # Flight count ranks per corridor
-│   │   ├── global_trajectory_registry.parquet # Cache index mapping flight_id -> raw_parquet_path
-│   │   ├── global_clean_registry.parquet # Cache index mapping flight_id -> clean_parquet_path
-│   │   ├── global_simulation_registry.parquet # Cache index mapping flight_id -> simulated_parquet_path
-│   │   ├── global_synthesized_registry.parquet # Cache index mapping route -> synthesized_path
-│   │   └── global_cloned_simulation_registry.parquet # Cache index mapping flight_id -> cloned_simulated_path
+│   │   ├── registries/                 # Relocated dynamic cache registries
+│   │   │   ├── global_trajectory_registry.parquet # Cache index mapping flight_id -> raw_parquet_path
+│   │   │   ├── global_clean_registry.parquet # Cache index mapping flight_id -> clean_parquet_path
+│   │   │   ├── global_simulation_registry.parquet # Cache index mapping flight_id -> simulated_parquet_path
+│   │   │   ├── global_synthesized_registry.parquet # Cache index mapping route -> synthesized_path
+│   │   │   ├── global_synthesized_simulation_registry.parquet # Cache index mapping flight_id -> cloned_simulated_path
+│   │   │   └── global_flight_cluster_map.parquet # Mapping raw flight_id -> cluster_id
 │   │
 │   ├── flight_lists/                   # Standalone sliced route corridors (e.g. EBBR-LSGG.parquet)
 │   │
@@ -141,15 +143,16 @@ Applies the Extended Kalman Filter (EKF) to clean ground noise, smooth out GPS a
   9. **Export & Registration**: Saves cleaned coordinates as `clean/{DEP}-{ARR}_{cohort_hash}_clean_si.parquet` and registers the cleaned flights in the clean registry.
 
 ### Loop 3b: Reference Trajectory Synthesis (synthesis_orchestrator.py)
-Aggregates a cohort of clean historical flight trajectories for a route rank into a single typical synthesized baseline path.
+Aggregates a cohort of clean historical flight trajectories for a route rank into synthesized baseline paths.
 - **Command**: `python -m src.synthesis.synthesis_orchestrator --ranks 76`
 - **Workflow**:
-  1. Resolves ranks list and queries `global_trajectory_registry.parquet` for matching raw flights.
-  2. Applies OpenAP FlightPhase classifier to identify climb, cruise, and descent phases.
-  3. Corrects holding-pattern outliers by straightening climbs/descents to clean cohort medians.
-  4. Projects coordinates to local LAEA Cartesian grids and extracts the Dynamic Time Warping (DTW) spatial centroid.
-  5. Uniformly resamples the centroid trajectory, normalizes its timeline to the `2025-01-01 00:00:00 UTC` baseline, and saves it.
-  6. Registers the synthesized route inside `global_synthesized_registry.parquet`.
+  1. Resolves ranks list and checks `global_synthesized_registry.parquet` skip manifest.
+  2. Queries `global_trajectory_registry.parquet` for matching raw flights and normalizes climb/descent segments.
+  3. Projects coordinates to local LAEA Cartesian grids.
+  4. Runs K-Means route clustering ($k \in [2, 4]$) on flattened trajectories using Silhouette analysis.
+  5. Determines `route_class` (`Class 1`: Single, `Class 2`: Binary Split, `Class 3`: Multi, `Class 4`: Chaos).
+  6. Loops over the sub-cohort clusters, generates the Dynamic Time Warping (DTW) spatial centroid per cluster, snaps to SI grids, and normalizes timeline to `2025-01-01`.
+  7. Saves each track as `_synthesized_c{cluster_id}.parquet`, maps flights in `global_flight_cluster_map.parquet`, and updates `global_synthesized_registry.parquet`.
 
 ### Loop 4: Weather & Physical Simulation (Cocip)
 Downloads matching Copernicus weather files and runs PyContrails.
@@ -162,11 +165,10 @@ Downloads matching Copernicus weather files and runs PyContrails.
 
 ### Loop 4b: Cloned Physics Simulation (clone_simulation.py)
 Clones and time-shifts synthesized baseline trajectories to match real scheduled flights, and simulates them under CoCiP.
-- **Command**: `python -m src.physics.clone_simulation --ranks 76`
+- **Command**: `python -m src.physics.clone_simulation --ranks 76 --start-date "2025-01-02" --end-date "2025-01-05"`
 - **Workflow**:
-  1. Loads synthesized route baseline from `global_synthesized_registry.parquet`.
-  2. Resolves timezone-aware UTC schedules from target route flight lists.
-  3. Sorts flight cohort to optimize base path file loading.
-  4. Runs day-by-day batch weather loops (loading weather globally once per day with advection padding).
-  5. Evaluates CoCiP model on each individual cloned flight and serializes waypoints incrementally.
-  6. Updates `global_cloned_simulation_registry.parquet` with simulation stats.
+  1. Loads `global_flight_cluster_map.parquet` and registers available routes.
+  2. Slices schedules and filters out flights under `--min-distance`.
+  3. Loops day-by-day, loading required weather files offline from local cache.
+  4. Loops flights in the daily batch, resolving their `cluster_id` from the map, time-shifting the matched baseline path, and copying over the `route_class` and `cluster_id` metadata.
+  5. Simulates performance and contrail modeling using PSFlight and CoCiP, saving results incrementally containing metadata columns, and updates `global_synthesized_simulation_registry.parquet`.

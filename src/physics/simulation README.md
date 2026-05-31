@@ -58,16 +58,17 @@ Module Objectives
 ```mermaid
 graph TD
     A[data/flight_registry/master_flights.parquet] -->|1. Load & Filter Schedules| B(clone_simulation.py)
-    C[data/flight_registry/global_synthesized_registry.parquet] -->|2. Resolve Base Paths| B
-    D[data/weather/*.nc] -->|3. Load ERA5 Offline| B
+    C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve Base Paths| B
+    K[data/flight_registry/registries/global_flight_cluster_map.parquet] -->|3. Resolve Flight Cluster ID| B
+    D[data/weather/*.nc] -->|4. Load ERA5 Offline| B
     
-    B -->|4. Time-Shift Baseline| E[Time-Shift Trajectory]
-    E -->|5. Evaluate Performance| F[PSFlight Model]
+    B -->|5. Time-Shift Baseline| E[Time-Shift Trajectory]
+    E -->|6. Evaluate Performance| F[PSFlight Model]
     F -->|True Airspeed, Fuel Flow, Emissions| G[CoCiP Model]
-    G -->|6. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
+    G -->|7. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
     
-    H -->|7. Incremental Save| I[data/results/cloned_simulations/<route>_cloned_simulated/]
-    H -->|8. Update global registry| J[global_cloned_simulation_registry.parquet]
+    H -->|8. Incremental Save with Metadata| I[data/results/cloned_simulations/<route>_cloned_simulated/]
+    H -->|9. Update global registry| J[global_synthesized_simulation_registry.parquet]
 ```
 
 ### Key Architectural Designs
@@ -76,7 +77,7 @@ graph TD
 Batch simulation of corridors can process hundreds of flights, making it susceptible to interruption or crashes. 
 - The engine uses **incremental saving**: each simulated flight is saved to its own individual Parquet file immediately upon completion.
 - If run again, the script checks for the existence of `<flight_id>_simulated.parquet` and automatically **skips** already-simulated flights.
-- Completed runs are registered in `global_cloned_simulation_registry.parquet` to avoid directory scans for downstream analytics.
+- Completed runs are registered in `global_synthesized_simulation_registry.parquet` to avoid directory scans for downstream analytics.
 
 #### 2. Timezone-Aware UTC Design
 To prevent timezone mismatch errors (e.g., `TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects`), the clone engine:
@@ -86,6 +87,12 @@ To prevent timezone mismatch errors (e.g., `TypeError: Cannot subtract tz-naive 
 
 #### 3. Shared Weather Optimization
 Loading weather data is highly resource-intensive. If the flight corridor batch spans a short temporal window (e.g., $\le$ 72 hours, such as in `--test-mode`), the script loads the ERA5 meteorological and radiative datasets **once** into memory and shares them across all flights in the batch, drastically reducing execution time.
+
+#### 4. Route Clustering Metadata Retention
+To avoid cross-referencing flight trajectories back to their route classifications during analysis:
+- The clone simulation loads the global flight-to-cluster mappings (`global_flight_cluster_map.parquet`) at startup.
+- As each flight in the cohort is processed, it looks up its mapped `cluster_id` and copies both the `route_class` and `cluster_id` from the base synthesized path's attributes to the simulated flight.
+- Custom adapters in `adapters.py` serialize `route_class` and `cluster_id` as repeated metadata columns inside the final output simulated Parquet files, providing seamless, self-contained data analysis.
 
 ---
 
@@ -119,6 +126,8 @@ Use `clone_simulation.py` to clone, shift, and batch-simulate synthetic flight p
 # Run standard corridor simulation for specific ranks (e.g., ranks 1 and 3)
 python -m src.physics.clone_simulation `
     --ranks 1,3 `
+    --start-date "2025-01-02" `
+    --end-date "2025-01-05" `
     --weather-cache "data/weather" `
     --out-dir "data/results/cloned_simulations"
 
@@ -126,6 +135,8 @@ python -m src.physics.clone_simulation `
 python -m src.physics.clone_simulation `
     --lower-rank 1 `
     --upper-rank 5 `
+    --start-date "2025-01-02" `
+    --end-date "2025-01-05" `
     --weather-cache "data/weather"
 
 # Offline Test Mode (verifies logic using cached January weather data)
