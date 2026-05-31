@@ -17,7 +17,14 @@ from src.fetching import opensky_fetcher
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
-def extract_target_routes(summary_path: str, lower: int = None, upper: int = None, specific_ranks: list = None, fetch_format: str = 'oneway') -> pd.DataFrame:
+def extract_target_routes(
+    summary_path: str, 
+    lower: int = None, 
+    upper: int = None, 
+    specific_ranks: list = None, 
+    fetch_format: str = 'oneway',
+    min_distance: float = None
+) -> pd.DataFrame:
     """Loads the RouteSummary, applies the selected filters, and returns route codes."""
     logging.info(f"Loading route metadata from summary: {summary_path}")
     df_summary = load_route_summary(summary_path)
@@ -41,6 +48,16 @@ def extract_target_routes(summary_path: str, lower: int = None, upper: int = Non
     if filtered_df.empty:
         logging.warning("No routes found matching the criteria.")
         return pd.DataFrame()
+
+    # Filter by distance if requested
+    if min_distance is not None:
+        if 'distance_m' in filtered_df.columns:
+            before_count = len(filtered_df)
+            filtered_df = filtered_df[filtered_df['distance_m'] >= min_distance * 1000.0].copy()
+            excluded_count = before_count - len(filtered_df)
+            logging.info(f"Filtered by minimum route distance >= {min_distance} km. Excluded {excluded_count} routes. Remaining: {len(filtered_df)}")
+        else:
+            logging.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
 
     # Bidirectional route resolution
     if fetch_format == 'roundtrip':
@@ -215,6 +232,7 @@ if __name__ == "__main__":
     parser.add_argument("--start-date", default=None, help="Start bounds of flight departure window (ISO format)")
     parser.add_argument("--end-date", default=None, help="End bounds of flight departure window (ISO format)")
     parser.add_argument("--typecode", default=None, help="Aircraft model code (e.g. B738, A320)")
+    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()
 
@@ -235,7 +253,8 @@ if __name__ == "__main__":
         lower=args.lower_rank, 
         upper=args.upper_rank,
         specific_ranks=specific_ranks_list,
-        fetch_format=args.format
+        fetch_format=args.format,
+        min_distance=args.min_distance
     )
     
     if not routes.empty:
@@ -262,7 +281,8 @@ if __name__ == "__main__":
                 fetch_format=args.format,
                 start_date=args.start_date,
                 end_date=args.end_date,
-                typecode=args.typecode
+                typecode=args.typecode,
+                min_distance=args.min_distance
             )
             out_dir_path = get_dataset_dir(dataset_name)
             setup_file_logger(out_dir_path)

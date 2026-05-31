@@ -20,7 +20,7 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR
+from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR
 temp_dir = str(BASE_DIR / "data" / "temp")
 os.makedirs(temp_dir, exist_ok=True)
 os.environ['TEMP'] = temp_dir
@@ -143,7 +143,8 @@ def filter_cohort_flights(
     ranks: list = None,
     out_dir: str = None,
     synthesized_registry_file: str = None,
-    overwrite: bool = False
+    overwrite: bool = False,
+    min_distance: float = 800.0
 ) -> pd.DataFrame:
     """
     Creates the cohort flight list in memory by filtering the master registry.
@@ -163,7 +164,8 @@ def filter_cohort_flights(
         start_date=start_date,
         end_date=end_date,
         ranks=ranks,
-        drop_airport_loops=True
+        drop_airport_loops=True,
+        min_distance=min_distance
     )
     
     if df_filtered.empty:
@@ -199,7 +201,7 @@ def filter_cohort_flights(
     # 3. Already simulated checklist (manifest + file check)
     if not overwrite:
         logger.info("Filtering out already simulated flights...")
-        cloned_registry_file = FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet"
+        cloned_registry_file = REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet"
         simulated_ids = set()
         if cloned_registry_file.exists():
             try:
@@ -424,13 +426,14 @@ def run_batch_clone_simulation(
     max_age_hours: int = 48,
     overwrite: bool = False,
     test_mode: bool = False,
-    day_by_day: bool = True
+    day_by_day: bool = True,
+    min_distance: float = 800.0
 ):
     # Setup paths
     master_flights_file = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
     route_summary_file = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
-    synthesized_registry_file = FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet"
-    cloned_registry_file = FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet"
+    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
+    cloned_registry_file = REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet"
     
     # 1. Output Dir
     out_dir_path = Path(out_dir)
@@ -499,7 +502,8 @@ def run_batch_clone_simulation(
             ranks=ranks,
             out_dir=str(out_dir_path),
             synthesized_registry_file=str(synthesized_registry_file),
-            overwrite=overwrite
+            overwrite=overwrite,
+            min_distance=min_distance
         )
         
         if cohort_df.empty:
@@ -635,6 +639,7 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")
     parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 3 flights and defaults date to 2025-01-01")
     parser.add_argument("--no-day-by-day", action="store_false", dest="day_by_day", help="Disables day-by-day temporal weather windowing and runs as a single batch")
+    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
     
     args = parser.parse_args()
     
@@ -668,6 +673,7 @@ if __name__ == "__main__":
         max_age_hours=args.max_age,
         overwrite=args.overwrite,
         test_mode=args.test_mode,
-        day_by_day=args.day_by_day
+        day_by_day=args.day_by_day,
+        min_distance=args.min_distance
     )
 

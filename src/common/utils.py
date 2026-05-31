@@ -54,7 +54,8 @@ def generate_dataset_name(
     fetch_format=None,
     start_date=None,
     end_date=None,
-    typecode=None
+    typecode=None,
+    min_distance=None
 ) -> str:
     """
     Generates a unique dataset name incorporating all CLI parameters to make it human-readable,
@@ -105,6 +106,10 @@ def generate_dataset_name(
     if typecode is not None:
         parts.append(f"type_{typecode}")
         
+    # 9. Min distance part
+    if min_distance is not None:
+        parts.append(f"mindist_{min_distance}")
+        
     base_prefix = "_".join(parts)
     
     # Compute a deterministic hash of the parameters to guarantee unique identification
@@ -112,6 +117,7 @@ def generate_dataset_name(
     
     dataset_name = f"{base_prefix}_{hash_suffix}"
     return dataset_name
+
 
 
 def setup_file_logger(out_dir: Path) -> logging.FileHandler:

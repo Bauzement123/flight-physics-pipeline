@@ -31,13 +31,13 @@ Module Objectives
       │
       ├── Sub-objective: Batch clone corridor flight simulation
       │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
-      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age
+      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance
       │         ├── Outputs: Incremental flight-level simulated parquets and updated manifests
       │         └── Role: Orchestrates daily weather batches and flight schedule simulations
       │
       ├── Sub-objective: Slicing cohort schedules from master registry
       │    └── Solution: filter_cohort_flights() in clone_simulation.py
-      │         ├── Inputs: master_flights.parquet, RouteSummary, ranks, start/end dates, synthesized manifest
+      │         ├── Inputs: master_flights.parquet, RouteSummary, ranks, start/end dates, synthesized manifest, min_distance
       │         └── Outputs: Sorted and filtered cohort DataFrame of target flights
       │
       ├── Sub-objective: Offline-first ERA5 weather dataset loading
@@ -150,6 +150,7 @@ python -m src.physics.clone_simulation `
 | `--out-dir` | `str` | `data/results/cloned_simulations` | Output directory for simulation results and logs. |
 | `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
 | `--test-mode` | `flag` | *False* | Limit to the first 1 flights of each corridor, and override departure dates starting at `2025-01-01 00:00:00 UTC` spaced 2 hours apart. |
+| `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 
 > [!TIP]
 > **Test Mode Advantage**: `--test-mode` ensures the simulation runs against the local cached weather data (`2024-12-31` to `2025-01-10`), avoiding the need to fetch new ERA5 data from Copernicus API during verification.

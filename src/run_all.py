@@ -54,6 +54,7 @@ def main():
     parser.add_argument("--dest", help="Destination ICAO")
     parser.add_argument("--sample-size", type=str, help="Optional limit for Trino queries")
     parser.add_argument("--start-from-raw", help="Optional: Fast-track pipeline starting from an existing _raw.parquet file")
+    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
     
     args = parser.parse_args()
     
@@ -82,6 +83,7 @@ def main():
             "--start-date", args.start_date,
             "--end-date", args.end_date
         ]
+        if args.min_distance is not None: cmd_filter.extend(["--min-distance", str(args.min_distance)])
         if args.typecode: cmd_filter.extend(["--typecode", args.typecode])
         if args.origin: cmd_filter.extend(["--origin", args.origin])
         if args.dest: cmd_filter.extend(["--dest", args.dest])

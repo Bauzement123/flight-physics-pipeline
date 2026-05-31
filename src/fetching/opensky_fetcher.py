@@ -16,7 +16,7 @@ from pyopensky.trino import Trino
 from pyopensky.schema import StateVectorsData4
 from sqlalchemy import select
 
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR
+from src.common.config import BASE_DIR, REGISTRIES_DIR
 from src.common.utils import split_route_string, setup_file_logger, update_global_registry
 
 # Configure logging
@@ -162,7 +162,7 @@ def fetch_trajectories(
         return True
 
     # Load Global Registry Cache Map
-    registry_file = FLIGHT_REGISTRY_DIR / "global_trajectory_registry.parquet"
+    registry_file = REGISTRIES_DIR / "global_trajectory_registry.parquet"
     cached_flights = {}
     if registry_file.exists():
         try:

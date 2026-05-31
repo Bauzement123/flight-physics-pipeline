@@ -22,7 +22,8 @@ def filter_population_in_memory(
     typecode: str = None,
     origin: str = None,
     dest: str = None,
-    drop_airport_loops: bool = False
+    drop_airport_loops: bool = False,
+    min_distance: float = 800.0
 ) -> pd.DataFrame:
     """
     Filters the master registry in-memory without saving anything to disk.
@@ -78,15 +79,51 @@ def filter_population_in_memory(
                 df_filtered[col] = df_filtered[col].dt.tz_convert('UTC')
 
 
-    # Apply rank filter via RouteSummary
-    if ranks is not None and len(ranks) > 0:
+    # Load RouteSummary if needed for distance or rank filtering
+    df_summary = None
+    if (ranks is not None and len(ranks) > 0) or (min_distance is not None):
         from src.common.utils import load_route_summary, split_route_string
         if isinstance(route_summary, (str, Path)) or route_summary is None:
             df_summary = load_route_summary(route_summary)
         else:
             df_summary = route_summary
+
+    # Apply distance filter first using RouteSummary
+    if min_distance is not None and df_summary is not None and not df_summary.empty:
+        if 'distance_m' in df_summary.columns:
+            # Find routes above the minimum distance
+            filtered_summary = df_summary[df_summary['distance_m'] >= min_distance * 1000.0].copy()
+            valid_routes = set()
+            for _, row in filtered_summary.iterrows():
+                dep, arr = split_route_string(row['route'])
+                if dep != 'UNK' and arr != 'UNK':
+                    valid_routes.add((dep, arr))
             
-        if not df_summary.empty:
+            # Dynamic column resolution for departure/arrival
+            dep_col = None
+            arr_col = None
+            for col in ['estdepartureairport', 'origin', 'departure']:
+                if col in df_filtered.columns:
+                    dep_col = col
+                    break
+            for col in ['estarrivalairport', 'destination', 'arrival']:
+                if col in df_filtered.columns:
+                    arr_col = col
+                    break
+                    
+            if dep_col and arr_col:
+                route_keys = df_filtered[dep_col] + '-' + df_filtered[arr_col]
+                valid_keys = {f"{dep}-{arr}" for dep, arr in valid_routes}
+                df_filtered = df_filtered[route_keys.isin(valid_keys)].copy()
+                logging.info(f"Filtered by minimum route distance >= {min_distance} km. Remaining: {len(df_filtered):,}")
+            else:
+                logging.warning("Could not identify airport columns for distance filtering.")
+        else:
+            logging.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
+
+    # Apply rank filter via RouteSummary
+    if ranks is not None and len(ranks) > 0:
+        if df_summary is not None and not df_summary.empty:
             filtered_summary = df_summary[df_summary['rank'].isin(ranks)].copy()
             if not filtered_summary.empty:
                 target_routes = set()
@@ -95,7 +132,7 @@ def filter_population_in_memory(
                     if dep != 'UNK' and arr != 'UNK':
                         target_routes.add((dep, arr))
                 
-                # Dynamic column resolution for departure/arrival in master_df
+                # Dynamic column resolution for departure/arrival
                 dep_col = None
                 arr_col = None
                 for col in ['estdepartureairport', 'origin', 'departure']:
@@ -154,7 +191,8 @@ def filter_population(
     origin: str = None,
     dest: str = None,
     ranks: list = None,
-    route_summary_path: str = None
+    route_summary_path: str = None,
+    min_distance: float = 800.0
 ):
     df_filtered = filter_population_in_memory(
         master_flights=file_path,
@@ -165,7 +203,8 @@ def filter_population(
         typecode=typecode,
         origin=origin,
         dest=dest,
-        drop_airport_loops=False
+        drop_airport_loops=False,
+        min_distance=min_distance
     )
     
     if df_filtered.empty:
@@ -229,6 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--lower-rank", type=int, help="Lower bound of rank corridor")
     parser.add_argument("--upper-rank", type=int, help="Upper bound of rank corridor")
     parser.add_argument("--route-summary", default=str(FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"), help="Path to RouteSummary pickle file")
+    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()
     
@@ -255,7 +295,8 @@ if __name__ == "__main__":
             origin=args.origin,
             dest=args.dest,
             ranks=resolved_ranks,
-            route_summary_path=args.route_summary
+            route_summary_path=args.route_summary,
+            min_distance=args.min_distance
         )
     except FileExistsError as e:
         logging.info(str(e))

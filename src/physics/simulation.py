@@ -196,10 +196,10 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         write_flights_to_parquet(simulated_flights, out_path)
         
         # Update simulation registry cache index
-        from src.common.config import FLIGHT_REGISTRY_DIR, BASE_DIR
+        from src.common.config import REGISTRIES_DIR, BASE_DIR
         from src.common.utils import update_global_registry
         
-        sim_registry_file = FLIGHT_REGISTRY_DIR / "global_simulation_registry.parquet"
+        sim_registry_file = REGISTRIES_DIR / "global_simulation_registry.parquet"
         rel_sim_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
         new_entries = [{"flight_id": fid, "file_path": rel_sim_path} for fid in [f.attrs['flight_id'] for f in simulated_flights]]
         update_global_registry(sim_registry_file, new_entries)

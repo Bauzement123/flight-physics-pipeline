@@ -20,12 +20,20 @@ The pipeline provides a master orchestrator (run_all.py) that handles dynamic pa
 
 End-to-End Execution
 
+```powershell
 python src/run_all.py `
     --start-date "2025-01-01" `
     --end-date "2025-01-02" `
     --typecode "B738" `
     --origin "EGLL" `
-    --sample-size 10
+    --sample-size 10 `
+    --min-distance 800.0
+```
+
+**Parameters**:
+All standard parameters are supported:
+* `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Filters and excludes any corridors with geodesic length below this threshold. Set to `0` to process all flights regardless of distance.
+
 
 
 Checkpointing (Fast-Track Simulation)

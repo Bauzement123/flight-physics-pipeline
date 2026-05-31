@@ -19,7 +19,7 @@ from pycontrails import Flight
 from traffic.core import Traffic, Flight as TrafficFlight
 from openap.phase import FlightPhase
 
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
+from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
 from src.common.utils import load_route_summary, split_route_string
 from src.common.adapters import (
     parquet_to_pycontrails,
@@ -119,7 +119,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
     
     # 2. Query registry to find raw flight files
-    raw_registry_file = FLIGHT_REGISTRY_DIR / "global_trajectory_registry.parquet"
+    raw_registry_file = REGISTRIES_DIR / "global_trajectory_registry.parquet"
     if not raw_registry_file.exists():
         logger.error("Global raw trajectory registry file not found.")
         return None
@@ -381,7 +381,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     pycontrails_to_parquet(final_flight, out_path)
     
     # Register output file
-    synthesized_registry_file = FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet"
+    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
     rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
     update_synthesized_registry(synthesized_registry_file, route=f"{dep}-{arr}", rank=rank, file_path=rel_path_to_save)
     

@@ -14,7 +14,7 @@ from src.common.utils import load_route_summary, split_route_string
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
-def extract_airports_from_ranks(route_summary_path: str, ranks: list) -> pd.DataFrame:
+def extract_airports_from_ranks(route_summary_path: str, ranks: list, min_distance: float = None) -> pd.DataFrame:
     """
     Loads the RouteSummary pickle, filters it by ranks, and splits the routes.
     """
@@ -30,6 +30,16 @@ def extract_airports_from_ranks(route_summary_path: str, ranks: list) -> pd.Data
     if filtered_summary.empty:
         logging.warning("No matching ranks found in the RouteSummary.")
         return pd.DataFrame()
+
+    # Filter by minimum distance if specified
+    if min_distance is not None:
+        if 'distance_m' in filtered_summary.columns:
+            before_count = len(filtered_summary)
+            filtered_summary = filtered_summary[filtered_summary['distance_m'] >= min_distance * 1000.0].copy()
+            excluded_count = before_count - len(filtered_summary)
+            logging.info(f"Filtered by minimum route distance >= {min_distance} km. Excluded {excluded_count} routes. Remaining: {len(filtered_summary)}")
+        else:
+            logging.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
 
     # Split "DEP -> ARR" into separate columns
     deps = []
@@ -117,14 +127,14 @@ def filtered_lists_from_ranks(airports_df: pd.DataFrame, master_file_path: str, 
             logging.error(f"  -> Failed to write parquet list for {dep}->{arr}: {e}")
 
 
-def orchestrate_filtered_list_creation(route_summary_path: str, master_file_path: str, output_dir: str, lower_rank: int, upper_rank: int):
+def orchestrate_filtered_list_creation(route_summary_path: str, master_file_path: str, output_dir: str, lower_rank: int, upper_rank: int, min_distance: float = None):
     """
     Orchestrates the creation of filtered lists for a continuous corridor of ranks.
     """
     ranks_corridor = list(range(lower_rank, upper_rank + 1))
     logging.info(f"Orchestrating corridor slicing for ranks: {lower_rank} to {upper_rank}")
     
-    airports_df = extract_airports_from_ranks(route_summary_path, ranks_corridor)
+    airports_df = extract_airports_from_ranks(route_summary_path, ranks_corridor, min_distance=min_distance)
     if not airports_df.empty:
         filtered_lists_from_ranks(airports_df, master_file_path, output_dir)
 
@@ -142,6 +152,7 @@ if __name__ == "__main__":
     group.add_argument("--lower-rank", type=int, help="Lower bound of rank corridor")
     
     parser.add_argument("--upper-rank", type=int, help="Upper bound of rank corridor (Required if --lower-rank is used)")
+    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()
 
@@ -156,7 +167,7 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("--ranks must be a comma-separated list of integers.")
             
-        airports = extract_airports_from_ranks(args.route_summary, target_ranks)
+        airports = extract_airports_from_ranks(args.route_summary, target_ranks, min_distance=args.min_distance)
         if not airports.empty:
             filtered_lists_from_ranks(airports, args.master_file, args.out_dir)
             
@@ -166,5 +177,6 @@ if __name__ == "__main__":
             master_file_path=args.master_file,
             output_dir=args.out_dir,
             lower_rank=args.lower_rank,
-            upper_rank=args.upper_rank
+            upper_rank=args.upper_rank,
+            min_distance=args.min_distance
         )

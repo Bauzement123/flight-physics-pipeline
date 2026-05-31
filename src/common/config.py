@@ -12,6 +12,7 @@ if BASE_DIR.drive.upper() == 'C:':
 
 # Static registries and global data directories
 FLIGHT_REGISTRY_DIR = BASE_DIR / "data" / "flight_registry"
+REGISTRIES_DIR = FLIGHT_REGISTRY_DIR / "registries"
 FLIGHT_LISTS_DIR = BASE_DIR / "data" / "flight_lists"
 WEATHER_DIR = BASE_DIR / "data" / "weather"
 MASTER_FLIGHT_PATHS_DIR = BASE_DIR / "data" / "master_flight_paths"

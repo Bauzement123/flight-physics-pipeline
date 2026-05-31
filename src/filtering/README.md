@@ -18,25 +18,26 @@ src/filtering/
 ```
 Module Objectives
  └── Slicing specific route populations from the master registry
-      ├── Sub-objective: Slice a single corridor by criteria (e.g., Origin, Destination, Dates, Typecode)
+      ├── Sub-objective: Slice a single corridor by criteria (e.g., Origin, Destination, Dates, Typecode, Distance)
       │    └── Solution: filter_population() in population_filter.py
       │         ├── Inputs:
       │         │    ├── file_path (str): Path to master flights registry (Parquet/CSV)
       │         │    ├── out_dir (str): Directory where sliced lists are saved
       │         │    ├── start_date / end_date (str): YYYY-MM-DD temporal filters
       │         │    ├── typecode (str): Aircraft type filter (e.g., B777)
-      │         │    └── origin / dest (str): Departure/arrival airport ICAOs
+      │         │    ├── origin / dest (str): Departure/arrival airport ICAOs
+      │         │    └── min_distance (float): Minimum route distance in kilometers (default: 800.0)
       │         └── Outputs: Sliced Parquet list named '<typecode>_<origin>-<dest>_<dates>.parquet'
       │
       └── Sub-objective: Slice multiple corridors in batch using ranked traffic lists
            ├── Solution: orchestrate_filtered_list_creation() in filter_orchestrator.py
-           │    ├── Inputs: route_summary_path, master_file_path, output_dir, lower_rank, upper_rank
-           │    └── Role: Resolves a range of ranks to actual routes and triggers slicing
+           │    ├── Inputs: route_summary_path, master_file_path, output_dir, lower_rank, upper_rank, min_distance
+           │    └── Role: Resolves a range of ranks to actual routes and triggers slicing, filtering out short routes
            │
            ├── Sub-solution: extract_airports_from_ranks() in filter_orchestrator.py
-           │    ├── Inputs: route_summary_path (str), ranks (list of ints)
+           │    ├── Inputs: route_summary_path (str), ranks (list of ints), min_distance (float)
            │    ├── Outputs: DataFrame with columns '[rank, dep, arr]'
-           │    └── Role: Decodes route strings (e.g., "EGLL -> KJFK") for chosen ranks
+           │    └── Role: Decodes route strings (e.g., "EGLL -> KJFK") for chosen ranks and filters by distance
            │
            └── Sub-solution: filtered_lists_from_ranks() in filter_orchestrator.py
                 ├── Inputs: airports_df (pd.DataFrame), master_file_path (str), output_dir (str)
@@ -84,6 +85,7 @@ python -m src.filtering.population_filter --origin EGLL --dest KJFK --start-date
 - `--origin` / `--dest`: Origin/destination airport ICAO codes.
 - `--ranks`: Comma-separated ranks to extract.
 - `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
+- `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable.
 
 ---
 
@@ -103,3 +105,4 @@ python -m src.filtering.filter_orchestrator --lower-rank 1 --upper-rank 20
 - `--out-dir`: Sliced lists output folder (default: `data/flight_lists/`).
 - `--ranks`: Comma-separated ranks to extract.
 - `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
+- `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable.

@@ -42,9 +42,9 @@ Module Objectives
       │
       └── Sub-objective: Batch coordinate acquisition across multiple route corridors
            ├── Solution: extract_target_routes() in fetcher_orchestrator.py
-           │    ├── Inputs: summary_path, lower, upper, specific_ranks, fetch_format
+           │    ├── Inputs: summary_path, lower, upper, specific_ranks, fetch_format, min_distance
            │    ├── Outputs: DataFrame with columns '[rank, dep, arr, no_of_flights]'
-           │    └── Role: Resolves ranked corridors (supporting oneway/roundtrip routes)
+           │    └── Role: Resolves ranked corridors (supporting oneway/roundtrip routes) and filters by distance
            │
            ├── Solution: compute_fetch_targets() in fetcher_orchestrator.py
            │    ├── Inputs: routes_df, input_dir, strategy, value, start_date, end_date, typecode
@@ -129,5 +129,6 @@ python -m src.fetching.fetcher_orchestrator --ranks "1, 76" --strategy fixed --v
 - `--start-date`: Start boundary of flight departure window (ISO format).
 - `--end-date`: End boundary of flight departure window (ISO format).
 - `--typecode`: Aircraft model code (case-insensitive, e.g. `A320`, `B738`, `A20N`).
+- `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable.
   - Using a different seed (e.g., `101` instead of `42`) changes the specific random flights selected in the sample.
   - Using the same seed guarantees that the exact same flight sample is selected on repeated runs.

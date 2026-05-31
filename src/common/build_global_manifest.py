@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR
+from src.common.config import BASE_DIR, REGISTRIES_DIR
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MANIFEST BUILDER] - %(message)s')
@@ -91,7 +91,7 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
         df_updated = df_updated.drop_duplicates(subset=['flight_id'], keep='first')
         
     # Ensure parent folder exists
-    FLIGHT_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+    REGISTRIES_DIR.mkdir(parents=True, exist_ok=True)
     
     # Save registry
     df_updated.to_parquet(registry_file, index=False)
@@ -143,7 +143,7 @@ def build_global_manifest():
     # 1. Raw trajectories registry
     index_parquet_files(
         pattern="*_raw.parquet",
-        registry_file=FLIGHT_REGISTRY_DIR / "global_trajectory_registry.parquet",
+        registry_file=REGISTRIES_DIR / "global_trajectory_registry.parquet",
         search_dirs=[
             BASE_DIR / "data" / "01_raw_trajectories",
             BASE_DIR / "data" / "trajectories"
@@ -154,7 +154,7 @@ def build_global_manifest():
     # 2. Clean EKF trajectories registry
     index_parquet_files(
         pattern="*_clean_si.parquet",
-        registry_file=FLIGHT_REGISTRY_DIR / "global_clean_registry.parquet",
+        registry_file=REGISTRIES_DIR / "global_clean_registry.parquet",
         search_dirs=[
             BASE_DIR / "data" / "02_clean_trajectories",
             BASE_DIR / "data" / "trajectories"
@@ -165,7 +165,7 @@ def build_global_manifest():
     # 3. Simulated outputs registry
     index_parquet_files(
         pattern="*_simulated.parquet",
-        registry_file=FLIGHT_REGISTRY_DIR / "global_simulation_registry.parquet",
+        registry_file=REGISTRIES_DIR / "global_simulation_registry.parquet",
         search_dirs=[
             BASE_DIR / "data" / "results",
             BASE_DIR / "data" / "04_physics_results",
@@ -174,19 +174,19 @@ def build_global_manifest():
         description="Physics Simulation"
     )
     
-    # 4. Cloned simulated outputs registry
+    # 4. Synthesized simulated outputs registry
     index_parquet_files(
         pattern="*_simulated.parquet",
-        registry_file=FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet",
+        registry_file=REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet",
         search_dirs=[
             BASE_DIR / "data" / "results" / "cloned_simulations"
         ],
-        description="Cloned Physics Simulation"
+        description="Synthesized Physics Simulation"
     )
     
     # 5. Synthesized paths registry
     index_synthesized_files(
-        registry_file=FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet",
+        registry_file=REGISTRIES_DIR / "global_synthesized_registry.parquet",
         search_dir=BASE_DIR / "data" / "synthesized_paths"
     )
 
