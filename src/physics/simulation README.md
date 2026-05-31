@@ -18,15 +18,50 @@ src/physics/
 
 ---
 
+## Function Analysis Solution Tree (FAST)
+
+```text
+Module Objectives
+ └── Physical simulation of flight trajectories under CoCiP and PSFlight models
+      │
+      ├── Sub-objective: Standard trajectory modeling
+      │    └── Solution: simulate_clean_trajectories() in simulation.py
+      │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory
+      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints
+      │
+      ├── Sub-objective: Batch clone corridor flight simulation
+      │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
+      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age
+      │         ├── Outputs: Incremental flight-level simulated parquets and updated manifests
+      │         └── Role: Orchestrates daily weather batches and flight schedule simulations
+      │
+      ├── Sub-objective: Slicing cohort schedules from master registry
+      │    └── Solution: filter_cohort_flights() in clone_simulation.py
+      │         ├── Inputs: master_flights.parquet, RouteSummary, ranks, start/end dates, synthesized manifest
+      │         └── Outputs: Sorted and filtered cohort DataFrame of target flights
+      │
+      ├── Sub-objective: Offline-first ERA5 weather dataset loading
+      │    └── Solution: load_weather_for_flights() in clone_simulation.py
+      │         ├── Inputs: cohort DataFrame, weather cache directory, max age hours
+      │         └── Outputs: Merged meteorological and radiative datasets (met, rad)
+      │
+      └── Sub-objective: Single flight cloned simulation under CoCiP/PSFlight
+           └── Solution: simulate_single_flight() in clone_simulation.py
+                ├── Inputs: flight schedule row, base synthesized flight path, weather datasets
+                └── Outputs: Simulated Flight object containing contrail and emission metrics
+```
+
+---
+
 ## Workflow & Architecture
 
 ```mermaid
 graph TD
-    A[Synthesized Base Path] -->|1. Load & Clone| B(clone_simulation.py)
-    C[data/flight_lists/<route>.parquet] -->|2. Resolve schedules| B
-    D[data/weather/*.nc] -->|3. ERA5 Cache| B
+    A[data/flight_registry/master_flights.parquet] -->|1. Load & Filter Schedules| B(clone_simulation.py)
+    C[data/flight_registry/global_synthesized_registry.parquet] -->|2. Resolve Base Paths| B
+    D[data/weather/*.nc] -->|3. Load ERA5 Offline| B
     
-    B -->|4. Normalize to UTC| E[Time-Shift Trajectory]
+    B -->|4. Time-Shift Baseline| E[Time-Shift Trajectory]
     E -->|5. Evaluate Performance| F[PSFlight Model]
     F -->|True Airspeed, Fuel Flow, Emissions| G[CoCiP Model]
     G -->|6. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
