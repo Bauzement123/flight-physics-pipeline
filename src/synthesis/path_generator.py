@@ -1,8 +1,10 @@
 """
 Module 2.3: Synthesized Trajectory Generator
-Aggregates a cohort of cleaned or raw trajectories for a given route rank
+Aggregates a cohort of raw trajectories for a given route rank
 into a single idealized 'synthesized' route, mapped onto a uniform temporal grid
 starting at a fixed baseline date (2025-01-01 00:00:00 UTC).
+Uses open-source aviation libraries (traffic, openap, pycontrails) for kinematics,
+spatial clustering, phase labeling, and temporal resampling.
 """
 
 import argparse
@@ -10,29 +12,25 @@ import logging
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from scipy.interpolate import interp1d
 from collections import Counter
+import pyproj
 
 from pycontrails import Flight
+from traffic.core import Traffic, Flight as TrafficFlight
+from openap.phase import FlightPhase
+
 from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
 from src.common.utils import load_route_summary, split_route_string
-from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
+from src.common.adapters import (
+    parquet_to_pycontrails,
+    pycontrails_to_traffic,
+    pycontrails_to_parquet
+)
 
 # Configure logging to match pipeline standards
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- 1. Helper Functions ---
-
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """Calculates the great-circle distance between two points in nautical miles (NM)."""
-    R = 3440.065
-    phi1, phi2 = np.radians(lat1), np.radians(lat2)
-    dphi = np.radians(lat2 - lat1)
-    dlambda = np.radians(lon2 - lon1)
-    
-    a = np.sin(dphi/2)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2)**2
-    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
 def update_synthesized_registry(registry_file: Path, route: str, rank: int, file_path: str):
     """
@@ -59,67 +57,47 @@ def update_synthesized_registry(registry_file: Path, route: str, rank: int, file
     df_updated.to_parquet(registry_file, index=False)
     logger.info(f"Updated global synthesized registry {registry_file.name} for route {route}.")
 
-def read_flights_from_parquet_custom(parquet_path: str, use_raw: bool = False) -> dict:
+
+def find_toc_tod(flight: TrafficFlight, labels: list) -> tuple:
     """
-    Reads a Parquet file, optionally normalizes raw OpenSky column schemas to PyContrails standard coordinates,
-    groups by flight_id, and returns a dictionary of flight_id -> pycontrails.Flight.
+    Identifies the indices corresponding to Top of Climb (TOC) and Top of Descent (TOD)
+    using the phase labels from OpenAP's FlightPhase and altitude heuristics.
     """
-    df = pd.read_parquet(parquet_path)
+    df = flight.data
+    altitudes = df['altitude'].values  # altitude in feet
+    max_alt = np.max(altitudes)
     
-    if use_raw:
-        # Map raw column names to PyContrails standards
-        rename_raw = {
-            'lat': 'latitude',
-            'lon': 'longitude',
-            'baroaltitude': 'altitude'
-        }
-        df = df.rename(columns=rename_raw)
-        
-        # Ensure time column is parsed to datetime
-        if 'time' in df.columns:
-            if pd.api.types.is_numeric_dtype(df['time']):
-                df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-            else:
-                df['time'] = pd.to_datetime(df['time'])
-        elif 'timestamp' in df.columns:
-            if pd.api.types.is_numeric_dtype(df['timestamp']):
-                df['time'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
-            else:
-                df['time'] = pd.to_datetime(df['timestamp'])
-                
-        # Drop ground-level waypoints
-        if 'onground' in df.columns:
-            df = df[df['onground'] == False]
+    # Locate cruise phase indices (where altitude is high and label is cruise/level)
+    cruise_indices = [idx for idx, lbl in enumerate(labels) if lbl in ('CR', 'LVL') and altitudes[idx] > 15000]
+    
+    if cruise_indices:
+        toc_idx = cruise_indices[0]
+        tod_idx = cruise_indices[-1]
+    else:
+        # Fallback heuristic: find where altitude is above 90% of max altitude
+        cruise_thresh = max_alt * 0.90
+        above_thresh = np.where(altitudes >= cruise_thresh)[0]
+        if len(above_thresh) > 0:
+            toc_idx = above_thresh[0]
+            tod_idx = above_thresh[-1]
+        else:
+            # Absolute fallback
+            toc_idx = int(len(df) * 0.2)
+            tod_idx = int(len(df) * 0.8)
+            
+    # Keep within safe physical limits of flight segments
+    toc_idx = max(2, min(toc_idx, int(len(df) * 0.4)))
+    tod_idx = max(int(len(df) * 0.6), min(tod_idx, len(df) - 3))
+    
+    return toc_idx, tod_idx
 
-        # Drop rows with NaN in critical columns
-        df = df.dropna(subset=['latitude', 'longitude', 'altitude', 'time'])
-            
-    flights = {}
-    for flight_id, group_df in df.groupby('flight_id'):
-        group_df = group_df.drop_duplicates(subset=['time'])
-        if group_df.empty or len(group_df) < 5:
-            continue
-            
-        typecode = group_df['typecode'].iloc[0] if 'typecode' in group_df.columns else 'B738'
-        
-        attrs = {
-            "flight_id": flight_id,
-            "aircraft_type": typecode,
-            "icao24": group_df['icao24'].iloc[0] if 'icao24' in group_df.columns else 'UNK',
-            "callsign": group_df['callsign'].iloc[0] if 'callsign' in group_df.columns else 'UNK',
-        }
-        
-        try:
-            fl = Flight(data=group_df, drop_duplicated_times=True, crs="EPSG:4326", **attrs)
-            flights[flight_id] = fl
-        except Exception as e:
-            logger.debug(f"Failed to create flight {flight_id} from raw data: {e}")
-            
-    return flights
-
-# --- 2. Main Processing Pipeline ---
 
 def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60) -> str:
+    out_path = Path(output_parquet)
+    if out_path.exists():
+        logger.info(f"Synthesized trajectory already exists at {out_path.name}. Skipping computation.")
+        return str(out_path)
+
     # 1. Resolve Rank to Route
     logger.info(f"Resolving rank {rank} to route...")
     df_summary = load_route_summary()
@@ -140,43 +118,25 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
     
-    # 2. Query registries to find trajectory files
-    clean_registry_file = FLIGHT_REGISTRY_DIR / "global_clean_registry.parquet"
+    # 2. Query registry to find raw flight files
     raw_registry_file = FLIGHT_REGISTRY_DIR / "global_trajectory_registry.parquet"
-    
-    df_reg = None
-    use_raw = False
-    route_pattern = f"_{dep}-{arr}_"
-    
-    # Check clean registry first
-    if clean_registry_file.exists():
-        df_clean_reg = pd.read_parquet(clean_registry_file)
-        matching_flights = df_clean_reg[df_clean_reg['flight_id'].str.contains(route_pattern, na=False)]
-        if not matching_flights.empty:
-            df_reg = df_clean_reg
-            logger.info(f"Found cleaned flights in global_clean_registry.")
-            
-    # Fallback to raw registry
-    if df_reg is None and raw_registry_file.exists():
-        df_raw_reg = pd.read_parquet(raw_registry_file)
-        matching_flights = df_raw_reg[df_raw_reg['flight_id'].str.contains(route_pattern, na=False)]
-        if not matching_flights.empty:
-            df_reg = df_raw_reg
-            use_raw = True
-            logger.info(f"Clean registry has no entries for route. Falling back to global_trajectory_registry (raw).")
-            
-    if df_reg is None:
-        logger.error(f"No cleaned or raw flights found in registries matching route pattern '_{dep}-{arr}_'.")
+    if not raw_registry_file.exists():
+        logger.error("Global raw trajectory registry file not found.")
         return None
         
-    matching_flights = df_reg[df_reg['flight_id'].str.contains(route_pattern, na=False)]
-    unique_file_paths = matching_flights['file_path'].unique()
-    logger.info(f"Found {len(matching_flights)} matching flights across {len(unique_file_paths)} parquet files.")
+    df_raw_reg = pd.read_parquet(raw_registry_file)
+    route_pattern = f"_{dep}-{arr}_"
+    matching_flights = df_raw_reg[df_raw_reg['flight_id'].str.contains(route_pattern, na=False)]
     
-    # 3. Load flights from Parquet files
-    spatial_grid_size = 1000
-    normalized_distance_grid = np.linspace(0, 1, spatial_grid_size)
-    interpolated_flights = []
+    if matching_flights.empty:
+        logger.error(f"No raw flights found in registry matching route pattern '{route_pattern}'.")
+        return None
+        
+    unique_file_paths = matching_flights['file_path'].unique()
+    logger.info(f"Found {len(matching_flights)} matching flights across {len(unique_file_paths)} raw files.")
+    
+    # 3. Load flights sequentially and build the traffic cohort
+    raw_flights = []
     typecodes = []
     
     for rel_path in unique_file_paths:
@@ -186,162 +146,251 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             continue
             
         try:
-            if use_raw:
-                flights_dict = read_flights_from_parquet_custom(str(abs_path), use_raw=True)
-            else:
-                flights_dict = read_flights_from_parquet(str(abs_path))
-                
+            # Parse raw file to pycontrails flight objects dict
+            flights_dict = parquet_to_pycontrails(str(abs_path))
+            
             for flight_id, fl in flights_dict.items():
                 if route_pattern in flight_id:
-                    # Apply PyContrails gap filling and temporal 1-minute resampling
-                    try:
-                        fl = fl.resample_and_fill(freq="1min")
-                    except Exception as e:
-                        logger.warning(f"resample_and_fill failed for {flight_id}: {e}. Using raw spacing.")
-                        
-                    df_fl = fl.to_dataframe()
-                    df_fl = df_fl.sort_values('time').reset_index(drop=True)
-                    df_fl['elapsed_time'] = (df_fl['time'] - df_fl['time'].iloc[0]).dt.total_seconds()
+                    # Convert to traffic flight
+                    trf_flight = pycontrails_to_traffic(fl)
                     
-                    typecode = fl.attrs.get('aircraft_type', 'B738')
-                    
-                    lats = df_fl['latitude'].values
-                    lons = df_fl['longitude'].values
-                    alts = df_fl['altitude'].values
-                    times = df_fl['elapsed_time'].values
-                    
-                    # Drop any indices that contain NaN in latitude, longitude, altitude, or time
-                    valid_nan = ~(np.isnan(lats) | np.isnan(lons) | np.isnan(alts) | np.isnan(times))
-                    lats = lats[valid_nan]
-                    lons = lons[valid_nan]
-                    alts = alts[valid_nan]
-                    times = times[valid_nan]
-                    
-                    if len(lats) < 5:
-                        continue
-                        
-                    typecodes.append(typecode)
-                    
-                    dists = haversine_distance(lats[:-1], lons[:-1], lats[1:], lons[1:])
-                    cum_dist = np.insert(np.cumsum(dists), 0, 0)
-                    
-                    if cum_dist[-1] == 0:
-                        continue
-                        
-                    norm_cum_dist = cum_dist / cum_dist[-1]
-                    
-                    # Ensure strictly increasing for interpolation
-                    valid_idx = np.concatenate(([True], np.diff(norm_cum_dist) > 0))
-                    norm_cum_dist = norm_cum_dist[valid_idx]
-                    
-                    interp_lat = interp1d(norm_cum_dist, lats[valid_idx], kind='linear')(normalized_distance_grid)
-                    interp_lon = interp1d(norm_cum_dist, lons[valid_idx], kind='linear')(normalized_distance_grid)
-                    interp_alt = interp1d(norm_cum_dist, alts[valid_idx], kind='linear')(normalized_distance_grid)
-                    interp_time = interp1d(norm_cum_dist, times[valid_idx], kind='linear')(normalized_distance_grid)
-                    
-                    interpolated_flights.append({
-                        'lat': interp_lat, 'lon': interp_lon, 'alt': interp_alt, 'time': interp_time
-                    })
+                    # Strip ground segments
+                    airborne_flight = trf_flight.airborne()
+                    if airborne_flight is not None and len(airborne_flight) >= 10:
+                        raw_flights.append(airborne_flight)
+                        typecodes.append(fl.attrs.get('aircraft_type', 'B738'))
         except Exception as e:
             logger.error(f"Failed to load flights from {abs_path}: {e}")
             
-    if not interpolated_flights:
-        logger.error("No valid flights successfully interpolated.")
+    if not raw_flights:
+        logger.error("No valid airborne flights successfully loaded.")
         return None
         
-    # 4. Check if altitude reaches FL250 threshold
-    max_alt_val = max(np.max(f['alt']) for f in interpolated_flights)
-    # EKF/OpenSky output altitude is in meters.
-    min_threshold_m = 25000 / 3.28084
+    logger.info(f"Successfully loaded {len(raw_flights)} airborne trajectories. Identifying phases...")
     
-    if max_alt_val < min_threshold_m:
-        logger.warning(f"Trajectory aborted: Flights do not reach contrail-relevant altitudes (< 25,000 ft / {min_threshold_m:,.1f} meters).")
+    # 4. Phase classification and ROCD statistics calculation
+    flight_metrics = []
+    
+    for idx, flight in enumerate(raw_flights):
+        try:
+            df = flight.data
+            ts = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds().values
+            alt = df['altitude'].values  # in feet
+            spd = df['groundspeed'].values  # in knots
+            roc = df['vertical_rate'].values  # in feet/min
+            
+            # Apply OpenAP FlightPhase classifier
+            fp = FlightPhase()
+            fp.set_trajectory(ts, alt, spd, roc)
+            labels = fp.phaselabel()
+            
+            toc_idx, tod_idx = find_toc_tod(flight, labels)
+            
+            # Calculate average ROCD values (feet / minute)
+            climb_dur_min = (ts[toc_idx] - ts[0]) / 60.0
+            climb_rocd = (alt[toc_idx] - alt[0]) / climb_dur_min if climb_dur_min > 0 else 0.0
+            
+            descent_dur_min = (ts[-1] - ts[tod_idx]) / 60.0
+            descent_rocd = (alt[tod_idx] - alt[-1]) / descent_dur_min if descent_dur_min > 0 else 0.0
+            
+            flight_metrics.append({
+                'flight': flight,
+                'toc_idx': toc_idx,
+                'tod_idx': tod_idx,
+                'climb_rocd': abs(climb_rocd),
+                'descent_rocd': abs(descent_rocd)
+            })
+        except Exception as e:
+            logger.warning(f"Failed phase identification on flight {idx}: {e}")
+            # Fallback metric entry using heuristical TOC/TOD
+            df = flight.data
+            toc_idx = int(len(df) * 0.2)
+            tod_idx = int(len(df) * 0.8)
+            flight_metrics.append({
+                'flight': flight,
+                'toc_idx': toc_idx,
+                'tod_idx': tod_idx,
+                'climb_rocd': 1800.0,
+                'descent_rocd': 1200.0
+            })
+            
+    # 5. Classify cohort into clean flights vs holding-pattern outliers
+    # Standard baseline thresholds for direct climb/descent profiles
+    min_descent_rate = 1200.0  # ft/min (1.2k)
+    min_climb_rate = 1800.0    # ft/min (1.8k)
+    
+    clean_metrics = [m for m in flight_metrics if m['descent_rocd'] >= min_descent_rate and m['climb_rocd'] >= min_climb_rate]
+    
+    # Fallback: if less than 30% of the flights meet standard, take top 60% by descent rate
+    if len(clean_metrics) < max(1, len(flight_metrics) * 0.3):
+        threshold_count = max(1, int(len(flight_metrics) * 0.6))
+        sorted_by_descent = sorted(flight_metrics, key=lambda x: x['descent_rocd'], reverse=True)
+        clean_metrics = sorted_by_descent[:threshold_count]
+        logger.info(f"ROCD clustering fallback: selected top {len(clean_metrics)} flights as clean baseline.")
+        
+    median_clean_climb_rocd = np.median([m['climb_rocd'] for m in clean_metrics])
+    median_clean_descent_rocd = np.median([m['descent_rocd'] for m in clean_metrics])
+    
+    # Fallback to defaults if stats are non-physical
+    if pd.isna(median_clean_climb_rocd) or median_clean_climb_rocd < 500:
+        median_clean_climb_rocd = 1800.0
+    if pd.isna(median_clean_descent_rocd) or median_clean_descent_rocd < 500:
+        median_clean_descent_rocd = 1200.0
+        
+    logger.info(f"Baseline clean rates calculated: Climb={median_clean_climb_rocd:.1f} ft/min, Descent={median_clean_descent_rocd:.1f} ft/min")
+    
+    # 6. Apply Hybrid Normalization to holding-pattern flights (outliers)
+    normalized_flights = []
+    clean_flight_ids = {m['flight'].callsign for m in clean_metrics}
+    
+    for metric in flight_metrics:
+        flight = metric['flight']
+        
+        # If flight belongs to the clean cohort, keep its original trajectory intact
+        if flight.callsign in clean_flight_ids:
+            normalized_flights.append(flight)
+            continue
+            
+        logger.info(f"Normalizing holding-pattern flight {flight.callsign} (Climb ROCD={metric['climb_rocd']:.1f}, Descent ROCD={metric['descent_rocd']:.1f})...")
+        
+        df_new = flight.data.copy()
+        times = (df_new['timestamp'] - df_new['timestamp'].iloc[0]).dt.total_seconds().values
+        altitudes = df_new['altitude'].values.copy()
+        latitudes = df_new['latitude'].values.copy()
+        longitudes = df_new['longitude'].values.copy()
+        
+        toc_idx = metric['toc_idx']
+        tod_idx = metric['tod_idx']
+        
+        # Correct climb segment if below threshold
+        if metric['climb_rocd'] < min_climb_rate:
+            alt_diff_climb = altitudes[toc_idx] - altitudes[0]
+            new_climb_duration = (alt_diff_climb / median_clean_climb_rocd) * 60.0
+            old_climb_duration = times[toc_idx] - times[0]
+            time_shift_climb = new_climb_duration - old_climb_duration
+            
+            # Linearize spatial climb segment
+            climb_len = toc_idx + 1
+            latitudes[:climb_len] = np.linspace(latitudes[0], latitudes[toc_idx], climb_len)
+            longitudes[:climb_len] = np.linspace(longitudes[0], longitudes[toc_idx], climb_len)
+            altitudes[:climb_len] = np.linspace(altitudes[0], altitudes[toc_idx], climb_len)
+            
+            # Re-distribute elapsed time linearly and shift subsequent timeline
+            times[:climb_len] = np.linspace(times[0], times[0] + new_climb_duration, climb_len)
+            times[climb_len:] = times[climb_len:] + time_shift_climb
+            
+        # Correct descent segment if below threshold
+        if metric['descent_rocd'] < min_descent_rate:
+            alt_diff_descent = altitudes[tod_idx] - altitudes[-1]
+            new_descent_duration = (alt_diff_descent / median_clean_descent_rocd) * 60.0
+            
+            # Linearize spatial descent segment
+            descent_len = len(df_new) - tod_idx
+            latitudes[tod_idx:] = np.linspace(latitudes[tod_idx], latitudes[-1], descent_len)
+            longitudes[tod_idx:] = np.linspace(longitudes[tod_idx], longitudes[-1], descent_len)
+            altitudes[tod_idx:] = np.linspace(altitudes[tod_idx], altitudes[-1], descent_len)
+            
+            # Re-distribute elapsed time linearly
+            times[tod_idx:] = np.linspace(times[tod_idx], times[tod_idx] + new_descent_duration, descent_len)
+            
+        # Update DataFrame fields
+        df_new['latitude'] = latitudes
+        df_new['longitude'] = longitudes
+        df_new['altitude'] = altitudes
+        df_new['timestamp'] = df_new['timestamp'].iloc[0] + pd.to_timedelta(times, unit='s')
+        
+        normalized_flights.append(TrafficFlight(df_new))
+        
+    # 7. Spatial Standardization and Projection setup
+    combined_df = pd.concat([f.data for f in normalized_flights], ignore_index=True)
+    traffic_cohort = Traffic(combined_df)
+    
+    max_duration_seconds = max(flight.duration.total_seconds() for flight in traffic_cohort)
+    min_sample_spacing_seconds = max(time_grid_seconds / 10.0, 1.0)
+    nb_samples = int(max_duration_seconds / min_sample_spacing_seconds)
+    
+    logger.info(f"Oversampling spatial grid: nb_samples={nb_samples} (spacing={min_sample_spacing_seconds:.1f}s)")
+    resampled_traffic = traffic_cohort.resample(nb_samples).eval()
+    
+    # Set up dynamic local LAEA projection centered on cohort mean
+    all_dfs = pd.concat([f.data for f in resampled_traffic])
+    mean_lat = all_dfs['latitude'].mean()
+    mean_lon = all_dfs['longitude'].mean()
+    
+    proj4_str = f"+proj=laea +lat_0={mean_lat} +lon_0={mean_lon} +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+    projection = pyproj.Proj(proj4_str)
+    
+    # 8. Compute the spatial centroid
+    logger.info("Computing spatial track centroid using DTW...")
+    centroid_flight = resampled_traffic.centroid(nb_samples=nb_samples, projection=projection)
+    
+    # 9. Snap Centroid to PyContrails grid
+    centroid_df = centroid_flight.data.copy()
+    
+    # Convert Units back to SI from standard aviation units
+    rename_si = {
+        'timestamp': 'time',
+        'track': 'heading',
+        'groundspeed': 'gs',
+        'vertical_rate': 'rocd'
+    }
+    centroid_df = centroid_df.rename(columns=rename_si)
+    
+    centroid_df['altitude'] = centroid_df['altitude'] / 3.28084             # feet to meters
+    if 'gs' in centroid_df.columns:
+        centroid_df['gs'] = centroid_df['gs'] / 1.9438447                   # knots to m/s
+    if 'rocd' in centroid_df.columns:
+        centroid_df['rocd'] = centroid_df['rocd'] / 196.8504                # ft/min to m/s
+        
+    # Re-verify that altitudes reach contrail relevant levels (FL250 threshold)
+    max_alt_m = centroid_df['altitude'].max()
+    min_threshold_m = 25000.0 / 3.28084
+    if max_alt_m < min_threshold_m:
+        logger.warning(f"Synthesis aborted: Synthesized cruise altitude {max_alt_m*3.28084:.0f} ft is below FL250.")
         return None
-
-    # --- 3. Initial Aggregation ---
-    lat_stack = np.vstack([f['lat'] for f in interpolated_flights])
-    lon_stack = np.vstack([f['lon'] for f in interpolated_flights])
-    alt_stack = np.vstack([f['alt'] for f in interpolated_flights])
-    time_stack = np.vstack([f['time'] for f in interpolated_flights])
-    
-    synthesized_lat = np.median(lat_stack, axis=0)
-    synthesized_lon = np.median(lon_stack, axis=0)
-    synthesized_time = np.mean(time_stack, axis=0)
-    synthesized_alt = np.percentile(alt_stack, 75, axis=0)
-    
-    # --- 4. The Climb/Descent "Straight Line" Override ---
-    max_synthesized_alt = np.max(synthesized_alt)
-    if max_synthesized_alt < min_threshold_m:
-        logger.warning(f"Trajectory aborted: Aggregated cruise profile < 25,000 ft.")
-        return None
-
-    # Define TOC and TOD dynamically: 95% of the max altitude achieved
-    cruise_threshold = max_synthesized_alt * 0.95
-    above_threshold_indices = np.where(synthesized_alt >= cruise_threshold)[0]
-    toc_idx = above_threshold_indices[0]
-    tod_idx = above_threshold_indices[-1]
-    
-    # Overwrite Climb Segment (0 to toc_idx) with a straight line
-    synthesized_lat[:toc_idx] = np.linspace(synthesized_lat[0], synthesized_lat[toc_idx], toc_idx)
-    synthesized_lon[:toc_idx] = np.linspace(synthesized_lon[0], synthesized_lon[toc_idx], toc_idx)
-    synthesized_alt[:toc_idx] = np.linspace(synthesized_alt[0], synthesized_alt[toc_idx], toc_idx)
-    synthesized_time[:toc_idx] = np.linspace(synthesized_time[0], synthesized_time[toc_idx], toc_idx)
-
-    # Overwrite Descent Segment (tod_idx to end) with a straight line
-    desc_len = spatial_grid_size - tod_idx
-    synthesized_lat[tod_idx:] = np.linspace(synthesized_lat[tod_idx], synthesized_lat[-1], desc_len)
-    synthesized_lon[tod_idx:] = np.linspace(synthesized_lon[tod_idx], synthesized_lon[-1], desc_len)
-    synthesized_alt[tod_idx:] = np.linspace(synthesized_alt[tod_idx], synthesized_alt[-1], desc_len)
-    synthesized_time[tod_idx:] = np.linspace(synthesized_time[tod_idx], synthesized_time[-1], desc_len)
-
-    # --- 5. Temporal Resampling ---
-    max_time = np.max(synthesized_time)
-    equal_time_grid = np.arange(0, max_time, time_grid_seconds)
-    
-    final_lat = interp1d(synthesized_time, synthesized_lat, kind='linear', fill_value="extrapolate")(equal_time_grid)
-    final_lon = interp1d(synthesized_time, synthesized_lon, kind='linear', fill_value="extrapolate")(equal_time_grid)
-    final_alt = interp1d(synthesized_time, synthesized_alt, kind='linear', fill_value="extrapolate")(equal_time_grid)
-    
-    # Assign fixed baseline date: 2025-01-01 00:00:00 UTC
-    baseline_time = pd.Timestamp("2025-01-01 00:00:00", tz="UTC")
-    time_series = baseline_time + pd.to_timedelta(equal_time_grid, unit='s')
-    
-    synthesized_df = pd.DataFrame({
-        'time': time_series,
-        'latitude': final_lat,
-        'longitude': final_lon,
-        'altitude': final_alt
-    })
-    
+        
     # Find most common typecode to use as representative type
     representative_typecode = Counter(typecodes).most_common(1)[0][0] if typecodes else "B738"
     
-    # Construct PyContrails Flight object
-    synthesized_flight = Flight(
-        data=synthesized_df,
-        flight_id=f"{dep}-{arr}_synthesized",
-        aircraft_type=representative_typecode,
-        icao24="SYNTH",
-        callsign="SYNTH",
-        crs="EPSG:4326"
-    )
+    # Build Flight object attributes
+    attrs = {
+        "flight_id": f"{dep}-{arr}_synthesized",
+        "aircraft_type": representative_typecode,
+        "icao24": "SYNTH",
+        "callsign": "SYNTH"
+    }
     
-    # Save using the shared adapter write logic
+    pyc_centroid = Flight(data=centroid_df, crs="EPSG:4326", drop_duplicated_times=True, **attrs)
+    
+    # Uniform temporal interpolation
+    logger.info(f"Resampling synthesized trajectory to uniform {time_grid_seconds}s grid...")
+    synthesized_flight = pyc_centroid.resample_and_fill(freq=f"{time_grid_seconds}s")
+    
+    # 10. Timeline Normalization & Save
+    df_final = synthesized_flight.to_dataframe()
+    delta_time = df_final['time'] - df_final['time'].min()
+    df_final['time'] = pd.Timestamp("2025-01-01 00:00:00", tz="UTC") + delta_time
+    
+    # Re-instantiate final flight
+    final_flight = Flight(data=df_final, crs="EPSG:4326", **attrs)
+    
     out_path = Path(output_parquet)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_flights_to_parquet([synthesized_flight], out_path)
     
-    # Update global synthesized registry manifest
+    # Save parquet via adapter
+    pycontrails_to_parquet(final_flight, out_path)
+    
+    # Register output file
     synthesized_registry_file = FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet"
     rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
     update_synthesized_registry(synthesized_registry_file, route=f"{dep}-{arr}", rank=rank, file_path=rel_path_to_save)
     
-    logger.info(f"Synthesized trajectory created and registered: {out_path.name}")
+    logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
     return str(out_path)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from registry cohorts.")
+    parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from raw OpenSky cohorts.")
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")
     parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for the synthesized trajectory.")
     parser.add_argument("--grid-seconds", type=int, default=60, help="Time grid resolution in seconds (default: 60).")

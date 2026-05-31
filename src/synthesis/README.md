@@ -1,6 +1,6 @@
 # Flight Trajectory Synthesis Module
 
-This module represents the trajectory synthesis step in the Flight Physics Pipeline. It aggregates a cohort of cleaned EKF trajectories for a specific route rank into a single idealized, typical, and noise-filtered "synthesized" trajectory mapped onto a uniform temporal grid starting at a fixed baseline datetime.
+This module represents the trajectory synthesis step in the Flight Physics Pipeline. It aggregates a cohort of raw OpenSky trajectories for a specific route rank into a single idealized, typical, and noise-filtered "synthesized" trajectory mapped onto a uniform temporal grid starting at a fixed baseline datetime.
 
 ---
 
@@ -9,7 +9,7 @@ This module represents the trajectory synthesis step in the Flight Physics Pipel
 ```text
 src/synthesis/
 ├── README.md                  # This documentation file
-└── path_generator.py          # Synthesized trajectory generator engine
+└── path_generator.py          # Synthesized trajectory generator engine (refactored)
 ```
 
 ---
@@ -18,57 +18,76 @@ src/synthesis/
 
 ```text
 Module Objectives
- └── Synthesize a representative trajectory for a route based on clean cohort flights
-      ├── Sub-objective: Create synthesized flight coordinates and times
-      │    └── Solution: create_synthesized_trajectory() in path_generator.py
-      │         ├── Inputs:
-      │         │    ├── rank (int): Route rank from RouteSummary
-      │         │    ├── output_parquet (str): Path to write the output parquet
-      │         │    └── time_grid_seconds (int): Resampling temporal resolution in seconds (default: 60)
-      │         └── Outputs: Path to the generated parquet file or None
+ └── Synthesize a representative 4D trajectory from a local cohort of historical flights
       │
-      └── Sub-objective: Register the generated path in the central index
-           └── Solution: update_synthesized_registry() in path_generator.py
-                ├── Inputs:
-                │    ├── registry_file (Path): Path to global_synthesized_registry.parquet
-                │    ├── route (str): Route name (DEP-ARR)
-                │    ├── rank (int): Route rank
-                │    └── file_path (str): Relative path to the generated parquet file
-                └── Outputs: None
+      ├── Sub-objective 1: Local Cohort Resolution & Iterative Adapter Ingestion
+      │    └── Solution: Query registries, load files sequentially using adapters, and filter to airborne phases
+      │         ├── load_route_summary() -> Resolve departure and arrival using CLI `--rank`.
+      │         ├── pd.read_parquet() -> Fetch raw cohort filepaths from global_trajectory_registry.parquet.
+      │         └── For each filepath:
+      │              ├── parquet_to_pycontrails(path) -> Load and normalize raw OpenSky schemas.
+      │              ├── pycontrails_to_traffic(pyc_flight) -> Convert to traffic.core.Flight (scaled to aviation units).
+      │              └── trf_flight.airborne() -> Strip ground-borne taxi/takeoff/landing segments.
+      │
+      ├── Sub-objective 2: Hybrid Climb/Descent Normalization (Holding Pattern Correction)
+      │    └── Solution: Use OpenAP to locate TOC/TOD, identify holding-pattern outliers, and correct them using cohort median ROCDs
+      │         ├── Phase Classification: Run `openap.phase.FlightPhase` on each flight to locate TOC and TOD.
+      │         ├── Kinematic Metrics: Calculate average climb ROCD (takeoff to TOC) and descent ROCD (TOD to landing).
+      │         ├── Clustering: Group flights into clean flights and holding-pattern outliers (e.g. descent ROCD < 1200 ft/min).
+      │         ├── Median Derivation: Compute median climb/descent ROCD of clean flights.
+      │         └── Segment Correction: For holding-pattern flights, replace climb/descent with linear paths scaled to the median clean ROCD duration, preserving original cruise tracks.
+      │
+      ├── Sub-objective 3: Geospatial Projection & Dynamic Spatial Standardization
+      │    └── Solution: Project and resample all normalized cohort flights onto oversampled spatial checkpoints
+      │         ├── Project: Convert WGS84 coordinates to local LAEA projection centered at cohort mean lat/lon.
+      │         ├── Calculate Duration: Determine max_duration_seconds across normalized cohort.
+      │         ├── Spacing: Calculate min_sample_spacing_seconds = max(grid_seconds / 10.0, 1.0).
+      │         └── Resample: Traffic.resample(nb_samples = max_duration_seconds / min_sample_spacing_seconds)
+      │
+      ├── Sub-objective 4: Spatial Track Centroid Generation
+      │    └── Solution: Extract the median spatial track using traffic's DTW centroid method
+      │         └── Traffic.centroid(nb_samples=nb_samples, projection=projection)
+      │
+      ├── Sub-objective 5: Kinematic Validation & Temporal Gridding
+      │    └── Solution: Snap the centroid back to a uniform temporal grid using pycontrails
+      │         ├── pycontrails.Flight(centroid_df) -> Ingest back to PyContrails (converting back to SI units).
+      │         └── Flight.resample_and_fill(freq=f"{grid_seconds}s") -> Snap to uniform CLI temporal grid.
+      │
+      └── Sub-objective 6: Timeline Normalization & File Output Updates
+           └── Solution: Shift timeline to baseline, write to disk, and update local registry
+                ├── Shift: Shift timeline to project baseline (2025-01-01 00:00:00 UTC).
+                ├── Serialize: pycontrails_to_parquet(resampled_flight, out_path).
+                └── Register: Append route, rank, and relative filepath to global_synthesized_registry.parquet.
 ```
 
 ---
 
 ## 3. Data Workflow
 
-> [!NOTE]
-> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner).
-
 ```mermaid
 graph TD
     A[Route Rank Input] --> B[1. RouteSummary Resolution]
-    B -->|Origin-Destination DEP -> ARR| C[2. Clean Registry Query]
-    C -->|global_clean_registry.parquet| D[3. Load Clean Parquet Files]
-    D -->|Cohort flights matching route| E[4. Spatial Distance Normalization 0.0-1.0]
-    E --> F[5. Coordinate Median/Percentile Aggregation]
-    F --> G[6. TOC & TOD Climb/Descent Override]
-    G --> H[7. Temporal Resampling to Fixed Baseline]
-    H -->|2025-01-01 00:00:00 UTC Baseline| I[8. Save Synthesized Parquet]
-    I -->|adapters.py write_flights_to_parquet| J[data/synthesized_paths/DEP-ARR_synthesized.parquet]
-    J --> K[9. Update Synthesized Manifest]
-    K -->|global_synthesized_registry.parquet| L[Registered Entry]
+    B -->|Origin-Destination DEP -> ARR| C[2. Raw Registry Query]
+    C -->|global_trajectory_registry.parquet| D[3. Load Raw Parquet Files]
+    D -->|Cohort flights matching route| E[4. OpenAP Phase Labeling]
+    E --> F[5. Hybrid ROCD Normalization]
+    F -->|Straightened climbs/descents for outliers| G[6. Spatial Resampling & Dynamic LAEA Projection]
+    G --> H[7. Spatial DTW Centroid Generation]
+    H --> I[8. Temporal Resampling to Fixed Baseline]
+    I -->|2025-01-01 00:00:00 UTC Baseline| J[9. Save Synthesized Parquet]
+    J -->|adapters.py pycontrails_to_parquet| K[data/synthesized_paths/DEP-ARR_synthesized.parquet]
+    K --> L[10. Update Synthesized Manifest]
+    L -->|global_synthesized_registry.parquet| M[Registered Entry]
 ```
 
 1.  **Route Rank Resolution**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`) using the `master_flights_RouteSummary.pkl`.
-2.  **Registry Query**: The script queries `global_clean_registry.parquet` to locate all cleaned Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`). If the clean registry contains no entries for the route corridor, it automatically falls back to the raw trajectory manifest (`global_trajectory_registry.parquet`).
-3.  **Spatial Standardization**: For each flight in the cohort, the cumulative distance is calculated and normalized from `0.0` (Departure) to `1.0` (Arrival) across 1,000 spatial checkpoints. Coordinates (`latitude`, `longitude`, `altitude`) and elapsed time are linearly interpolated onto this grid.
-4.  **Aggregation & Noise Filtering**: 
-    *   `latitude` & `longitude` use the median value to filter out weather deviations and runway alignment noise.
-    *   `altitude` uses the 75th percentile to favor high-altitude contrail cruise levels.
-5.  **Climb & Descent Linearization**: Coordinates between departure and Top of Climb (TOC) and coordinates after Top of Descent (TOD) are overwritten with straight 3D lines (`np.linspace`) to provide a clean average climb/descent baseline.
-6.  **Baseline Temporal Resampling**: The spatial trajectory is resampled onto a uniform temporal grid (e.g. 60s steps) starting at a fixed baseline datetime (**`2025-01-01 00:00:00 UTC`**). This baseline is used by downstream scripts to shift time coordinates to match any target flight's actual departure time.
-7.  **Export and Registration**: The final trajectory is converted to a `pycontrails.Flight` object, saved to `data/synthesized_paths/`, and registered in `global_synthesized_registry.parquet`.
-    *   *Velocity and Vertical Rate Derivation*: The raw speed (`velocity` / `groundspeed`) and vertical rate (`vertrate` / `vertical_rate`) columns are deliberately ignored during coordinate-level aggregation. Instead, when the clean synthesized coordinate DataFrame is loaded into PyContrails, ground speed (`gs`) and rate of climb/descent (`rocd`) are dynamically derived directly from the resampled 4D coordinates. This ensures that the velocity vectors are physically consistent with the synthesized path.
+2.  **Registry Query**: The script queries `global_trajectory_registry.parquet` directly to locate all raw Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`).
+3.  **Phase Identification & ROCD Calculation**: For each flight in the cohort, `openap.phase.FlightPhase` classifies waypoints and locates the Top of Climb (TOC) and Top of Descent (TOD). The average climb and descent rates of climb/descent (ROCD) are computed.
+4.  **Holding Pattern Correction**: Flights are classified into clean baseline flights and holding-pattern outliers (e.g. descent ROCD $< 1200$ ft/min). For outliers, their climb/descent segments are replaced with direct 3D lines scaled to the median clean ROCD duration, removing circles, loops, and delay times while maintaining realistic ground speeds.
+5.  **Spatial Standardization**: Trajectories are projected to a dynamic local Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the cohort's average coordinates. Flights are resampled to a dense set of spatial checkpoints (with spacing at `1/10` of the grid resolution).
+6.  **Centroid Generation**: A pairwise Dynamic Time Warping (DTW) distance matrix is computed over the spatial checkpoints to extract the geometric track centroid, avoiding coordinate median warping.
+7.  **Baseline Temporal Resampling**: The spatial centroid is converted back to SI units and resampled to a uniform temporal grid (e.g. 60s steps) starting at a fixed baseline datetime (**`2025-01-01 00:00:00 UTC`**).
+8.  **Cache Skip Check**: If the output file already exists on disk, the script skips the DTW and phase calculations entirely to optimize execution time in pipeline loops.
 
 ---
 
@@ -99,12 +118,15 @@ python -m src.synthesis.path_generator `
 
 ### Python Libraries
 *   `pandas` & `pyarrow` (for Parquet I/O operations)
-*   `numpy` & `scipy` (for linear interpolation and arrays)
-*   `pycontrails` (for Flight structures)
+*   `numpy` & `scipy` (for arrays and interpolation)
+*   `pyproj` (for dynamic localized projection transformations)
+*   `traffic` (for spatial resampling, airborne filtering, and DTW track centroids)
+*   `openap` (for fuzzy logic flight phase labeling and TOC/TOD detection)
+*   `pycontrails` (for Flight container structures and temporal interpolation engines)
 
 ### Input Files
 *   `data/flight_registry/master_flights_RouteSummary.pkl` (for decoding route ranks)
-*   `data/flight_registry/global_clean_registry.parquet` (for identifying cleaned source trajectories)
+*   `data/flight_registry/global_trajectory_registry.parquet` (for identifying raw source trajectories)
 
 ### Central Standards & References
 *   For naming conventions, schemas, and unit systems (SI vs Aviation), refer directly to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
