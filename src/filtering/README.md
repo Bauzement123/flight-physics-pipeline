@@ -82,6 +82,8 @@ python -m src.filtering.population_filter --origin EGLL --dest KJFK --start-date
 - `--start-date` / `--end-date`: Date bounds `YYYY-MM-DD`.
 - `--typecode`: Filter by specific aircraft designator (e.g. `B777`).
 - `--origin` / `--dest`: Origin/destination airport ICAO codes.
+- `--ranks`: Comma-separated ranks to extract.
+- `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
 
 ---
 

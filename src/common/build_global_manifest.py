@@ -99,6 +99,46 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
     logging.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
 
 
+def index_synthesized_files(registry_file: Path, search_dir: Path):
+    logging.info("--- Rebuilding/Updating Synthesized Registry ---")
+    if not search_dir.exists():
+        logging.info("Synthesized folder does not exist. Skipping.")
+        return
+        
+    found_files = glob.glob(str(search_dir / "**" / "*_synthesized.parquet"), recursive=True)
+    logging.info(f"Found {len(found_files)} synthesized files on disk.")
+    
+    # Load RouteSummary to resolve rank for each route
+    from src.common.utils import load_route_summary
+    df_summary = load_route_summary()
+    route_to_rank = {}
+    if not df_summary.empty:
+        for _, row in df_summary.iterrows():
+            # Standardize route format e.g. "LIRF-LFMN"
+            route_key = row['route'].replace(" -> ", "-").strip()
+            route_to_rank[route_key] = row['rank']
+            
+    new_entries = []
+    for filepath_str in found_files:
+        filepath = Path(filepath_str)
+        rel_path = filepath.resolve().relative_to(BASE_DIR).as_posix()
+        
+        name = filepath.name
+        if name.endswith("_synthesized.parquet"):
+            route = name.replace("_synthesized.parquet", "").strip()
+            rank = route_to_rank.get(route, -1)
+            new_entries.append({
+                "route": route,
+                "rank": rank,
+                "file_path": rel_path
+            })
+            
+    df_updated = pd.DataFrame(new_entries)
+    registry_file.parent.mkdir(parents=True, exist_ok=True)
+    df_updated.to_parquet(registry_file, index=False)
+    logging.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
+
+
 def build_global_manifest():
     # 1. Raw trajectories registry
     index_parquet_files(
@@ -132,6 +172,22 @@ def build_global_manifest():
             BASE_DIR / "data" / "trajectories"
         ],
         description="Physics Simulation"
+    )
+    
+    # 4. Cloned simulated outputs registry
+    index_parquet_files(
+        pattern="*_simulated.parquet",
+        registry_file=FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet",
+        search_dirs=[
+            BASE_DIR / "data" / "results" / "cloned_simulations"
+        ],
+        description="Cloned Physics Simulation"
+    )
+    
+    # 5. Synthesized paths registry
+    index_synthesized_files(
+        registry_file=FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet",
+        search_dir=BASE_DIR / "data" / "synthesized_paths"
     )
 
 if __name__ == "__main__":

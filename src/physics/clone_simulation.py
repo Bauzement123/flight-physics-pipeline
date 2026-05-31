@@ -21,6 +21,11 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR
+temp_dir = str(BASE_DIR / "data" / "temp")
+os.makedirs(temp_dir, exist_ok=True)
+os.environ['TEMP'] = temp_dir
+os.environ['TMP'] = temp_dir
+os.environ['TMPDIR'] = temp_dir
 from src.common.utils import load_route_summary, split_route_string, update_global_registry
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
@@ -130,274 +135,487 @@ def simulate_cloned_flight(
     fl_out = cocip_model.eval(source=fl_evaluated)
     return fl_out
 
-def run_batch_clone_simulation(
-    ranks: list, 
-    weather_cache: str, 
-    out_dir: str, 
-    max_age_hours: int = 48,
-    test_mode: bool = False
-):
-    df_summary = load_route_summary()
-    if df_summary.empty:
-        logger.error("RouteSummary is empty or missing.")
-        return
-        
-    synthesized_registry_file = FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet"
-    if not synthesized_registry_file.exists():
-        logger.error(f"Global synthesized registry does not exist at {synthesized_registry_file}. Run path synthesis first.")
-        return
+def filter_cohort_flights(
+    master_flights_path,
+    route_summary_path,
+    start_date: str = None,
+    end_date: str = None,
+    ranks: list = None,
+    out_dir: str = None,
+    synthesized_registry_file: str = None,
+    overwrite: bool = False
+) -> pd.DataFrame:
+    """
+    Creates the cohort flight list in memory by filtering the master registry.
+    Applies exclusions:
+    1. Filter date range and rank corridor in memory.
+    2. Throw out airport to airport loops.
+    3. Retain routes present in synthesized registry and having a valid base path file.
+    4. Throw out already simulated flights if overwrite is False.
+    """
+    from src.filtering.population_filter import filter_population_in_memory
+    
+    # 1. In-memory filtering + loop dropping
+    logger.info("Applying in-memory temporal and rank filters...")
+    df_filtered = filter_population_in_memory(
+        master_flights=master_flights_path,
+        route_summary=route_summary_path,
+        start_date=start_date,
+        end_date=end_date,
+        ranks=ranks,
+        drop_airport_loops=True
+    )
+    
+    if df_filtered.empty:
+        logger.warning("No flights matched filtering criteria.")
+        return pd.DataFrame()
+
+    # 2. Synthesized registry check
+    logger.info("Filtering against synthesized registry manifest...")
+    if not Path(synthesized_registry_file).exists():
+        logger.error(f"Synthesized registry file not found: {synthesized_registry_file}")
+        return pd.DataFrame()
         
     df_synth_reg = pd.read_parquet(synthesized_registry_file)
-    
-    # Output Dir
-    out_dir_path = Path(out_dir)
-    out_dir_path.mkdir(parents=True, exist_ok=True)
-    
-    # Simulation Log
-    sim_log_path = out_dir_path / "simulation.log"
-    
-    new_registry_entries = []
-    
-    for rank in ranks:
-        route_row = df_summary[df_summary['rank'] == rank]
-        if route_row.empty:
-            logger.error(f"Rank {rank} not found in RouteSummary. Skipping.")
-            continue
+    valid_routes = {}
+    for _, row in df_synth_reg.iterrows():
+        route = row['route']
+        rel_path = row['file_path']
+        abs_path = BASE_DIR / rel_path
+        if abs_path.exists():
+            valid_routes[route] = abs_path
             
-        route_str = route_row['route'].iloc[0]
-        dep, arr = split_route_string(route_str)
-        logger.info(f"Processing Rank {rank} ({dep} -> {arr})...")
+    # Keep only flights whose route is registered and base path file exists on disk
+    df_filtered['route_key'] = df_filtered['estdepartureairport'] + '-' + df_filtered['estarrivalairport']
+    initial_len = len(df_filtered)
+    df_filtered = df_filtered[df_filtered['route_key'].isin(valid_routes.keys())].copy()
+    dropped_synth = initial_len - len(df_filtered)
+    if dropped_synth > 0:
+        logger.info(f"Dropped {dropped_synth} flights missing registered synthesized base paths.")
         
-        # 1. Locate Synthesized Path in registry
-        synth_match = df_synth_reg[df_synth_reg['route'] == f"{dep}-{arr}"]
-        if synth_match.empty:
-            logger.error(f"No synthesized path registered for route {dep}-{arr}. Skipping.")
-            continue
-            
-        synth_rel_path = synth_match['file_path'].iloc[0]
-        synth_abs_path = BASE_DIR / synth_rel_path
-        if not synth_abs_path.exists():
-            logger.error(f"Registered synthesized path file not found at: {synth_abs_path}. Skipping.")
-            continue
-            
-        # Load the base synthetic flight (only one flight is inside)
-        synth_flights = read_flights_from_parquet(str(synth_abs_path))
-        if not synth_flights:
-            logger.error(f"Could not load flight from synthesized file: {synth_abs_path}. Skipping.")
-            continue
-        base_flight = list(synth_flights.values())[0]
-        
-        # 2. Load original flight list for schedule
-        flight_list_file = BASE_DIR / "data" / "flight_lists" / f"{dep}-{arr}.parquet"
-        if not flight_list_file.exists():
-            logger.error(f"Flight list file not found at: {flight_list_file}. Skipping corridor.")
-            continue
-            
-        df_flight_list = pd.read_parquet(flight_list_file)
-        if df_flight_list.empty:
-            logger.warning(f"Flight list {flight_list_file.name} is empty. Skipping.")
-            continue
-            
-        # Filter first 3 flights if in test mode
-        if test_mode:
-            logger.info("Test Mode enabled: Slicing flight list to first 3 entries.")
-            df_flight_list = df_flight_list.head(3)
-            
-        logger.info(f"Resolved {len(df_flight_list)} target flights to simulate.")
-        
-        # Create output subdirectory for corridor
-        corridor_out_dir = out_dir_path / f"{dep}-{arr}_cloned_simulated"
-        corridor_out_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Prepare list of flight info and pre-resolve times
-        flights_info = []
-        for idx, (_, row) in enumerate(df_flight_list.iterrows()):
+    if df_filtered.empty:
+        return df_filtered
+
+    # 3. Already simulated checklist (manifest + file check)
+    if not overwrite:
+        logger.info("Filtering out already simulated flights...")
+        cloned_registry_file = FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet"
+        simulated_ids = set()
+        if cloned_registry_file.exists():
+            try:
+                df_sim_reg = pd.read_parquet(cloned_registry_file)
+                simulated_ids = set(df_sim_reg['flight_id'].unique())
+            except Exception as e:
+                logger.warning(f"Could not load cloned registry file: {e}")
+                
+        # We can construct the flight IDs and check file existence
+        keep_mask = []
+        out_dir_path = Path(out_dir)
+        for _, row in df_filtered.iterrows():
+            dep = row['estdepartureairport']
+            arr = row['estarrivalairport']
             icao24 = row['icao24']
             callsign = row.get('callsign', 'UNK')
-            firstseen = row['firstseen']
-            lastseen = row['lastseen']
-            typecode = row.get('typecode', 'B738')
+            firstseen_dt = pd.to_datetime(row['firstseen'])
             
-            firstseen_dt = pd.to_datetime(firstseen)
-            lastseen_dt = pd.to_datetime(lastseen)
-            
-            # Normalize to timezone-aware UTC
             if firstseen_dt.tz is None:
                 firstseen_dt = firstseen_dt.tz_localize('UTC')
             else:
                 firstseen_dt = firstseen_dt.tz_convert('UTC')
                 
-            if lastseen_dt.tz is None:
-                lastseen_dt = lastseen_dt.tz_localize('UTC')
-            else:
-                lastseen_dt = lastseen_dt.tz_convert('UTC')
-            
-            # Resolve time bounds
-            if test_mode:
-                # Override: Spaced 2 hours starting on Jan 1st 2025 (timezone aware UTC)
-                target_start = pd.Timestamp("2025-01-01 00:00:00", tz="UTC") + pd.Timedelta(hours=idx * 2)
-                target_end = target_start + (lastseen_dt - firstseen_dt)
-            else:
-                target_start = firstseen_dt
-                target_end = lastseen_dt
-                
-            fs_str = target_start.strftime('%Y%m%d_%H%M')
+            fs_str = firstseen_dt.strftime('%Y%m%d_%H%M')
             flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
+            
+            # Target output file path
+            out_file = out_dir_path / f"{dep}-{arr}_cloned_simulated" / f"{flight_id}_simulated.parquet"
+            
+            if flight_id in simulated_ids and out_file.exists():
+                keep_mask.append(False)
+            elif out_file.exists():
+                keep_mask.append(False)
+            else:
+                keep_mask.append(True)
+                
+        initial_len = len(df_filtered)
+        df_filtered = df_filtered[keep_mask].copy()
+        dropped_sim = initial_len - len(df_filtered)
+        if dropped_sim > 0:
+            logger.info(f"Skipped {dropped_sim} already-simulated flights.")
+            
+    # Sort the cohort to optimize disk reads for the base synthesized flight paths
+    df_filtered = df_filtered.sort_values(by=['estdepartureairport', 'estarrivalairport', 'firstseen']).copy()
+    
+    return df_filtered
+
+def load_weather_for_flights(
+    flights_df: pd.DataFrame,
+    weather_cache_dir: str,
+    max_age_hours: int = 48
+):
+    """
+    Loads ERA5 pressure level and surface level datasets for the temporal span
+    of the flights, padded with 1 hour before start and max_age_hours + 1 hour after end.
+    Attempts to load files offline using paths if they exist locally, otherwise falls back to online retrieval.
+    """
+    if flights_df.empty:
+        return None, None
+        
+    times = pd.to_datetime(flights_df['firstseen'])
+    min_time = times.min()
+    if 'lastseen' in flights_df.columns:
+        max_time = pd.to_datetime(flights_df['lastseen']).max()
+    else:
+        max_time = min_time + pd.Timedelta(hours=15)
+        
+    weather_start = (min_time - pd.Timedelta(hours=1)).floor('h')
+    if hasattr(weather_start, 'tz') and weather_start.tz is not None:
+        weather_start = weather_start.tz_convert('UTC').tz_localize(None)
+        
+    weather_end = (max_time + pd.Timedelta(hours=max_age_hours + 1)).ceil('h')
+    if hasattr(weather_end, 'tz') and weather_end.tz is not None:
+        weather_end = weather_end.tz_convert('UTC').tz_localize(None)
+        
+    start_str = weather_start.strftime('%Y-%m-%dT%H:%M:%S')
+    end_str = weather_end.strftime('%Y-%m-%dT%H:%M:%S')
+    
+    # Check if we can load offline via paths (all files exist)
+    cache_path = Path(weather_cache_dir)
+    hours = pd.date_range(start=weather_start, end=weather_end, freq='h')
+    
+    pl_paths = []
+    sl_paths = []
+    all_pl_exist = True
+    all_sl_exist = True
+    
+    for h in hours:
+        pl_name = f"{h.strftime('%Y%m%d-%H')}-era5pl0.5reanalysis.nc"
+        sl_name = f"{h.strftime('%Y%m%d-%H')}-era5sl0.5reanalysis.nc"
+        
+        pl_file = cache_path / pl_name
+        sl_file = cache_path / sl_name
+        
+        if pl_file.exists():
+            pl_paths.append(str(pl_file))
+        else:
+            all_pl_exist = False
+            
+        if sl_file.exists():
+            sl_paths.append(str(sl_file))
+        else:
+            all_sl_exist = False
+            
+    # If all files exist, load offline using paths parameter
+    if all_pl_exist and all_sl_exist and len(pl_paths) > 0 and len(sl_paths) > 0:
+        logger.info(f"Offline Mode: All {len(hours)} hourly files found in local cache. Loading offline via paths...")
+        try:
+            era5_pl = ERA5(
+                time=(start_str, end_str),
+                paths=pl_paths,
+                variables=PRESSURE_LEVEL_VARIABLES,
+                pressure_levels=REQUIRED_PRESSURE_LEVELS,
+                grid=0.5
+            )
+            era5_sl = ERA5(
+                time=(start_str, end_str),
+                paths=sl_paths,
+                variables=SURFACE_VARIABLES,
+                pressure_levels=-1,
+                grid=0.5
+            )
+            met = era5_pl.open_metdataset()
+            rad = era5_sl.open_metdataset()
+            logger.info("Successfully loaded weather datasets offline.")
+            return met, rad
+        except Exception as offline_err:
+            logger.warning(f"Failed to load datasets offline: {offline_err}. Falling back to standard online retrieval...")
+            
+    # Fallback: Online query (will check cache first, then download missing)
+    logger.info(f"Loading weather datasets via standard online queries for range: {start_str} to {end_str}...")
+    disk_cache = DiskCacheStore(cache_dir=weather_cache_dir)
+    
+    era5_pl = ERA5(
+        time=(start_str, end_str),
+        variables=PRESSURE_LEVEL_VARIABLES,
+        pressure_levels=REQUIRED_PRESSURE_LEVELS,
+        grid=0.5,
+        cachestore=disk_cache
+    )
+    
+    era5_sl = ERA5(
+        time=(start_str, end_str),
+        variables=SURFACE_VARIABLES,
+        pressure_levels=-1,
+        grid=0.5,
+        cachestore=disk_cache
+    )
+    
+    met = era5_pl.open_metdataset()
+    rad = era5_sl.open_metdataset()
+    return met, rad
+
+def simulate_single_flight(
+    flight_row: pd.Series,
+    base_flight: Flight,
+    weather_cache_dir: str,
+    max_age_hours: int = 48,
+    met_dataset=None,
+    rad_dataset=None
+) -> Flight:
+    """Clones the base flight path, shifts to match schedule, recovers metadata and simulates."""
+    df_cloned = base_flight.to_dataframe().copy()
+    
+    if df_cloned['time'].dt.tz is None:
+        df_cloned['time'] = df_cloned['time'].dt.tz_localize('UTC')
+    else:
+        df_cloned['time'] = df_cloned['time'].dt.tz_convert('UTC')
+        
+    synth_start = df_cloned['time'].iloc[0]
+    
+    target_start = pd.to_datetime(flight_row['firstseen'])
+    if target_start.tz is None:
+        target_start = target_start.tz_localize('UTC')
+    else:
+        target_start = target_start.tz_convert('UTC')
+        
+    time_offset = target_start - synth_start
+    df_cloned['time'] = df_cloned['time'] + time_offset
+    
+    dep = flight_row['estdepartureairport']
+    arr = flight_row['estarrivalairport']
+    icao24 = flight_row['icao24']
+    callsign = flight_row.get('callsign', 'UNK')
+    typecode = flight_row.get('typecode', 'B738')
+    fs_str = target_start.strftime('%Y%m%d_%H%M')
+    flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
+    
+    attrs = {
+        "flight_id": flight_id,
+        "aircraft_type": typecode,
+        "icao24": icao24,
+        "callsign": callsign,
+        "firstseen": flight_row['firstseen'],
+        "lastseen": flight_row['lastseen'],
+        "estdepartureairport": dep,
+        "estarrivalairport": arr,
+    }
+    
+    for k, v in base_flight.attrs.items():
+        if k not in attrs:
+            attrs[k] = v
+    attrs.pop('crs', None)
+    
+    fl_cloned = Flight(data=df_cloned, drop_duplicated_times=True, crs="EPSG:4326", **attrs)
+    
+    fl_simulated = simulate_cloned_flight(
+        fl_cloned=fl_cloned,
+        cache_dir=weather_cache_dir,
+        max_age_hours=max_age_hours,
+        met_dataset=met_dataset,
+        rad_dataset=rad_dataset
+    )
+    return fl_simulated
+
+def run_batch_clone_simulation(
+    ranks: list,
+    start_date: str = None,
+    end_date: str = None,
+    weather_cache: str = None,
+    out_dir: str = None,
+    max_age_hours: int = 48,
+    overwrite: bool = False,
+    test_mode: bool = False,
+    day_by_day: bool = True
+):
+    # Setup paths
+    master_flights_file = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
+    route_summary_file = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
+    synthesized_registry_file = FLIGHT_REGISTRY_DIR / "global_synthesized_registry.parquet"
+    cloned_registry_file = FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet"
+    
+    # 1. Output Dir
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    sim_log_path = out_dir_path / "simulation.log"
+    
+    # 2. Handle Test Mode
+    if test_mode:
+        logger.info("=== RUNNING IN TEST MODE ===")
+        start_date = "2025-01-01"
+        end_date = "2025-01-01"
+        day_by_day = False  # No need for day-by-day loop in test mode
+        
+    # Check start and end dates
+    if not start_date or not end_date:
+        logger.error("Start date and end date are required (unless in test mode).")
+        return
+        
+    # Get date range
+    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    logger.info(f"Targeting date range: {start_date} to {end_date} ({len(dates)} days)")
+    
+    # Load RouteSummary (only once globally)
+    df_summary = load_route_summary(str(route_summary_file))
+    if df_summary.empty:
+        logger.error("RouteSummary is empty or missing.")
+        return
+        
+    # Load master registry once globally (loading only the 7 columns we actually use)
+    if not master_flights_file.exists():
+        logger.error(f"Master flights file not found at: {master_flights_file}")
+        return
+    logger.info(f"Loading master flights database from {master_flights_file} (optimized columns)...")
+    req_cols = ['firstseen', 'estdepartureairport', 'estarrivalairport', 'icao24', 'callsign', 'typecode', 'lastseen']
+    master_df = pd.read_parquet(master_flights_file, columns=req_cols)
+    logger.info(f"Loaded master flights registry with {len(master_df):,} entries.")
+    
+    new_registry_entries = []
+    
+    # Pre-resolve synthesized files dictionary to avoid reloading manifest file repeatedly
+    valid_synthesized_files = {}
+    if synthesized_registry_file.exists():
+        df_synth_reg = pd.read_parquet(synthesized_registry_file)
+        for _, row in df_synth_reg.iterrows():
+            route = row['route']
+            rel_path = row['file_path']
+            abs_path = BASE_DIR / rel_path
+            if abs_path.exists():
+                valid_synthesized_files[route] = abs_path
+                
+    # 3. Outer Loop: Day-by-Day (or Single Batch if day_by_day=False)
+    if not day_by_day:
+        date_groups = [(start_date, end_date, "Full Batch")]
+    else:
+        date_groups = [(d.strftime('%Y-%m-%d'), d.strftime('%Y-%m-%d'), d.strftime('%Y-%m-%d')) for d in dates]
+        
+    for d_start, d_end, desc in date_groups:
+        logger.info(f"\n--- Processing cohort for: {desc} ---")
+        
+        # A. Filter cohort flights for this date/dates
+        cohort_df = filter_cohort_flights(
+            master_flights_path=master_df,
+            route_summary_path=df_summary,
+            start_date=d_start,
+            end_date=d_end,
+            ranks=ranks,
+            out_dir=str(out_dir_path),
+            synthesized_registry_file=str(synthesized_registry_file),
+            overwrite=overwrite
+        )
+        
+        if cohort_df.empty:
+            logger.info(f"No flights to simulate for {desc}.")
+            continue
+            
+        if test_mode:
+            logger.info("Test Mode: Slicing cohort to first 1 entries.")
+            cohort_df = cohort_df.head(1)
+            
+        logger.info(f"Found {len(cohort_df)} flights to simulate for {desc}.")
+        
+        # B. Load Weather dataset globally once for this daily cohort
+        met, rad = load_weather_for_flights(
+            flights_df=cohort_df,
+            weather_cache_dir=weather_cache,
+            max_age_hours=max_age_hours
+        )
+        
+        # C. Simulation Loop
+        success_count = 0
+        failure_count = 0
+        skip_count = 0
+        
+        # Cache base synthesized Flight objects in memory (key: route_key)
+        cached_base_flights = {}
+        
+        # Group and simulate
+        for _, row in cohort_df.iterrows():
+            dep = row['estdepartureairport']
+            arr = row['estarrivalairport']
+            route_key = f"{dep}-{arr}"
+            
+            # Target output file path
+            icao24 = row['icao24']
+            callsign = row.get('callsign', 'UNK')
+            firstseen_dt = pd.to_datetime(row['firstseen'])
+            if firstseen_dt.tz is None:
+                firstseen_dt = firstseen_dt.tz_localize('UTC')
+            else:
+                firstseen_dt = firstseen_dt.tz_convert('UTC')
+            fs_str = firstseen_dt.strftime('%Y%m%d_%H%M')
+            flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
+            
+            corridor_out_dir = out_dir_path / f"{dep}-{arr}_cloned_simulated"
+            corridor_out_dir.mkdir(parents=True, exist_ok=True)
             out_file = corridor_out_dir / f"{flight_id}_simulated.parquet"
             
-            flights_info.append({
-                'idx': idx,
-                'flight_id': flight_id,
-                'icao24': icao24,
-                'callsign': callsign,
-                'typecode': typecode,
-                'target_start': target_start,
-                'target_end': target_end,
-                'out_file': out_file
-            })
-            
-        # Determine if we can share a single MetDataset for the batch
-        min_start = min(f['target_start'] for f in flights_info)
-        max_end = max(f['target_end'] for f in flights_info)
-        total_span_hours = (max_end - min_start).total_seconds() / 3600.0
-        
-        met = None
-        rad = None
-        
-        # If total span is small (e.g. test mode on same day), load weather once
-        if total_span_hours <= 72:
-            logger.info(f"Total temporal span is small ({total_span_hours:.1f} hours). Loading weather once for the entire batch...")
-            try:
-                weather_start = (min_start - pd.Timedelta(hours=1)).floor('h')
-                if hasattr(weather_start, 'tz') and weather_start.tz is not None:
-                    weather_start = weather_start.tz_convert('UTC').tz_localize(None)
-                    
-                weather_end = (max_end + pd.Timedelta(hours=max_age_hours + 1)).ceil('h')
-                if hasattr(weather_end, 'tz') and weather_end.tz is not None:
-                    weather_end = weather_end.tz_convert('UTC').tz_localize(None)
-                    
-                start_str = weather_start.strftime('%Y-%m-%dT%H:%M:%S')
-                end_str = weather_end.strftime('%Y-%m-%dT%H:%M:%S')
-                
-                disk_cache = DiskCacheStore(cache_dir=weather_cache)
-                era5_pl = ERA5(time=(start_str, end_str), variables=PRESSURE_LEVEL_VARIABLES, pressure_levels=REQUIRED_PRESSURE_LEVELS, grid=0.5, cachestore=disk_cache)
-                era5_sl = ERA5(time=(start_str, end_str), variables=SURFACE_VARIABLES, pressure_levels=-1, grid=0.5, cachestore=disk_cache)
-                
-                met = era5_pl.open_metdataset()
-                rad = era5_sl.open_metdataset()
-                logger.info("Successfully loaded weather datasets.")
-            except Exception as e:
-                logger.warning(f"Failed to load shared weather: {e}. Falling back to individual weather loading.")
-                met = None
-                rad = None
-                
-        # 3. Simulation Loop
-        success_count = 0
-        skip_count = 0
-        failure_count = 0
-        
-        for info in flights_info:
-            flight_id = info['flight_id']
-            out_file = info['out_file']
-            
-            # Check existing file for resume capability
-            if out_file.exists():
-                logger.info(f"   -> File exists: {out_file.name}. Skipping simulation.")
+            # Double check existence for safety
+            if not overwrite and out_file.exists():
+                logger.info(f"Skipping {flight_id}: output file exists.")
                 skip_count += 1
-                # Add to registry list
                 rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
                 new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
                 continue
                 
+            # Get synthesized base flight
+            base_flight = cached_base_flights.get(route_key)
+            if base_flight is None:
+                synth_path = valid_synthesized_files.get(route_key)
+                if not synth_path:
+                    logger.error(f"Synthesized base path missing for route {route_key}. Skipping.")
+                    continue
+                # Load Synthetic Flight
+                synth_flights = read_flights_from_parquet(str(synth_path))
+                if not synth_flights:
+                    logger.error(f"Empty synthesized file for route {route_key}. Skipping.")
+                    continue
+                base_flight = list(synth_flights.values())[0]
+                cached_base_flights[route_key] = base_flight
+                
             logger.info(f"Simulating flight {flight_id}...")
             
             try:
-                # 4. Clone and shift base trajectory
-                df_cloned = base_flight.to_dataframe().copy()
-                
-                # Ensure df_cloned['time'] is timezone-aware UTC
-                if df_cloned['time'].dt.tz is None:
-                    df_cloned['time'] = df_cloned['time'].dt.tz_localize('UTC')
-                else:
-                    df_cloned['time'] = df_cloned['time'].dt.tz_convert('UTC')
-                    
-                synth_start = df_cloned['time'].iloc[0]
-                
-                target_start_tz = info['target_start']
-                if target_start_tz.tz is None:
-                    target_start_tz = target_start_tz.tz_localize('UTC')
-                else:
-                    target_start_tz = target_start_tz.tz_convert('UTC')
-                    
-                synth_start_tz = synth_start
-                if synth_start_tz.tz is None:
-                    synth_start_tz = synth_start_tz.tz_localize('UTC')
-                else:
-                    synth_start_tz = synth_start_tz.tz_convert('UTC')
-                    
-                time_offset = target_start_tz - synth_start_tz
-                df_cloned['time'] = df_cloned['time'] + time_offset
-                
-                attrs = {
-                    "flight_id": flight_id,
-                    "aircraft_type": info['typecode'],
-                    "icao24": info['icao24'],
-                    "callsign": info['callsign'],
-                    "firstseen": info['target_start'],
-                    "lastseen": info['target_end'],
-                    "estdepartureairport": dep,
-                    "estarrivalairport": arr,
-                }
-                
-                # Copy other custom attributes
-                for k, v in base_flight.attrs.items():
-                    if k not in attrs:
-                        attrs[k] = v
-                        
-                # Ensure we don't pass 'crs' twice if it's present in the base flight attrs
-                attrs.pop('crs', None)
-                
-                fl_cloned = Flight(data=df_cloned, drop_duplicated_times=True, crs="EPSG:4326", **attrs)
-                
-                # 5. Run simulation
-                fl_simulated = simulate_cloned_flight(
-                    fl_cloned=fl_cloned,
-                    cache_dir=weather_cache,
+                fl_simulated = simulate_single_flight(
+                    flight_row=row,
+                    base_flight=base_flight,
+                    weather_cache_dir=weather_cache,
                     max_age_hours=max_age_hours,
                     met_dataset=met,
                     rad_dataset=rad
                 )
                 
-                # 6. Save incrementally
+                # Save single flight immediately to parquet
                 write_flights_to_parquet([fl_simulated], out_file)
                 
-                # Add registry entry
                 rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
                 new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
                 success_count += 1
-                
             except Exception as e:
                 failure_count += 1
                 logger.error(f"Failed to simulate cloned flight {flight_id}: {e}")
                 
-        # Write stats to simulation log
+        # D. Garbage Collect Weather and cache to release memory before next iteration
+        met = None
+        rad = None
+        import gc
+        gc.collect()
+        
+        # Log stats
         with open(sim_log_path, "a") as log_file:
             log_file.write(f"\n==================================================\n")
-            log_file.write(f"CLONED SIMULATION SUMMARY - {pd.Timestamp.now()}\n")
-            log_file.write(f"Route: {dep}-{arr} | Rank: {rank}\n")
-            log_file.write(f"Total flights processed: {len(flights_info)}\n")
+            log_file.write(f"CLONED SIMULATION DAILY SUMMARY - {pd.Timestamp.now()}\n")
+            log_file.write(f"Period/Date: {desc}\n")
+            log_file.write(f"Total flights: {len(cohort_df)}\n")
             log_file.write(f"Success: {success_count}\n")
-            log_file.write(f"Skipped (existing): {skip_count}\n")
+            log_file.write(f"Skipped: {skip_count}\n")
             log_file.write(f"Failure: {failure_count}\n")
             log_file.write(f"==================================================\n")
             
-        logger.info(f"Route {dep}-{arr} batch simulation complete. Stats appended to {sim_log_path.name}")
+        logger.info(f"Cohort {desc} complete. Stats appended to {sim_log_path.name}")
         
-    # 7. Update Global Cloned Simulation Registry
+    # 4. Update global cloned simulation registry manifest
     if new_registry_entries:
-        cloned_registry_file = FLIGHT_REGISTRY_DIR / "global_cloned_simulation_registry.parquet"
         update_global_registry(cloned_registry_file, new_registry_entries)
-        logger.info(f"Updated global cloned simulation registry manifest at {cloned_registry_file.name}")
+        logger.info(f"Successfully updated global cloned simulation registry at {cloned_registry_file.name}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch Cloned Trajectory Simulation Engine")
@@ -408,16 +626,25 @@ if __name__ == "__main__":
     group.add_argument("--lower-rank", type=int, help="Lower bound of corridor ranks")
     
     parser.add_argument("--upper-rank", type=int, help="Upper bound of corridor ranks")
+    parser.add_argument("--start-date", help="Start date (YYYY-MM-DD) for flight scheduling")
+    parser.add_argument("--end-date", help="End date (YYYY-MM-DD) for flight scheduling")
+    
     parser.add_argument("--weather-cache", default=str(BASE_DIR / "data" / "weather"), help="Directory containing ERA5 NetCDF cache files")
     parser.add_argument("--out-dir", default=str(BASE_DIR / "data" / "results" / "cloned_simulations"), help="Output directory for simulation results")
     parser.add_argument("--max-age", "--age", type=int, default=48, dest="max_age", help="Maximum contrail simulation/advection age in hours (default: 48)")
-    parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 3 flights and overrides times to Jan 1, 2025")
+    parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")
+    parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 3 flights and defaults date to 2025-01-01")
+    parser.add_argument("--no-day-by-day", action="store_false", dest="day_by_day", help="Disables day-by-day temporal weather windowing and runs as a single batch")
     
     args = parser.parse_args()
     
     # Validate ranks
     if args.lower_rank is not None and args.upper_rank is None:
         parser.error("--upper-rank is required if --lower-rank is specified.")
+        
+    # Validate dates (required if not in test mode)
+    if not args.test_mode and (not args.start_date or not args.end_date):
+        parser.error("--start-date and --end-date are required unless --test-mode is active.")
         
     specific_ranks_list = None
     if args.ranks:
@@ -434,8 +661,13 @@ if __name__ == "__main__":
         
     run_batch_clone_simulation(
         ranks=ranks_to_process,
+        start_date=args.start_date,
+        end_date=args.end_date,
         weather_cache=args.weather_cache,
         out_dir=args.out_dir,
         max_age_hours=args.max_age,
-        test_mode=args.test_mode
+        overwrite=args.overwrite,
+        test_mode=args.test_mode,
+        day_by_day=args.day_by_day
     )
+

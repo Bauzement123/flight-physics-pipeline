@@ -40,7 +40,9 @@ PythonPipeline/
 │   │   ├── master_flights_RouteSummary.pkl # Flight count ranks per corridor
 │   │   ├── global_trajectory_registry.parquet # Cache index mapping flight_id -> raw_parquet_path
 │   │   ├── global_clean_registry.parquet # Cache index mapping flight_id -> clean_parquet_path
-│   │   └── global_simulation_registry.parquet # Cache index mapping flight_id -> simulated_parquet_path
+│   │   ├── global_simulation_registry.parquet # Cache index mapping flight_id -> simulated_parquet_path
+│   │   ├── global_synthesized_registry.parquet # Cache index mapping route -> synthesized_path
+│   │   └── global_cloned_simulation_registry.parquet # Cache index mapping flight_id -> cloned_simulated_path
 │   │
 │   ├── flight_lists/                   # Standalone sliced route corridors (e.g. EBBR-LSGG.parquet)
 │   │
@@ -141,3 +143,14 @@ Downloads matching Copernicus weather files and runs PyContrails.
   2. Checks `data/weather/` for matching Copernicus NetCDF weather files. If missing, downloads them via `era5_manager.py`.
   3. Adapts the data into `pycontrails.Flight` structures.
   4. Intersects weather properties to run CoCiP, writing outputs to `data/results/<scenario_name>/`.
+
+### Loop 4b: Cloned Physics Simulation (clone_simulation.py)
+Clones and time-shifts synthesized baseline trajectories to match real scheduled flights, and simulates them under CoCiP.
+- **Command**: `python -m src.physics.clone_simulation --ranks 76`
+- **Workflow**:
+  1. Loads synthesized route baseline from `global_synthesized_registry.parquet`.
+  2. Resolves timezone-aware UTC schedules from target route flight lists.
+  3. Sorts flight cohort to optimize base path file loading.
+  4. Runs day-by-day batch weather loops (loading weather globally once per day with advection padding).
+  5. Evaluates CoCiP model on each individual cloned flight and serializes waypoints incrementally.
+  6. Updates `global_cloned_simulation_registry.parquet` with simulation stats.

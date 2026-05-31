@@ -114,7 +114,7 @@ python -m src.physics.clone_simulation `
 | `--weather-cache` | `str` | `data/weather` | Path to the NetCDF ERA5 weather files directory. |
 | `--out-dir` | `str` | `data/results/cloned_simulations` | Output directory for simulation results and logs. |
 | `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
-| `--test-mode` | `flag` | *False* | Limit to the first 3 flights of each corridor, and override departure dates starting at `2025-01-01 00:00:00 UTC` spaced 2 hours apart. |
+| `--test-mode` | `flag` | *False* | Limit to the first 1 flights of each corridor, and override departure dates starting at `2025-01-01 00:00:00 UTC` spaced 2 hours apart. |
 
 > [!TIP]
 > **Test Mode Advantage**: `--test-mode` ensures the simulation runs against the local cached weather data (`2024-12-31` to `2025-01-10`), avoiding the need to fetch new ERA5 data from Copernicus API during verification.

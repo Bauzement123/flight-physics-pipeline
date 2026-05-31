@@ -30,7 +30,7 @@ python src/weather/era5_manager.py `
 
 --start / --end: Format as YYYY-MM-DD.
 
-The downloaded NetCDF files are automatically saved to data/03_weather_cache/.
+The downloaded NetCDF files are automatically saved to data/weather/.
 
 Prerequisites
 
@@ -41,4 +41,4 @@ Authentication: You must have your Copernicus Climate Data Store (CDS) credentia
 
 Design Paradigm
 
-This module is designed for standalone capability. It does not ingest flight trajectories; instead, it proactively populates the data/03_weather_cache/ directory. When Loop 3b (the physics simulation) runs, it will detect these cached files and use them for Cocip modeling, significantly reducing latency and redundant API calls.
+This module is designed for standalone capability. It does not ingest flight trajectories; instead, it proactively populates the data/weather/ directory. When Loop 3b (the physics simulation) runs, it will detect these cached files and use them for Cocip modeling, significantly reducing latency and redundant API calls.

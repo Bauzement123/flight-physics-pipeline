@@ -53,7 +53,7 @@ REQUIRED_PRESSURE_LEVELS = [
 # Format: [min_lon, min_lat, max_lon, max_lat]
 DEFAULT_EUROPE_BBOX = [-65.0, 25.0, 50.0, 80.0]
 
-def fetch_era5_data(start: str, end: str, bbox: list = None, cache_dir: str = "data/03_weather_cache/") -> None:
+def fetch_era5_data(start: str, end: str, bbox: list = None, cache_dir: str = "data/weather/") -> None:
     """
     Fetches ERA5 reanalysis data for temporal bounds.
     Queries both pressure level and single-level variables sequentially to accommodate
@@ -161,7 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--start", required=True, help="Start date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     parser.add_argument("--end", required=True, help="End date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     parser.add_argument("--bbox", required=False, help="Optional spatial box: min_lon, min_lat, max_lon, max_lat. Defaults to padded Europe domain.")
-    parser.add_argument("--out-dir", default="data/03_weather_cache/", help="Path to directory for caching downloading NetCDFs")
+    parser.add_argument("--out-dir", default="data/weather/", help="Path to directory for caching downloading NetCDFs")
     parser.add_argument("--debug", action="store_true", help="Enable verbose DEBUG logging level")
     
     args = parser.parse_args()
