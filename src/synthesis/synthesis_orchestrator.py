@@ -98,33 +98,19 @@ def main():
             
         out_file = out_dir_path / f"{dep}-{arr}_synthesized.parquet"
         
-        # 2. Check skip or overwrite conditions
-        if rank in existing_ranks:
-            if not args.overwrite:
-                logger.info(f"Synthesized trajectory for rank {rank} ({dep}-{arr}) already exists in registry. Skipping.")
-                skipped_count += 1
-                continue
-            else:
-                logger.info(f"Overwrite flag is active. Regenerating rank {rank} ({dep}-{arr}).")
-                # Clean up existing files from disk for this rank/route
-                if registry_file.exists():
-                    try:
-                        df_reg = pd.read_parquet(registry_file)
-                        matched = df_reg[df_reg['rank'] == rank]
-                        for _, row in matched.iterrows():
-                            p = BASE_DIR / row['file_path']
-                            if p.exists():
-                                logger.info(f"Deleting old synthesized file: {p.name}")
-                                p.unlink(missing_ok=True)
-                    except Exception as clean_err:
-                        logger.warning(f"Failed to clean up old files for rank {rank}: {clean_err}")
-                    
+        # 2. Check skip conditions (generator will handle overwrite locally)
+        if rank in existing_ranks and not args.overwrite:
+            logger.info(f"Synthesized trajectory for rank {rank} ({dep}-{arr}) already exists in registry. Skipping.")
+            skipped_count += 1
+            continue
+            
         # 3. Call synthesis engine
         try:
             res = create_synthesized_trajectory(
                 rank=rank,
                 output_parquet=str(out_file),
-                time_grid_seconds=args.grid_seconds
+                time_grid_seconds=args.grid_seconds,
+                overwrite=args.overwrite
             )
             if res:
                 success_count += 1

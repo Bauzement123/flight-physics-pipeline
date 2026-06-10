@@ -122,16 +122,31 @@ def classify_and_cluster_cohort(resampled_traffic_collection):
             lons = resampled_flight.data['longitude'].values
             
             if len(lats) != 100 or len(lons) != 100:
-                lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
-                lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
+                ts = (resampled_flight.data['timestamp'] - resampled_flight.data['timestamp'].iloc[0]).dt.total_seconds().values
+                if len(ts) > 1 and ts[-1] > 0:
+                    norm_time = ts / ts[-1]
+                    target_time = np.linspace(0, 1, 100)
+                    lats = np.interp(target_time, norm_time, lats)
+                    lons = np.interp(target_time, norm_time, lons)
+                else:
+                    lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
+                    lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
                 
             features.append(np.concatenate([lats, lons]))
         except Exception as e:
             logger.warning(f"Failed to resample flight {flight.callsign or flight.flight_id} for clustering features: {e}")
-            lats = flight.data['latitude'].values
-            lons = flight.data['longitude'].values
-            lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
-            lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
+            df = flight.data
+            lats = df['latitude'].values
+            lons = df['longitude'].values
+            ts = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds().values
+            if len(ts) > 1 and ts[-1] > 0:
+                norm_time = ts / ts[-1]
+                target_time = np.linspace(0, 1, 100)
+                lats = np.interp(target_time, norm_time, lats)
+                lons = np.interp(target_time, norm_time, lons)
+            else:
+                lats = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lats)), lats)
+                lons = np.interp(np.linspace(0, 1, 100), np.linspace(0, 1, len(lons)), lons)
             features.append(np.concatenate([lats, lons]))
             
     X = np.array(features)
@@ -220,7 +235,7 @@ def find_toc_tod(flight: TrafficFlight, labels: list) -> tuple:
     return toc_idx, tod_idx
 
 
-def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60) -> list:
+def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seconds: int = 60, overwrite: bool = False) -> list:
     # 1. Resolve Rank to Route
     logger.info(f"Resolving rank {rank} to route...")
     df_summary = load_route_summary()
@@ -247,9 +262,12 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         try:
             df_reg = pd.read_parquet(synthesized_registry_file)
             if rank in df_reg['rank'].values:
-                logger.info(f"Synthesized trajectory for rank {rank} already exists in registry. Skipping computation.")
-                matched_paths = df_reg[df_reg['rank'] == rank]['file_path'].tolist()
-                return [str(BASE_DIR / p) for p in matched_paths]
+                if not overwrite:
+                    logger.info(f"Synthesized trajectory for rank {rank} already exists in registry. Skipping computation.")
+                    matched_paths = df_reg[df_reg['rank'] == rank]['file_path'].tolist()
+                    return [str(BASE_DIR / p) for p in matched_paths]
+                else:
+                    logger.info(f"Overwrite enabled: regenerating synthesized trajectory for rank {rank}.")
         except Exception as e:
             logger.warning(f"Could not check synthesized registry skip: {e}")
     
@@ -564,6 +582,7 @@ if __name__ == "__main__":
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")
     parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for the synthesized trajectory.")
     parser.add_argument("--grid-seconds", type=int, default=60, help="Time grid resolution in seconds (default: 60).")
+    parser.add_argument("--overwrite", action="store_true", help="Force regeneration of synthesized paths even if they already exist.")
     
     args = parser.parse_args()
     
@@ -583,4 +602,4 @@ if __name__ == "__main__":
     
     out_file = Path(args.out_dir) / f"{dep}-{arr}_synthesized.parquet"
     
-    create_synthesized_trajectory(args.rank, str(out_file), time_grid_seconds=args.grid_seconds)
+    create_synthesized_trajectory(args.rank, str(out_file), time_grid_seconds=args.grid_seconds, overwrite=args.overwrite)

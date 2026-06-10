@@ -104,7 +104,7 @@ python -m src.fetching.opensky_fetcher --input-list data/flight_lists/LEPA-LEBL.
 - `--sample-size`: Number of flights to randomly sample.
 - `--seed`: Seed value for random state reproducibility (default: `42`).
 - `--start-date`: Start boundary of flight departure window (ISO format, e.g. `2025-01-01` or `2025-01-01T11:00:00`).
-- `--end-date`: End boundary of flight departure window (ISO format).
+- `--end-date`: End boundary of flight departure window (ISO format). If a short date like `YYYY-MM-DD` is provided, it automatically extends to `23:59:59` to include the full day.
 - `--typecode`: Aircraft model code (case-insensitive, e.g. `A320`, `B738`, `A20N`).
 
 ---
@@ -127,7 +127,7 @@ python -m src.fetching.fetcher_orchestrator --ranks "1, 76" --strategy fixed --v
 - `--value`: Integer size value mapping to the chosen strategy (e.g. 50 flights for `fixed`).
 - `--seed`: Seed value for random state reproducibility (default: `42`).
 - `--start-date`: Start boundary of flight departure window (ISO format).
-- `--end-date`: End boundary of flight departure window (ISO format).
+- `--end-date`: End boundary of flight departure window (ISO format). If a short date like `YYYY-MM-DD` is provided, it automatically extends to `23:59:59` to include the full day.
 - `--typecode`: Aircraft model code (case-insensitive, e.g. `A320`, `B738`, `A20N`).
 - `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable.
   - Using a different seed (e.g., `101` instead of `42`) changes the specific random flights selected in the sample.

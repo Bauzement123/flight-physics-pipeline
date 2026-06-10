@@ -65,7 +65,8 @@ def filter_flight_list(df: pd.DataFrame, start_date=None, end_date=None, **kwarg
         filtered_df = filtered_df[firstseen_dt >= start_dt]
         
     if end_date is not None:
-        end_dt = pd.to_datetime(end_date)
+        end_dt_str = f"{end_date} 23:59:59" if len(end_date) <= 10 else end_date
+        end_dt = pd.to_datetime(end_dt_str)
         if end_dt.tzinfo is None:
             end_dt = end_dt.tz_localize('UTC')
         else:

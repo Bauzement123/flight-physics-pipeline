@@ -120,16 +120,14 @@ def simulate_cloned_flight(
     }
     cocip_model = Cocip(met=met, rad=rad, params=cocip_params, aircraft_performance=ps_model)
     
-    # Resolve and validate aircraft type fallback
-    typecode = fl_cloned.attrs.get('aircraft_type', 'B738')
+    # Resolve and validate aircraft type
+    typecode = fl_cloned.attrs.get('aircraft_type')
+    if not typecode or pd.isna(typecode):
+        raise ValueError(f"Unsupported aircraft: {typecode} (Missing/NaN)")
+        
     ps_supported_types = list(ps_model.aircraft_engine_params.keys())
     if typecode not in ps_supported_types:
-        fallback = "B738"
-        if typecode.startswith("A32") or typecode.startswith("A31") or typecode.startswith("A2"):
-            fallback = "A320"
-        elif typecode.startswith("B73") or typecode.startswith("B3"):
-            fallback = "B738"
-        fl_cloned.attrs['aircraft_type'] = fallback
+        raise ValueError(f"Unsupported aircraft: {typecode}")
         
     fl_evaluated = ps_model.eval(fl_cloned)
     fl_out = cocip_model.eval(source=fl_evaluated)
@@ -358,6 +356,7 @@ def load_weather_for_flights(
 def simulate_single_flight(
     flight_row: pd.Series,
     base_flight: Flight,
+    flight_id: str,
     weather_cache_dir: str,
     max_age_hours: int = 48,
     met_dataset=None,
@@ -386,9 +385,10 @@ def simulate_single_flight(
     arr = flight_row['estarrivalairport']
     icao24 = flight_row['icao24']
     callsign = flight_row.get('callsign', 'UNK')
-    typecode = flight_row.get('typecode', 'B738')
+    typecode = flight_row.get('typecode')
+    if pd.isna(typecode) or not typecode:
+        typecode = "UNKNOWN"
     fs_str = target_start.strftime('%Y%m%d_%H%M')
-    flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
     
     attrs = {
         "flight_id": flight_id,
@@ -427,7 +427,8 @@ def run_batch_clone_simulation(
     overwrite: bool = False,
     test_mode: bool = False,
     day_by_day: bool = True,
-    min_distance: float = 800.0
+    min_distance: float = 800.0,
+    clusters_per_flight: int = 1
 ):
     # Setup paths
     master_flights_file = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
@@ -473,16 +474,7 @@ def run_batch_clone_simulation(
     
     new_registry_entries = []
     
-    # Load flight-to-cluster mappings
-    cluster_map_file = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
-    flight_to_cluster = {}
-    if cluster_map_file.exists():
-        try:
-            df_map = pd.read_parquet(cluster_map_file)
-            flight_to_cluster = dict(zip(df_map['flight_id'], df_map['cluster_id']))
-            logger.info(f"Loaded {len(flight_to_cluster)} flight-to-cluster mappings.")
-        except Exception as e:
-            logger.warning(f"Could not load flight cluster map: {e}")
+    # (global_flight_cluster_map dependency removed)
 
     # Pre-resolve synthesized files dictionary to avoid reloading manifest file repeatedly
     valid_synthesized_files = {}
@@ -552,77 +544,97 @@ def run_batch_clone_simulation(
             arr = row['estarrivalairport']
             route_key = f"{dep}-{arr}"
             
-            # Target output file path
             icao24 = row['icao24']
             callsign = row.get('callsign', 'UNK')
+            typecode = row.get('typecode')
+            if pd.isna(typecode) or not typecode:
+                typecode = "UNKNOWN"
             firstseen_dt = pd.to_datetime(row['firstseen'])
             if firstseen_dt.tz is None:
                 firstseen_dt = firstseen_dt.tz_localize('UTC')
             else:
                 firstseen_dt = firstseen_dt.tz_convert('UTC')
             fs_str = firstseen_dt.strftime('%Y%m%d_%H%M')
-            flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
             
             corridor_out_dir = out_dir_path / f"{dep}-{arr}_cloned_simulated"
             corridor_out_dir.mkdir(parents=True, exist_ok=True)
-            out_file = corridor_out_dir / f"{flight_id}_simulated.parquet"
             
-            # Double check existence for safety
-            if not overwrite and out_file.exists():
-                logger.info(f"Skipping {flight_id}: output file exists.")
-                skip_count += 1
-                rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
-                new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
+            # Identify Available Clusters Per Route
+            available_clusters = [cid for (r, cid) in valid_synthesized_files.keys() if r == route_key]
+            if not available_clusters:
+                logger.error(f"No synthesized base paths available for route {route_key}. Skipping flight.")
                 continue
                 
-            # Get cluster_id for this flight
-            cluster_id = flight_to_cluster.get(flight_id, 0)
+            # Randomized Track Sampling
+            sample_size = min(clusters_per_flight, len(available_clusters))
+            sampled_clusters = np.random.choice(available_clusters, size=sample_size, replace=False)
             
-            # Get synthesized base flight
-            base_flight = cached_base_flights.get((route_key, cluster_id))
-            if base_flight is None:
-                synth_path = valid_synthesized_files.get((route_key, cluster_id))
-                if not synth_path:
-                    # Fallback to cluster 0 if specific cluster file is missing
-                    synth_path = valid_synthesized_files.get((route_key, 0))
-                    
-                if not synth_path:
-                    logger.error(f"Synthesized base path missing for route {route_key} cluster {cluster_id}. Skipping.")
+            for cluster_id in sampled_clusters:
+                flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}_c{cluster_id}"
+                out_file = corridor_out_dir / f"{flight_id}_simulated.parquet"
+                
+                # Double check existence for safety
+                if not overwrite and out_file.exists():
+                    logger.info(f"Skipping {flight_id}: output file exists.")
+                    skip_count += 1
+                    rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
+                    new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
                     continue
                     
-                # Load Synthetic Flight
-                synth_flights = read_flights_from_parquet(str(synth_path))
-                if not synth_flights:
-                    logger.error(f"Empty synthesized file for route {route_key} cluster {cluster_id}. Skipping.")
-                    continue
-                base_flight = list(synth_flights.values())[0]
-                cached_base_flights[(route_key, cluster_id)] = base_flight
+                # Get synthesized base flight
+                base_flight = cached_base_flights.get((route_key, cluster_id))
+                if base_flight is None:
+                    synth_path = valid_synthesized_files.get((route_key, cluster_id))
+                    if not synth_path:
+                        logger.error(f"Synthesized base path missing for route {route_key} cluster {cluster_id}. Skipping.")
+                        continue
+                        
+                    # Load Synthetic Flight
+                    synth_flights = read_flights_from_parquet(str(synth_path))
+                    if not synth_flights:
+                        logger.error(f"Empty synthesized file for route {route_key} cluster {cluster_id}. Skipping.")
+                        continue
+                    base_flight = list(synth_flights.values())[0]
+                    cached_base_flights[(route_key, cluster_id)] = base_flight
+                    
+                logger.info(f"Simulating flight {flight_id}...")
                 
-            logger.info(f"Simulating flight {flight_id}...")
-            
-            try:
-                fl_simulated = simulate_single_flight(
-                    flight_row=row,
-                    base_flight=base_flight,
-                    weather_cache_dir=weather_cache,
-                    max_age_hours=max_age_hours,
-                    met_dataset=met,
-                    rad_dataset=rad
-                )
-                
-                # Save single flight immediately to parquet
-                write_flights_to_parquet([fl_simulated], out_file)
-                
-                rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
-                new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
-                success_count += 1
-            except Exception as e:
-                failure_count += 1
-                logger.error(f"Failed to simulate cloned flight {flight_id}: {e}")
+                try:
+                    fl_simulated = simulate_single_flight(
+                        flight_row=row,
+                        base_flight=base_flight,
+                        flight_id=flight_id,
+                        weather_cache_dir=weather_cache,
+                        max_age_hours=max_age_hours,
+                        met_dataset=met,
+                        rad_dataset=rad
+                    )
+                    
+                    # Save single flight immediately to parquet
+                    write_flights_to_parquet([fl_simulated], out_file)
+                    
+                    rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
+                    new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
+                    success_count += 1
+                except Exception as e:
+                    if "Unsupported aircraft" in str(e):
+                        skip_count += 1
+                        logger.warning(f"Skipping flight {flight_id}: Unsupported aircraft {typecode}")
+                        with open(corridor_out_dir / "skipped_aircraft.log", "a") as f:
+                            f.write(f"{flight_id},{typecode}\n")
+                    else:
+                        failure_count += 1
+                        logger.error(f"Failed to simulate cloned flight {flight_id}: {e}")
                 
         # D. Garbage Collect Weather and cache to release memory before next iteration
-        met = None
-        rad = None
+        if met is not None:
+            if hasattr(met, 'data'):
+                met.data.close()
+            met = None
+        if rad is not None:
+            if hasattr(rad, 'data'):
+                rad.data.close()
+            rad = None
         import gc
         gc.collect()
         
@@ -660,9 +672,10 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", default=str(BASE_DIR / "data" / "results" / "cloned_simulations"), help="Output directory for simulation results")
     parser.add_argument("--max-age", "--age", type=int, default=48, dest="max_age", help="Maximum contrail simulation/advection age in hours (default: 48)")
     parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")
-    parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 3 flights and defaults date to 2025-01-01")
+    parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 1 flight and defaults date to 2025-01-01")
     parser.add_argument("--no-day-by-day", action="store_false", dest="day_by_day", help="Disables day-by-day temporal weather windowing and runs as a single batch")
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
+    parser.add_argument("--clusters-per-flight", "-x", type=int, default=1, help="Number of randomized synthetic tracks to sample per flight schedule (default: 1)")
     
     args = parser.parse_args()
     
@@ -697,6 +710,7 @@ if __name__ == "__main__":
         overwrite=args.overwrite,
         test_mode=args.test_mode,
         day_by_day=args.day_by_day,
-        min_distance=args.min_distance
+        min_distance=args.min_distance,
+        clusters_per_flight=args.clusters_per_flight
     )
 

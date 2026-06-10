@@ -128,6 +128,7 @@ python -m src.synthesis.path_generator `
 *   `--rank` (Required): The route rank in `master_flights_RouteSummary.pkl` to process.
 *   `--out-dir` (Optional): Directory where the synthesized Parquet file is saved (defaults to `data/synthesized_paths/`).
 *   `--grid-seconds` (Optional): The resampling temporal grid resolution in seconds (default: `60`).
+*   `--overwrite` (Optional): If set, explicitly forces regeneration and replacement of any existing synthesized Parquet file for this rank.
 
 ### 2. `synthesis_orchestrator.py` (Batch Synthesis Orchestrator)
 Orchestrates synthesized trajectory generation across multiple ranks (list or range), with built-in skip checks.
