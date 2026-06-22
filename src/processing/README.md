@@ -2,6 +2,8 @@
 
 This module represents the second step in the Flight Physics Pipeline. It is responsible for mathematically smoothing the raw ADS-B trajectories downloaded from OpenSky, dropping ground-level noise, applying an Extended Kalman Filter (EKF), and resampling coordinates to a 1-minute frequency optimal for PyContrails.
 
+---
+
 ## 1. Module Structure
 
 ```text
@@ -13,9 +15,37 @@ src/processing/
 
 ---
 
-## 2. Step-by-Step Data Workflow
+## 2. Function Analysis Solution Tree (FAST)
 
-The pipeline processes trajectories through file-level and flight-level caching layers before performing Cartesian projection and EKF smoothing:
+```text
+Module Objectives
+ └── Apply Extended Kalman Filter (EKF) smoothing and resample raw ADSB waypoints
+      │
+      ├── Sub-objective 1: Ingest raw coordinates and align columns/units
+      │    └── Solution: Reset DataFrame index, rename columns, drop NaNs, and convert metric/SI columns to aviation units in kalman_filter.py
+      │
+      ├── Sub-objective 2: Group trajectories and filter to valid airborne tracks
+      │    └── Solution: Ingest DataFrame into traffic collection, run airborne() segmentation, and drop flights with < 10 points
+      │
+      ├── Sub-objective 3: Check cache index for processed flights
+      │    └── Solution: Query global_clean_registry.parquet to skip already-smoothed flight paths
+      │
+      ├── Sub-objective 4: Apply Rauch-Tung-Striebel (RTS) Kalman smoothing
+      │    └── Solution: Project flight coordinates onto local Cartesian 2D plane (laea) and run EKF math engine
+      │
+      ├── Sub-objective 5: Snap flight path to standard temporal grids
+      │    └── Solution: Resample EKF smoothed Cartesian coordinates to standard 1-minute intervals
+      │
+      └── Sub-objective 6: Convert outputs back to SI units and save
+           └── Solution: Re-convert aviation units back to SI metric standards, strip EKF processing columns, write to Parquet, and register cleaned IDs
+```
+
+---
+
+## 3. Data Workflow
+
+> [!NOTE]
+> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
 
 ```mermaid
 graph TD
@@ -36,41 +66,62 @@ graph TD
     M --> N[13. Save Clean Parquet Output & Register]
 ```
 
-### Detailed Execution Phase
-1. **File-Level Pre-check:** Checks if the target clean output parquet file (e.g., `LEPA-LEBL_ab1081_clean_si.parquet`) already exists on disk. If yes, EKF is skipped for the whole batch.
-2. **Read Raw Data:** The raw Parquet file is read into a pandas DataFrame.
-3. **Schema Alignment:** Columns are renamed to conform to the `traffic` library's expected terminology (e.g., `'velocity'` $\to$ `'groundspeed'`, `'baroaltitude'` $\to$ `'altitude'`).
-4. **NaN Pruning:** Rows containing `NaN` in key variables (`timestamp`, `latitude`, `longitude`, `track`, `groundspeed`, `vertical_rate`, `altitude`, `onground`) are dropped using `dropna`.
-5. **Unit Conversion (Initial):** Variables are converted from metric/SI units to standard aviation units (meters $\to$ feet, m/s $\to$ knots, m/s $\to$ feet/minute) required by the EKF math.
-6. **Traffic Object Instantiation:** The DataFrame is wrapped in a `traffic.core.Traffic` collection.
-7. **Airborne Segmentation & Cache Checking:** For each flight, the airborne portion is extracted. Tracks with fewer than 10 points are discarded. Before processing, the script checks if the specific `flight_id` is already registered in `global_clean_registry.parquet`.
-    * **Cache Hit:** Loads the cleaned flight waypoints directly from the existing clean parquet, bypasses the spatial projection, EKF, and resampling steps, and proceeds directly to unit reversion (Step 11).
-    * **Cache Miss:** Proceeds to EKF smoothing (Step 8).
-8. **Spatial Projection:** The flight is projected into a 2D Cartesian plane using a Lambert Azimuthal Equal Area (`laea`) projection centered dynamically at the mean latitude/longitude of the flight, adding columns `x` and `y` to allow standard Cartesian distance calculations.
-9. **EKF Application:** The Extended Kalman Filter is invoked via `ekf.apply()` on the flight's coordinates using Rauch-Tung-Striebel (RTS) backward pass smoothing.
-10. **Resampling:** The smoothed data is wrapped in a `Flight` object and resampled to a regular 1-minute frequency.
-11. **Unit Reversion (Final):** Numeric columns are converted back from aviation units to SI units.
-12. **Metadata Re-injection:** Key metadata fields (e.g., `icao24`, `callsign`, `typecode`, `flight_id`) are copied from the original flight data.
-13. **PyContrails Adaptation:** The DataFrame is converted into a `pycontrails.Flight` object using `dataframe_to_pycontrails()`.
-14. **Export & Register:** Cleaned flights are compiled, exported as a Parquet file, and registered in `global_clean_registry.parquet`.
+1. **Pre-Execution Cache Checks**: Bypasses processing if the target output file already exists on disk (file-level check) or skips individual flight coordinates if their IDs are already indexed in `global_clean_registry.parquet` (flight-level check).
+2. **Schema & Unit Conversion**: Ingests raw coordinate DataFrames, renames columns to match the `traffic` schema, drops missing `NaN` values, and converts SI metrics to standard aviation units (feet, knots, ft/min) required by the EKF formulas.
+3. **EKF Mathematical Smoothing**: Projects flight tracks onto a flat 2D Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the flight's average coordinates. Applies the Extended Kalman Filter (RTS backward pass) to smooth coordinate noise.
+4. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Reverts units to SI standards (meters, m/s, UTC timestamps), converts variables via Pycontrails adapters, writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry.
 
 ---
 
-## 3. Data Structure Interactions
+## 4. CLI Usage Guide
 
-The processing module translates trajectories between three distinct data structures to bridge raw ADS-B data, traffic modeling libraries, and physical simulation engines:
+### Bash
+```bash
+# 1. Smooth a single raw trajectory file (automatically saves to sibling 'clean/' sub-folder)
+python -m src.processing.kalman_filter \
+    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
 
-| Stage | Data Structure | Class/Type | Key Responsibility |
-| :--- | :--- | :--- | :--- |
-| **Ingestion / Unit Conversion** | Pandas DataFrame | `pd.DataFrame` | Initial column mapping, unit conversion, and basic data pruning. |
-| **EKF & Resampling** | Traffic / Flight Objects | `traffic.core.Traffic`, `traffic.core.Flight` | Trajectory manipulation: airborne filtering, spatial coordinate projection, EKF smoothing, and frequency resampling. |
-| **Adapter / Downstream Simulation** | PyContrails Flight | `pycontrails.Flight` | Conforming to the schema required by the physical contrail models (e.g., CoCiP). |
+# 2. Batch smooth an entire directory of raw trajectories (skips already-processed files)
+python -m src.processing.kalman_filter \
+    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw"
+```
+
+### PowerShell
+```powershell
+# 1. Smooth a single raw trajectory file
+python -m src.processing.kalman_filter `
+    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
+
+# 2. Batch smooth an entire directory of raw trajectories
+python -m src.processing.kalman_filter `
+    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw"
+```
+
+**Parameters**:
+- `--input-file`: Path to the raw trajectory Parquet file OR a directory containing multiple raw Parquet files.
+- `--out-dir`: Sliced list directory for output. (default: a sibling `clean/` folder if parent is `raw/`, otherwise parent directory).
 
 ---
 
-## 4. EKF Column & Unit Mappings
+## 5. Prerequisites & Dependencies
 
-During the transition between stages, units and column names shift according to the requirements of the processing algorithms:
+### Python Libraries
+* `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
+* `numpy` & `scipy` (for EKF matrices and interpolation)
+* `pyproj` (for dynamic Lambert Azimuthal Equal Area coordinate projections)
+* `traffic` (for track collections, airborne filtering, and EKF algorithms)
+* `pycontrails` (for Flight container structures and temporal interpolation engines)
+
+### Input Datasets
+* Raw coordinate Parquet files (`*_raw.parquet`) generated by Loop 1.
+
+For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
+
+---
+
+## Appendix A: EKF Column & Unit Mappings
+
+During the EKF post-processing workflow, units and column names shift according to the requirements of the processing algorithms:
 
 | Raw Parquet Column | Traffic Schema (Input to EKF) | EKF State Variable (SI) | EKF Output (Aviation) | PyContrails Schema |
 | :--- | :--- | :--- | :--- | :--- |
@@ -82,55 +133,13 @@ During the transition between stages, units and column names shift according to 
 | `vertrate` | `vertical_rate` (ft/min) | `vert_rate` (m/s) | `vertical_rate` (ft/min) | `rocd` (m/s) |
 
 ### Explaining `x`, `y`, and `track_unwrapped` Columns
-During the EKF post-processing workflow:
 - **`x` and `y`** (`float64`): Standard geographic coordinates (`latitude` / `longitude`) are projected onto a 2D Cartesian plane using a Lambert Azimuthal Equal Area projection (`laea`) centered dynamically at the mean latitude/longitude of the flight. This allows the kinematic equations inside the Extended Kalman Filter (EKF) to work with flat Cartesian distances and speeds in meters/seconds, minimizing distortion.
 - **`track_unwrapped`** (`float64`): Standard heading values range between 0 and 360 degrees. If an aircraft flies close to North (crossing 359° to 0°), the EKF's state estimation will see a massive discontinuity. Unwrapping standardizes this track by making the angles continuous (e.g. crossing to 361° instead of resetting to 1°), which prevents the Kalman filter from breaking.
-
-**Filtering**: The shared adapter in `src/common/adapters.py` automatically prunes the EKF's mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating the final `pycontrails.Flight` objects, returning a clean dataframe conforming strictly to the physical variables expected by downstream physics simulations.
-
----
-
-## 5. Caching & Pre-Execution Checks
-
-To prevent redundant EKF calculations and minimize write operations, the trajectory processing module implements file-level and flight-level cache checks:
-
-1. **Pre-Execution File Check**:
-   * When `kalman_filter.py` runs (in either single-file or directory mode), it resolves the target path for the output `*_clean_si.parquet` file.
-   * If that file already exists on disk, EKF smoothing is bypassed entirely for that batch, printing: `Clean file already exists: <path>. Skipping.`
-
-2. **Flight-Level Cache Check (Inside the Processing Loop)**:
-   * For each flight in the raw dataset, the loop checks the clean manifest (`global_clean_registry.parquet`) for a matching `flight_id`.
-   * If a cache hit occurs and the clean file exists on disk, the cleaned waypoints are loaded directly from the cache, completely bypassing EKF smoothing for that flight.
-   * If it is a cache miss, the flight is processed normally (Cartesian projection, EKF smoothing, and resampling).
-
-3. **Manifest Registry Registration**:
-   * Upon successfully smoothing a batch of trajectories, the EKF engine extracts all unique `flight_id`s from the output dataset.
-   * It registers these identifiers along with their relative file path in the central manifest database at `data/flight_registry/global_clean_registry.parquet` using the `update_global_registry()` helper.
-   * This central index allows downstream physics simulations to verify in-memory if a cleaned flight path is available for modeling.
+- **Pruning**: The shared adapter in `src/common/adapters.py` automatically prunes the EKF's mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating the final `pycontrails.Flight` objects, returning a clean dataframe conforming strictly to the physical variables expected by downstream physics simulations.
 
 ---
 
-## 6. CLI Usage Guide
-
-### `kalman_filter.py` (EKF Engine)
-
-Runs the airborne, EKF, and unit conversion logic on a raw trajectory file or a directory of files.
-
-```bash
-# 1. Smooth a single raw trajectory file (automatically saves to sibling 'clean/' if parent is 'raw/')
-python -m src.processing.kalman_filter --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
-
-# 2. Batch smooth an entire directory of raw trajectories (skips files if clean outputs already exist)
-python -m src.processing.kalman_filter --input-file "data\trajectories\ranks_1-76-177-205-209-278-288-321-411-508-509-592-633-710-712-727-761-792-848-888-926_strat_fixed_val_50.0_seed_42_format_roundtrip_97df21\raw"
-```
-
-**Parameters**:
-- `--input-file`: Path to the input raw trajectory parquet file OR a directory containing multiple raw parquet files.
-- `--out-dir`: Where the clean output Parquet file(s) will be written (defaults to a sibling `clean/` folder if parent is `raw/`, otherwise parent directory). If batch processing a directory, it checks for existing files in the resolved clean directory to skip reprocessing them.
-
----
-
-## 7. Appendix: History of the Index Mismatch Bug (Resolved)
+## Appendix B: History of the Index Mismatch Bug (Resolved)
 
 The diagnostic analysis during the V3 pipeline refactoring identified a critical index alignment mismatch inside the EKF post-processing module of the `traffic` library that previously caused 100% of the smoothed EKF columns to be overwritten with `NaN` values:
 

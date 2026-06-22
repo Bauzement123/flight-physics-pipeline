@@ -9,184 +9,174 @@ Paradigm: Functional
 
 import argparse
 import logging
+import sys
+import os
+import re
+import time
 from pathlib import Path
 from pycontrails import DiskCacheStore
 from pycontrails.datalib.ecmwf import ERA5
 
-# Configure logging format with timestamps, levels, and messaging context
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Ensure we can import from the common module
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from src.common.config import (
+    ERA5_PRESSURE_LEVEL_VARIABLES,
+    ERA5_SURFACE_VARIABLES,
+    ERA5_REQUIRED_PRESSURE_LEVELS,
+    ERA5_GRID
+)
+
 logger = logging.getLogger(__name__)
 
-# 3D Atmospheric variable selection critical for CoCiP & PSFlight calculations (isobaric levels):
-# - air_temperature: Determines speed of sound, true airspeed (TAS), and thermodynamic properties.
-# - specific_humidity: Critical for contrail formation/persistence calculations (Schmidt-Appleman criterion).
-# - eastward_wind / northward_wind: Used for wind correction vector calculations (Groundspeed vs. Airspeed).
-# - lagrangian_tendency_of_air_pressure: Vertical velocity parameter used in atmospheric stability estimation.
-# - specific_cloud_ice_water_content: Controls background ice concentrations for natural cirrus interaction.
-PRESSURE_LEVEL_VARIABLES = [
-    "air_temperature", 
-    "specific_humidity", 
-    "eastward_wind", 
-    "northward_wind", 
-    "lagrangian_tendency_of_air_pressure", 
-    "specific_cloud_ice_water_content"
-]
+def init_cache_store(cache_dir: str) -> DiskCacheStore:
+    """
+    Ensures target cache directory exists and instantiates DiskCacheStore.
+    """
+    cache_path = Path(cache_dir)
+    logger.debug(f"Ensuring target cache directory exists: {cache_path.resolve()}")
+    cache_path.mkdir(parents=True, exist_ok=True)
+    
+    logger.debug(f"Initializing custom pycontrails DiskCacheStore at: {cache_path.resolve()}")
+    return DiskCacheStore(cache_dir=str(cache_path))
 
-# 2D Surface/Single-level parameters critical for radiation calculations:
-# - top_net_solar_radiation: 2D shortwave radiation parameter essential for daytime radiative forcing.
-# - top_net_thermal_radiation: 2D longwave radiation parameter essential for greenhouse effect forcing.
-SURFACE_VARIABLES = [
-    "top_net_solar_radiation",
-    "top_net_thermal_radiation"
-]
+def download_with_retry(era5_client: ERA5, max_retries: int = 3) -> None:
+    """
+    Safely executes the pycontrails ERA5 download call, wrapping it
+    in a retry loop with linear backoff to mitigate transient CDS API dropouts.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Initiating download pipeline (attempt {attempt}/{max_retries})...")
+            era5_client.download()
+            logger.info("Download query completed successfully.")
+            return
+        except Exception as e:
+            if attempt == max_retries:
+                logger.error(f"Failed download after {max_retries} attempts.")
+                raise e
+            wait_seconds = attempt * 10
+            logger.warning(
+                f"CDS API download attempt {attempt} failed: {e}. "
+                f"Retrying in {wait_seconds} seconds..."
+            )
+            time.sleep(wait_seconds)
 
-# Required vertical pressure levels (hPa) covering the lower troposphere (900 hPa / ~3,000 ft)
-# all the way up to the lower stratosphere (150 hPa / ~45,000 ft) to capture climbs, cruise, and descents.
-REQUIRED_PRESSURE_LEVELS = [
-    900, 850, 800, 750, 700, 650, 600, 550, 500, 
-    450, 400, 350, 300, 250, 225, 200, 150
-]
+def retrieve_dataset(
+    time_bounds: tuple[str, str],
+    variables: list[str],
+    pressure_levels: int | list[int],
+    cache_store: DiskCacheStore
+) -> None:
+    """
+    Instantiates Pycontrails ERA5 client, checks local cache for missing hours,
+    and downloads missing data. Uses a reactive self-healing loop to automatically
+    detect, delete, and retry if any corrupted NetCDF files are encountered.
+    """
+    is_surface = (pressure_levels == -1)
+    dataset_desc = "2D surface-level" if is_surface else f"{len(pressure_levels)} pressure levels"
+    
+    logger.info(f"Initializing ERA5 client for retrieving {dataset_desc} globally.")
+    era5_client = ERA5(
+        time=time_bounds,
+        variables=variables,
+        pressure_levels=pressure_levels,
+        grid=ERA5_GRID,
+        cachestore=cache_store
+    )
 
-# Default generously padded Europe domain to track contrails over at least 24 hours.
-# Spans from the deep Atlantic (-65°W) to the Middle East (50°E), 
-# and from the High Arctic (80°N) down to North Africa/Canary Islands/Southern Israel (25°N).
-# Format: [min_lon, min_lat, max_lon, max_lat]
-DEFAULT_EUROPE_BBOX = [-65.0, 25.0, 50.0, 80.0]
+    # Reactive Self-Healing Loop: Detects corrupt files during cache check and deletes them.
+    max_check_attempts = 5
+    missing_times = []
+    
+    for attempt in range(1, max_check_attempts + 1):
+        try:
+            missing_times = era5_client.list_timesteps_not_cached()
+            break
+        except OSError as e:
+            err_msg = str(e)
+            # Match path inside quotes in: "Unable to open NETCDF file at 'path'"
+            match = re.search(r"Unable to open NETCDF file at ['\"](.*?)['\"]", err_msg)
+            
+            if match and attempt < max_check_attempts:
+                corrupt_path = Path(match.group(1))
+                if corrupt_path.exists():
+                    logger.warning(
+                        f"⚠️ [Attempt {attempt}/{max_check_attempts}] Detected corrupted cache file: "
+                        f"{corrupt_path.resolve()}. Deleting and retrying cache check..."
+                    )
+                    try:
+                        corrupt_path.unlink()
+                        continue  # Retry the loop to check cache again
+                    except Exception as unlink_err:
+                        logger.error(f"Failed to delete corrupted file {corrupt_path}: {unlink_err}")
+                        raise e
+            
+            # If parsing fails or we run out of retries, raise the exception
+            logger.error(f"Failed to resolve cache checking error: {e}")
+            raise e
 
-def fetch_era5_data(start: str, end: str, bbox: list = None, cache_dir: str = "data/weather/") -> None:
+    if not missing_times:
+        logger.info(f"✅ All requested {dataset_desc} data is already present in cache. Skipping download.")
+    else:
+        logger.info(
+            f"Missing {len(missing_times)} hourly files for {dataset_desc} variables. "
+            f"Triggering asynchronous CDS download pipeline..."
+        )
+        download_with_retry(era5_client)
+
+def fetch_era5_data(start: str, end: str, cache_dir: str = "data/weather/") -> None:
     """
     Fetches ERA5 reanalysis data for temporal bounds.
-    Queries both pressure level and single-level variables sequentially to accommodate
-    pycontrails dataset structures.
+    Queries both pressure level and single-level variables sequentially.
     
     Args:
         start (str): Start date/time string (e.g., "2025-01-01T00:00:00" or "2025-01-01").
         end (str): End date/time string (e.g., "2025-01-02T23:59:59" or "2025-01-02").
-        bbox (list, optional): Spatial bounding box [min_lon, min_lat, max_lon, max_lat]. 
-                               Parsed and validated for downstream processing, though pycontrails 
-                               caches globally by default.
-        cache_dir (str): Relative or absolute path to store the cached NetCDF (.nc) files.
+        cache_dir (str): Path to store the cached NetCDF (.nc) files.
     """
-    cache_path = Path(cache_dir)
-    if bbox is None:
-        bbox = DEFAULT_EUROPE_BBOX
+    # Step 1: Get cache storage engine
+    cache_store = init_cache_store(cache_dir)
     
-    # Debug logging: Check output directory state
-    logger.debug(f"Ensuring target cache directory exists: {cache_path.resolve()}")
-    cache_path.mkdir(parents=True, exist_ok=True)
+    # Step 2: Fetch 3D pressure levels dataset (reactive self-healing is inside retrieve_dataset)
+    retrieve_dataset(
+        time_bounds=(start, end),
+        variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+        pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+        cache_store=cache_store
+    )
     
-    # Instantiate DiskCacheStore with our target cache directory
-    logger.debug(f"Initializing custom pycontrails DiskCacheStore at: {cache_path.resolve()}")
-    disk_cache = DiskCacheStore(cache_dir=str(cache_path))
+    # Step 3: Fetch 2D surface levels dataset
+    retrieve_dataset(
+        time_bounds=(start, end),
+        variables=ERA5_SURFACE_VARIABLES,
+        pressure_levels=-1,
+        cache_store=cache_store
+    )
     
-    # Input validation logging
-    logger.debug(f"Input validation parameters:")
-    logger.debug(f"  -> Bounding Box (lon/lat limits): {bbox} (Note: Pycontrails fetches globally)")
-    logger.debug(f"  -> Temporal Window: {start} to {end}")
-    logger.debug(f"  -> Pressure Levels Count: {len(REQUIRED_PRESSURE_LEVELS)}")
-    logger.debug(f"  -> Pressure Level Variables: {PRESSURE_LEVEL_VARIABLES}")
-    logger.debug(f"  -> Surface/Radiation Variables: {SURFACE_VARIABLES}")
-    
-    if len(bbox) != 4:
-        logger.error(f"Malformed bounding box format. Expected 4 elements, got {len(bbox)}")
-        raise ValueError("Bounding box must be of format: min_lon, min_lat, max_lon, max_lat")
-
-    # Spatial bounds checks (Longitude: -180 to 180, Latitude: -90 to 90)
-    logger.debug("Validating spatial bounding box coordinates...")
-    if not (-180 <= bbox[0] <= 180) or not (-180 <= bbox[2] <= 180):
-        logger.warning(f"Longitude parameters {bbox[0]} or {bbox[2]} are outside normal standard bounds [-180, 180]")
-    if not (-90 <= bbox[1] <= 90) or not (-90 <= bbox[3] <= 90):
-        logger.error(f"Latitude parameters {bbox[1]} or {bbox[3]} are out of physical bounds [-90, 90]")
-        raise ValueError("Latitude coordinates must be between -90 and 90 degrees.")
-
-    # Query Step 1: Download 3D Pressure Level Meteorological Data
-    try:
-        logger.info(f"Initializing ERA5 client for downloading {len(REQUIRED_PRESSURE_LEVELS)} pressure levels globally.")
-        logger.debug("Instantiating pycontrails.datalib.ecmwf.ERA5 for pressure level variables...")
-        era5_pl = ERA5(
-            time=(start, end),
-            variables=PRESSURE_LEVEL_VARIABLES,
-            pressure_levels=REQUIRED_PRESSURE_LEVELS,
-            grid=0.5,
-            cachestore=disk_cache
-        )
-        
-        logger.debug(f"Pressure level ERA5 properties: {era5_pl}")
-        
-        missing_pl_times = era5_pl.list_timesteps_not_cached()
-        if not missing_pl_times:
-            logger.info("✅ All requested 3D pressure-level data is already present in the shared cache. Skipping download.")
-        else:
-            logger.info(f"Missing {len(missing_pl_times)} hourly 3D pressure-level files. Triggering asynchronous download pipeline...")
-            era5_pl.download()
-            logger.info("Pressure-level download query complete.")
-
-    except Exception as e:
-        logger.error(f"An error occurred during pressure-level ERA5 retrieval: {str(e)}", exc_info=True)
-        raise
-
-    # Query Step 2: Download 2D Surface/Single-Level Radiation Data
-    try:
-        logger.info("Initializing ERA5 client for downloading single-level surface radiation variables globally.")
-        logger.debug("Instantiating pycontrails.datalib.ecmwf.ERA5 for surface level variables...")
-        # Note: By setting pressure_levels=-1, pycontrails targets the 'reanalysis-era5-single-levels' dataset.
-        era5_sl = ERA5(
-            time=(start, end),
-            variables=SURFACE_VARIABLES,
-            pressure_levels=-1,
-            grid=0.5,
-            cachestore=disk_cache
-        )
-        
-        logger.debug(f"Single-level ERA5 properties: {era5_sl}")
-        
-        missing_sl_times = era5_sl.list_timesteps_not_cached()
-        if not missing_sl_times:
-            logger.info("✅ All requested 2D surface-level data is already present in the shared cache. Skipping download.")
-        else:
-            logger.info(f"Missing {len(missing_sl_times)} hourly 2D surface-level files. Triggering asynchronous download pipeline...")
-            era5_sl.download()
-            logger.info("Single-level surface radiation download query complete.")
-        
-        logger.info(f"All ERA5 download sequences complete. Local weather cache fully updated.")
-        
-    except Exception as e:
-        logger.error(f"An error occurred during surface-level ERA5 retrieval: {str(e)}", exc_info=True)
-        raise
+    logger.info("All ERA5 weather datasets have been successfully processed.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bulk fetch ERA5 atmospheric data for high-fidelity modeling")
     
-    # Positional or keyword options mapping to functional arguments
     parser.add_argument("--start", required=True, help="Start date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     parser.add_argument("--end", required=True, help="End date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
-    parser.add_argument("--bbox", required=False, help="Optional spatial box: min_lon, min_lat, max_lon, max_lat. Defaults to padded Europe domain.")
     parser.add_argument("--out-dir", default="data/weather/", help="Path to directory for caching downloading NetCDFs")
     parser.add_argument("--debug", action="store_true", help="Enable verbose DEBUG logging level")
     
     args = parser.parse_args()
     
-    # If debug flag is passed, elevate logging level across the script context
+    # Configure root logging level and format only when invoked as a standalone script
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+    
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logging.getLogger("pycontrails").setLevel(logging.DEBUG)
         logger.debug("Verbose debug logging enabled.")
     
-    if args.bbox:
-        logger.debug(f"Parsing raw command line bbox input: '{args.bbox}'")
-        try:
-            bbox_list = [float(x.strip()) for x in args.bbox.split(",")]
-        except ValueError as val_err:
-            logger.error(f"Failed to parse bbox arguments: '{args.bbox}'. Ensure it consists of 4 numerical values separated by commas.")
-            raise val_err
-    else:
-        bbox_list = DEFAULT_EUROPE_BBOX
-        logger.info(f"No bbox provided. Validating with default padded Europe domain: {bbox_list}")
-        
     # Execute the purely functional fetch loop
     fetch_era5_data(
         start=args.start, 
         end=args.end,
-        bbox=bbox_list, 
         cache_dir=args.out_dir
     )

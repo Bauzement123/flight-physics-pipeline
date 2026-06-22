@@ -73,6 +73,9 @@ Module Objectives
 
 ## 3. Data Workflow
 
+> [!NOTE]
+> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
+
 ```mermaid
 graph TD
     A[Route Rank Input] --> B[1. RouteSummary Resolution & Registry Skip Check]

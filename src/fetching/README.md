@@ -2,9 +2,13 @@
 
 This module queries raw flight trajectory coordinates (state vectors) from the OpenSky Trino database or loads them from a local cache, consolidating them into dynamically generated dataset directories.
 
-## Module Structure
+It operates as **Loop 1** of the Flight Physics Pipeline.
 
-```
+---
+
+## 1. Module Structure
+
+```text
 src/fetching/
 ├── README.md                  # This documentation file
 ├── opensky_fetcher.py         # Downloader logic with local cache pre-checks
@@ -13,12 +17,13 @@ src/fetching/
 
 ---
 
-## Function Analysis Solution Tree (FAST)
+## 2. Function Analysis Solution Tree (FAST)
 
-```
+```text
 Module Objectives
  └── Query flight coordinates from OpenSky and save to isolated run directories
-      ├── Sub-objective: Query coordinates for a single flight list with cache checking and filtering
+      │
+      ├── Sub-objective 1: Query coordinates for a single flight list with cache checking and filtering
       │    └── Solution: fetch_trajectories() in opensky_fetcher.py
       │         ├── Inputs:
       │         │    ├── input_list_path (str): Path to sliced route Parquet
@@ -30,17 +35,17 @@ Module Objectives
       │         │    └── typecode (str): Optional aircraft typecode (case-insensitive)
       │         └── Outputs: Consolidated raw Parquet, Manifest JSON, and updated global index
       │
-      ├── Sub-objective: Apply modular column-matching and time bounds to flight lists in-memory
+      ├── Sub-objective 2: Apply modular column-matching and time bounds to flight lists in-memory
       │    └── Solution: filter_flight_list() in opensky_fetcher.py
       │         ├── Inputs: df (pd.DataFrame), start_date, end_date, **kwargs
       │         └── Outputs: Filtered pd.DataFrame
       │
-      ├── Sub-objective: Prevent Trino server overloads and retry query failures
+      ├── Sub-objective 3: Prevent Trino server overloads and retry query failures
       │    └── Solution: fetch_with_backoff() in opensky_fetcher.py
       │         ├── Inputs: trino_client, query, max_retries
       │         └── Outputs: DataFrame of waypoints or None on permanent failure
       │
-      └── Sub-objective: Batch coordinate acquisition across multiple route corridors
+      └── Sub-objective 4: Batch coordinate acquisition across multiple route corridors
            ├── Solution: extract_target_routes() in fetcher_orchestrator.py
            │    ├── Inputs: summary_path, lower, upper, specific_ranks, fetch_format, min_distance
            │    ├── Outputs: DataFrame with columns '[rank, dep, arr, no_of_flights]'
@@ -58,7 +63,7 @@ Module Objectives
 
 ---
 
-## Data Workflow
+## 3. Data Workflow
 
 > [!NOTE]
 > **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
@@ -76,59 +81,89 @@ graph TD
     C -->|Save Raw Trajectories| H[data/trajectories/ranks_..._01_hash/raw/DEP-ARR_raw.parquet]
 ```
 
-1. **Local Trajectory Cache Check**: For each target flight, the fetcher checks `global_trajectory_registry.parquet` for a matching `flight_id`. 
-   - **Cache Hit**: Waypoints are read locally from the existing raw file path (inside `raw/`), avoiding API calls.
-   - **Cache Miss**: A Trino query is executed with exponential backoff.
-2. **In-Memory Slicing & Filtering**: Target flights are loaded from the base sliced flight lists and filtered in-memory using the provided start/end dates and typecodes. Sliced flight lists on disk remain unmodified. Quotas are calculated dynamically on the count of matching flights.
-3. **Dynamic Dataset Namespaces**: Folder directories are dynamically named based on prompt inputs (and include formatted start date, end date, and typecode filters if active), ensuring that runs are isolated and cross-validation cohorts do not stomp on each other:
-   `data/trajectories/<corridors>_strat_..._start_<start>_end_<end>_type_<typecode>_<hash>/`
-   - Manifest files and execution logs are saved at the root of this folder.
-   - Raw trajectories are written to the `raw/` subdirectory.
-4. **Registry Updates**: Freshly fetched flights are appended to the global index for future cache hits.
+1. **Local Trajectory Cache Check**: For each flight schedule, the fetcher checks `global_trajectory_registry.parquet` for an existing `flight_id`.
+   - **Cache Hit**: Waypoints are read locally from the existing raw file path, avoiding database queries and API costs.
+   - **Cache Miss**: A Trino query is executed with exponential backoff to retrieve coordinates from the remote OpenSky database.
+2. **In-Memory Filtering**: Flights are filtered in-memory using the provided start/end dates and aircraft typecodes.
+3. **Dynamic Cohort Isolation**: Saves data into uniquely named folders like `data/trajectories/<corridors>_strat_..._seed_..._[hash]/` containing an `extraction.log`, a run `manifest.json`, and raw parquet files written to a `raw/` sub-folder.
+4. **Registry Updates**: Freshly fetched trajectory records are registered in `global_trajectory_registry.parquet` for future cache hits.
 
 ---
 
-## CLI Guide
+## 4. CLI Usage Guide
 
-### 1. `opensky_fetcher.py` (Single Corridor Fetcher)
-Fetches trajectories for a single corridor list directly.
-
+### Bash
 ```bash
-# Fetches waypoints for A320 flights between 11:00 and 13:00 on Jan 1st, 2025
-python -m src.fetching.opensky_fetcher --input-list data/flight_lists/LEPA-LEBL.parquet --out-dir data/trajectories/manual_test --start-date "2025-01-01T11:00:00" --end-date "2025-01-01T13:00:00" --typecode "A320" --sample-size 5
+# 1. Fetch trajectories for a single corridor directly
+python -m src.fetching.opensky_fetcher \
+    --input-list data/flight_lists/LEPA-LEBL.parquet \
+    --out-dir data/trajectories/manual_test \
+    --start-date "2025-01-01T11:00:00" \
+    --end-date "2025-01-01T13:00:00" \
+    --typecode "A320" \
+    --sample-size 5
+
+# 2. Orchestrate batch downloading for specific ranked routes
+python -m src.fetching.fetcher_orchestrator \
+    --ranks "1, 76" \
+    --strategy fixed \
+    --value 5 \
+    --seed 42 \
+    --start-date "2025-01-02" \
+    --end-date "2025-01-05" \
+    --typecode "A320"
 ```
 
-**Parameters**:
-- `--input-list`: Sliced route list file.
-- `--out-dir`: Directory where raw Parquet files and manifest JSON are saved.
+### PowerShell
+```powershell
+# 1. Fetch trajectories for a single corridor directly
+python -m src.fetching.opensky_fetcher `
+    --input-list data/flight_lists/LEPA-LEBL.parquet `
+    --out-dir data/trajectories/manual_test `
+    --start-date "2025-01-01T11:00:00" `
+    --end-date "2025-01-01T13:00:00" `
+    --typecode "A320" `
+    --sample-size 5
+
+# 2. Orchestrate batch downloading for specific ranked routes
+python -m src.fetching.fetcher_orchestrator `
+    --ranks "1, 76" `
+    --strategy fixed `
+    --value 5 `
+    --seed 42 `
+    --start-date "2025-01-02" `
+    --end-date "2025-01-05" `
+    --typecode "A320"
+```
+
+**Parameters (`opensky_fetcher.py`)**:
+- `--input-list`: Path to the sliced corridor list Parquet file.
+- `--out-dir`: Sliced list directory for output.
 - `--sample-size`: Number of flights to randomly sample.
 - `--seed`: Seed value for random state reproducibility (default: `42`).
-- `--start-date`: Start boundary of flight departure window (ISO format, e.g. `2025-01-01` or `2025-01-01T11:00:00`).
-- `--end-date`: End boundary of flight departure window (ISO format). If a short date like `YYYY-MM-DD` is provided, it automatically extends to `23:59:59` to include the full day.
-- `--typecode`: Aircraft model code (case-insensitive, e.g. `A320`, `B738`, `A20N`).
+- `--start-date` / `--end-date`: Temporal departure windows (ISO format).
+- `--typecode`: Aircraft model designator (e.g. `A320`).
+
+**Parameters (`fetcher_orchestrator.py`)**:
+- `--route-summary`: Custom path to RouteSummary pickle file (default: `data/flight_registry/master_flights_RouteSummary.pkl`).
+- `--input-dir`: Sliced list input folder (default: `data/flight_lists/`).
+- `--format`: Directionality (`oneway` / `roundtrip`).
+- `--ranks`: Comma-separated ranks to extract.
+- `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
+- `--strategy`: Quota strategy (`fixed` / `percent` / `all`).
+- `--value`: Integer size value mapping to the chosen strategy (e.g. `50`).
+- `--seed`: Seed value for random state reproducibility (default: `42`, allowed values: `0` to `4294967295`).
+- `--min-distance`: Minimum route distance in kilometers (default: `800.0` km).
 
 ---
 
-### 2. `fetcher_orchestrator.py` (Batch Corridor Orchestrator)
-Orchestrates downloading trajectories for ranks corridors, automatically resolving dynamic dataset folder names.
+## 5. Prerequisites & Dependencies
 
-```bash
-# Fetch 5 random A320 flights per corridor for rank 1 within a date range
-python -m src.fetching.fetcher_orchestrator --ranks "1, 76" --strategy fixed --value 1 --seed 43 --start-date "2025-01-02" --end-date "2025-01-05" --typecode "A320"
-```
+### Python Libraries
+* `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
+* `pyopensky` (OpenSky Network Trino query client API)
 
-**Parameters**:
-- `--route-summary`: Custom path to RouteSummary pickle file (default: `data/flight_registry/master_flights_RouteSummary.pkl`).
-- `--input-dir`: Folder containing flight lists (default: `data/flight_lists/`).
-- `--format`: Directionality (`oneway` / `roundtrip`). If `roundtrip`, resolves and includes inverse return routes automatically.
-- `--ranks`: Comma-separated ranks to extract.
-- `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
-- `--strategy`: Sampling quota strategy (`fixed` / `percent` / `all`).
-- `--value`: Integer size value mapping to the chosen strategy (e.g. 50 flights for `fixed`).
-- `--seed`: Seed value for random state reproducibility (default: `42`).
-- `--start-date`: Start boundary of flight departure window (ISO format).
-- `--end-date`: End boundary of flight departure window (ISO format). If a short date like `YYYY-MM-DD` is provided, it automatically extends to `23:59:59` to include the full day.
-- `--typecode`: Aircraft model code (case-insensitive, e.g. `A320`, `B738`, `A20N`).
-- `--min-distance`: Minimum route distance in kilometers (default: `800.0` km). Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable.
-  - Using a different seed (e.g., `101` instead of `42`) changes the specific random flights selected in the sample.
-  - Using the same seed guarantees that the exact same flight sample is selected on repeated runs.
+### Credentials
+* Active Trino connection credentials for OpenSky Network.
+
+For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.

@@ -23,20 +23,22 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 # Ensure we can import the adapter from the common module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
+from src.common.config import (
+    REGISTRIES_DIR, 
+    BASE_DIR, 
+    ERA5_PRESSURE_LEVEL_VARIABLES,
+    ERA5_SURFACE_VARIABLES,
+    ERA5_REQUIRED_PRESSURE_LEVELS,
+    ERA5_GRID
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants (Must match era5_manager.py for cache hits)
-PRESSURE_LEVEL_VARIABLES = [
-    "air_temperature", "specific_humidity", "eastward_wind", 
-    "northward_wind", "lagrangian_tendency_of_air_pressure", "specific_cloud_ice_water_content"
-]
-SURFACE_VARIABLES = ["top_net_solar_radiation", "top_net_thermal_radiation"]
-REQUIRED_PRESSURE_LEVELS = [
-    900, 850, 800, 750, 700, 650, 600, 550, 500, 
-    450, 400, 350, 300, 250, 225, 200, 150
-]
+PRESSURE_LEVEL_VARIABLES = ERA5_PRESSURE_LEVEL_VARIABLES
+SURFACE_VARIABLES = ERA5_SURFACE_VARIABLES
+REQUIRED_PRESSURE_LEVELS = ERA5_REQUIRED_PRESSURE_LEVELS
 
 def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_hours: int = 48):
     logger.info(f"Loading cleaned trajectories: {Path(input_path).name}")
@@ -82,7 +84,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         time=(start_date, end_date),
         variables=PRESSURE_LEVEL_VARIABLES,
         pressure_levels=REQUIRED_PRESSURE_LEVELS,
-        grid=0.5,
+        grid=ERA5_GRID,
         cachestore=disk_cache
     )
     
@@ -90,7 +92,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         time=(start_date, end_date),
         variables=SURFACE_VARIABLES,
         pressure_levels=-1,
-        grid=0.5,
+        grid=ERA5_GRID,
         cachestore=disk_cache
     )
     
@@ -196,7 +198,6 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         write_flights_to_parquet(simulated_flights, out_path)
         
         # Update simulation registry cache index
-        from src.common.config import REGISTRIES_DIR, BASE_DIR
         from src.common.utils import update_global_registry
         
         sim_registry_file = REGISTRIES_DIR / "global_simulation_registry.parquet"
