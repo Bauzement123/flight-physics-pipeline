@@ -124,7 +124,7 @@ def retrieve_dataset(
         )
         download_with_retry(era5_client)
 
-def fetch_era5_data(start: str, end: str, cache_dir: str = "data/weather/") -> None:
+def fetch_era5_data(start: str, end: str, cache_dir: str = "data/weather/era5/") -> None:
     """
     Fetches ERA5 reanalysis data for temporal bounds.
     Queries both pressure level and single-level variables sequentially.
@@ -160,14 +160,35 @@ if __name__ == "__main__":
     
     parser.add_argument("--start", required=True, help="Start date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     parser.add_argument("--end", required=True, help="End date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
-    parser.add_argument("--out-dir", default="data/weather/", help="Path to directory for caching downloading NetCDFs")
+    parser.add_argument("--out-dir", default="data/weather/era5/", help="Path to directory for caching downloading NetCDFs")
     parser.add_argument("--debug", action="store_true", help="Enable verbose DEBUG logging level")
     
     args = parser.parse_args()
     
+    # Ensure the logs directory exists
+    out_path = Path(args.out_dir)
+    if out_path.name == "era5":
+        weather_data_dir = out_path.parent
+    else:
+        weather_data_dir = out_path
+        
+    log_dir = weather_data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "weather_acquisition.log"
+    
     # Configure root logging level and format only when invoked as a standalone script
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    ]
+    
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=handlers
+    )
     
     if args.debug:
         logger.setLevel(logging.DEBUG)

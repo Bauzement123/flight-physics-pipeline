@@ -2,6 +2,9 @@
 
 This module represents the second step in the Flight Physics Pipeline. It is responsible for mathematically smoothing the raw ADS-B trajectories downloaded from OpenSky, dropping ground-level noise, applying an Extended Kalman Filter (EKF), and resampling coordinates to a 1-minute frequency optimal for PyContrails.
 
+> [!IMPORTANT]
+> **Input Expectation**: The EKF smoothing engine is explicitly designed and calibrated to be invoked on **raw, noisy flight trajectories** (high-frequency waypoints), not on synthesized/idealized paths or centroid trajectories.
+
 ---
 
 ## 1. Module Structure
@@ -94,7 +97,7 @@ python -m src.processing.kalman_filter `
 
 # 2. Batch smooth an entire directory of raw trajectories
 python -m src.processing.kalman_filter `
-    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw"
+    --input-file "data\trajectories\ranks_1to5_strat_fixed_val_1.0_seed_42_format_oneway_mindist_400.0_a84204"
 ```
 
 **Parameters**:
@@ -131,6 +134,7 @@ During the EKF post-processing workflow, units and column names shift according 
 | `velocity` | `groundspeed` (knots) | `velocity` (m/s) | `groundspeed` (knots) | `gs` (m/s) |
 | `heading` | `track` (degrees) | `math_angle` (radians) | `track` (degrees) | `heading` (degrees) |
 | `vertrate` | `vertical_rate` (ft/min) | `vert_rate` (m/s) | `vertical_rate` (ft/min) | `rocd` (m/s) |
+| `onground` | `onground` | *Not in state (kept)* | `onground` | *Not in standard PyContrails schema* (forced `False`) |
 
 ### Explaining `x`, `y`, and `track_unwrapped` Columns
 - **`x` and `y`** (`float64`): Standard geographic coordinates (`latitude` / `longitude`) are projected onto a 2D Cartesian plane using a Lambert Azimuthal Equal Area projection (`laea`) centered dynamically at the mean latitude/longitude of the flight. This allows the kinematic equations inside the Extended Kalman Filter (EKF) to work with flat Cartesian distances and speeds in meters/seconds, minimizing distortion.

@@ -24,7 +24,7 @@ Module Objectives
       ├── Sub-objective 1: Local Cohort Resolution & Iterative Adapter Ingestion
       │    └── Solution: Query registries, load files sequentially using adapters, and filter to airborne phases
       │         ├── load_route_summary() -> Resolve departure and arrival using CLI `--rank`.
-      │         ├── pd.read_parquet() -> Fetch raw cohort filepaths from global_trajectory_registry.parquet.
+      │         ├── pd.read_parquet() -> Fetch raw cohort filepaths from registries/global_trajectory_registry.parquet.
       │         └── For each filepath:
       │              ├── parquet_to_pycontrails(path) -> Load and normalize raw OpenSky schemas.
       │              ├── pycontrails_to_traffic(pyc_flight) -> Convert to traffic.core.Flight (scaled to aviation units).
@@ -63,10 +63,10 @@ Module Objectives
       │
       └── Sub-objective 6: [MODIFIED] Timeline Normalization & File Output Updates
            └── Solution: Write multiple outputs if k > 1 and update metadata registries
-                ├── Shift: Shift timeline to project baseline (2025-01-01 00:00:00 UTC).
-                ├── Serialize: Save as DEP-ARR_synthesized_c{cluster_id}.parquet.
-                ├── Register: Append route, rank, filepath, route_class, and cluster_id to global_synthesized_registry.parquet.
-                └── Map: Save raw flight ID mappings inside global_flight_cluster_map.parquet.
+                 ├── Shift: Shift timeline to project baseline (2025-01-01 00:00:00 UTC).
+                 ├── Serialize: Save as DEP-ARR_synthesized_c{cluster_id}.parquet.
+                 ├── Register: Append route, rank, filepath, route_class, and cluster_id to registries/global_synthesized_registry.parquet.
+                 └── Map: Save raw flight ID mappings inside registries/global_flight_cluster_map.parquet.
 ```
 
 ---
@@ -80,21 +80,21 @@ Module Objectives
 graph TD
     A[Route Rank Input] --> B[1. RouteSummary Resolution & Registry Skip Check]
     B -->|Origin-Destination DEP -> ARR| C[2. Raw Registry Query]
-    C -->|global_trajectory_registry.parquet| D[3. Load Raw Parquet Files]
+    C -->|registries/global_trajectory_registry.parquet| D[3. Load Raw Parquet Files]
     D -->|Cohort flights matching route| E[4. OpenAP Phase Labeling]
     E --> F[5. Hybrid ROCD Normalization]
-    F -->|Straightened climbs/descents| G[6. Spatial Resampling & Dynamic LAEA Projection]
+    F -->|Straightened outliers / Clean flights unchanged| G[6. Spatial Resampling & Dynamic LAEA Projection]
     G --> H[7. K-Means Route Clustering & Classification]
     H -->|Split into K sub-cohorts| I[8. Multi-Centroid Spatial DTW Centroid Generation]
     I --> J[9. Temporal Resampling to Fixed Baseline]
     J -->|2025-01-01 00:00:00 UTC Baseline + Metadata| K[10. Save Synthesized Parquet files]
     K -->|adapters.py pycontrails_to_parquet| L[data/synthesized_paths/DEP-ARR_synthesized_cID.parquet]
     L --> M[11. Update Registries]
-    M -->|global_synthesized_registry.parquet & global_flight_cluster_map.parquet| N[Registered Entries]
+    M -->|registries/global_synthesized_registry.parquet & registries/global_flight_cluster_map.parquet| N[Registered Entries]
 ```
 
-1.  **Route Rank Resolution & Skip Check**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`). The orchestrator queries `global_synthesized_registry.parquet` to check if this rank's synthesis was already completed.
-2.  **Registry Query**: The script queries `global_trajectory_registry.parquet` directly to locate all raw Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`).
+1.  **Route Rank Resolution & Skip Check**: The input `--rank` is resolved to a specific departure and arrival airport (e.g. `LGAV` and `LCLK`). The orchestrator queries `registries/global_synthesized_registry.parquet` to check if this rank's synthesis was already completed.
+2.  **Registry Query**: The script queries `registries/global_trajectory_registry.parquet` directly to locate all raw Parquet files containing flights matching the route pattern (e.g. `_LGAV-LCLK_`).
 3.  **Phase Identification & ROCD Calculation**: For each flight in the cohort, `openap.phase.FlightPhase` classifies waypoints and locates the Top of Climb (TOC) and Top of Descent (TOD). The average climb and descent rates of climb/descent (ROCD) are computed.
 4.  **Holding Pattern Correction**: Flights are classified into clean baseline flights and holding-pattern outliers (e.g. descent ROCD $< 1200$ ft/min). For outliers, their climb/descent segments are replaced with direct 3D lines scaled to the median clean ROCD duration, removing circles, loops, and delay times while maintaining realistic ground speeds.
 5.  **Spatial Standardization**: Trajectories are projected to a dynamic local Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the cohort's average coordinates. Flights are resampled to a dense set of spatial checkpoints (with spacing at `1/10` of the grid resolution).
@@ -104,10 +104,11 @@ graph TD
     * Configures `route_class` based on best clustering score: `Class 1` (Single Track), `Class 2` (Binary Split), `Class 3` (Multi-Track), or `Class 4` (Chaos if variance is high but clustering score is low).
 7.  **Multi-Centroid DTW Centroid Generation**: Loops over the identified clusters and computes a spatial track centroid using Dynamic Time Warping (DTW) for each sub-cohort independently.
 8.  **Baseline Temporal Resampling**: Snaps each centroid to SI units, stamps `route_class` and `cluster_id` columns, and temporal-interpolates to a uniform grid (default 60s) starting at `2025-01-01 00:00:00 UTC`.
+    *   **Cruise Altitude Filter**: Checks if the maximum altitude of the generated track centroid is below FL250 (25,000 ft or ~7,620 m). If it is, the synthesis for that cluster is aborted/skipped.
 9.  **Serialization & Registration**:
-    * Saves each track to `<DEP-ARR>_synthesized_c{cluster_id}.parquet`.
-    * Updates `global_synthesized_registry.parquet` with the new route files, class, and cluster ID.
-    * Updates `global_flight_cluster_map.parquet` mapping flight IDs to their cluster assignments.
+    *   Saves each track to `<DEP-ARR>_synthesized_c{cluster_id}.parquet`.
+    *   Updates `registries/global_synthesized_registry.parquet` with the new route files, class, and cluster ID.
+    *   Updates `registries/global_flight_cluster_map.parquet` mapping flight IDs to their cluster assignments.
 
 ---
 
@@ -155,8 +156,9 @@ python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --o
 ```
 
 **Parameters**:
-*   `--ranks`: Comma-separated list of route ranks to process.
-*   `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to process.
+*   `--ranks` (Mutually exclusive with `--lower-rank`): Comma-separated list of route ranks to process.
+*   `--lower-rank` (Mutually exclusive with `--ranks`): Lower bound of route ranks range to process. If specified, `--upper-rank` is required.
+*   `--upper-rank`: Upper bound of route ranks range to process. Required if `--lower-rank` is specified.
 *   `--out-dir` (Optional): Output directory for synthesized trajectories (default: `data/synthesized_paths/`).
 *   `--grid-seconds` (Optional): Time grid resolution in seconds (default: `60`).
 *   `--overwrite`: If set, deletes existing synthesized parquets and forces recalculation.
@@ -176,7 +178,9 @@ python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --o
 
 ### Input Files
 *   `data/flight_registry/master_flights_RouteSummary.pkl` (for decoding route ranks)
-*   `data/flight_registry/global_trajectory_registry.parquet` (for identifying raw source trajectories)
+*   `data/flight_registry/registries/global_trajectory_registry.parquet` (for identifying raw source trajectories)
+*   `data/flight_registry/registries/global_synthesized_registry.parquet` (for synthesized route skip checks and updates)
+*   `data/flight_registry/registries/global_flight_cluster_map.parquet` (for recording flight-to-cluster mappings)
 
 ### Central Standards & References
 *   For naming conventions, schemas, and unit systems (SI vs Aviation), refer directly to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.

@@ -6,11 +6,10 @@ import logging
 
 from src.common.config import BASE_DIR, REGISTRIES_DIR
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MANIFEST BUILDER] - %(message)s')
+logger = logging.getLogger(__name__)
 
 def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, description: str):
-    logging.info(f"--- Rebuilding/Updating {description} Registry ---")
+    logger.info(f"--- Rebuilding/Updating {description} Registry ---")
     
     # 1. Search directories for matching parquet files
     found_files = []
@@ -19,7 +18,7 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
             glob_pattern = str(s_dir / "**" / pattern)
             found_files.extend(glob.glob(glob_pattern, recursive=True))
             
-    logging.info(f"Found {len(found_files)} files matching '{pattern}' on disk.")
+    logger.info(f"Found {len(found_files)} files matching '{pattern}' on disk.")
     
     # Load existing registry if it exists
     existing_df = None
@@ -34,15 +33,15 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
                 pruned_count = original_len - len(existing_df)
                 
                 if pruned_count > 0:
-                    logging.info(f"Pruned {pruned_count} stale entries from {registry_file.name} (associated files were deleted).")
+                    logger.info(f"Pruned {pruned_count} stale entries from {registry_file.name} (associated files were deleted).")
                 
                 if not existing_df.empty:
                     indexed_files = set(existing_df['file_path'].unique())
-                    logging.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+                    logger.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
                 else:
                     existing_df = None
         except Exception as e:
-            logging.warning(f"Could not load existing registry {registry_file.name} ({e}). Rebuilding from scratch.")
+            logger.warning(f"Could not load existing registry {registry_file.name} ({e}). Rebuilding from scratch.")
 
     new_mappings = []
     
@@ -57,7 +56,7 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
             continue
             
         try:
-            logging.info(f"Indexing new file: {filepath.name}")
+            logger.info(f"Indexing new file: {filepath.name}")
             # Read only flight_id column to keep memory usage low
             df = pd.read_parquet(filepath, columns=['flight_id'])
             unique_ids = df['flight_id'].dropna().unique()
@@ -68,18 +67,18 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
                     "file_path": rel_path
                 })
         except Exception as e:
-            logging.error(f"Error reading Parquet file {filepath.name}: {e}")
+            logger.error(f"Error reading Parquet file {filepath.name}: {e}")
             
     if skipped_count > 0:
-        logging.info(f"Skipped {skipped_count} files that were already indexed.")
+        logger.info(f"Skipped {skipped_count} files that were already indexed.")
 
     # 3. Merge and save
     if not new_mappings:
         if existing_df is not None:
-            logging.info(f"No new files to index. Registry is up to date.")
+            logger.info(f"No new files to index. Registry is up to date.")
             df_updated = existing_df
         else:
-            logging.warning(f"No flight IDs were extracted for {description}.")
+            logger.warning(f"No flight IDs were extracted for {description}.")
             df_updated = pd.DataFrame(columns=["flight_id", "file_path"])
     else:
         df_new = pd.DataFrame(new_mappings)
@@ -95,18 +94,18 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
     
     # Save registry
     df_updated.to_parquet(registry_file, index=False)
-    logging.info(f"Successfully generated/updated {description} registry at: {registry_file}")
-    logging.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
+    logger.info(f"Successfully generated/updated {description} registry at: {registry_file}")
+    logger.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
 
 
 def index_synthesized_files(registry_file: Path, search_dir: Path):
-    logging.info("--- Rebuilding/Updating Synthesized Registry ---")
+    logger.info("--- Rebuilding/Updating Synthesized Registry ---")
     if not search_dir.exists():
-        logging.info("Synthesized folder does not exist. Skipping.")
+        logger.info("Synthesized folder does not exist. Skipping.")
         return
         
     found_files = glob.glob(str(search_dir / "**" / "*_synthesized_c*.parquet"), recursive=True)
-    logging.info(f"Found {len(found_files)} synthesized files on disk.")
+    logger.info(f"Found {len(found_files)} synthesized files on disk.")
     
     # Load RouteSummary to resolve rank for each route
     from src.common.utils import load_route_summary
@@ -147,7 +146,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
                     "cluster_id": cluster_id
                 })
             except Exception as e:
-                logging.warning(f"Failed to parse or read synthesized file {name}: {e}")
+                logger.warning(f"Failed to parse or read synthesized file {name}: {e}")
             
     df_updated = pd.DataFrame(new_entries)
     if df_updated.empty:
@@ -155,7 +154,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
         
     registry_file.parent.mkdir(parents=True, exist_ok=True)
     df_updated.to_parquet(registry_file, index=False)
-    logging.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
+    logger.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
 
 
 def build_global_manifest():
@@ -164,7 +163,6 @@ def build_global_manifest():
         pattern="*_raw.parquet",
         registry_file=REGISTRIES_DIR / "global_trajectory_registry.parquet",
         search_dirs=[
-            BASE_DIR / "data" / "01_raw_trajectories",
             BASE_DIR / "data" / "trajectories"
         ],
         description="Raw Trajectory"
@@ -175,7 +173,6 @@ def build_global_manifest():
         pattern="*_clean_si.parquet",
         registry_file=REGISTRIES_DIR / "global_clean_registry.parquet",
         search_dirs=[
-            BASE_DIR / "data" / "02_clean_trajectories",
             BASE_DIR / "data" / "trajectories"
         ],
         description="Clean EKF Trajectory"
@@ -187,7 +184,6 @@ def build_global_manifest():
         registry_file=REGISTRIES_DIR / "global_simulation_registry.parquet",
         search_dirs=[
             BASE_DIR / "data" / "results",
-            BASE_DIR / "data" / "04_physics_results",
             BASE_DIR / "data" / "trajectories"
         ],
         description="Physics Simulation"
@@ -210,4 +206,5 @@ def build_global_manifest():
     )
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MANIFEST BUILDER] - %(message)s')
     build_global_manifest()

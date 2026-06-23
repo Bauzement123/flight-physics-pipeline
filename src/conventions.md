@@ -11,10 +11,13 @@ All modules must interact with data stored under the root `data/` directory usin
 ```text
 data/
 ├── flight_registry/       # Master lists, global registries, and summary index files
+│   └── registries/        # Parquet files mapping flight_ids to relative paths
 ├── flight_lists/          # Sliced flight list parquet files (e.g., corridor pairs)
 ├── trajectories/          # Raw coordinates folder, structured by run directories
 ├── weather/               # Local cache of ERA5 reanalysis NetCDF (.nc) files
-├── synthesized_paths/     # Idealed and temporal-gridded DTW trajectory outputs
+├── master_flight_paths/   # Central repository of flight route definitions
+├── simulation_profiles/   # Profiles for physics and PSFlight simulations
+├── synthesized_paths/     # Idealized and temporal-gridded DTW trajectory outputs
 └── results/               # Final simulated outcome datasets
 ```
 
@@ -22,6 +25,7 @@ data/
 To prevent different cross-validation cohorts from overwriting each other, run folders inside `data/trajectories/` and `data/results/` must use the dynamic hashing naming template:
 `ranks_[lower]to[upper]_strat_[strategy]_val_[val]_seed_[seed]_start_[start]_end_[end]_type_[typecode]_[hash_suffix]`
 * Example: `ranks_1-5_strat_fixed_val_50_seed_42_format_roundtrip_a9f1`
+* **Hash Suffix**: The `[hash_suffix]` is a deterministic 6-character MD5 checksum calculated based on all CLI and folder parameters to ensure uniqueness.
 
 ---
 
@@ -50,6 +54,10 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 | **Distance** | Kilometers (km) | Meters (m) | $1 \text{ km} = 1000 \text{ m}$ |
 | **Coordinates** | Degrees (WGS84) | Meters (LAEA Projection) | Transformed using `pyproj` centered at mean latitude/longitude. |
 | **Time** | Local/Varying timezone | UTC (timezone-naive) | Stamped to standard UTC. |
+| **Vertical Rate (ROCD)** | Feet per minute (ft/min) | Meters per second (m/s) | $1 \text{ m/s} \approx 196.8504 \text{ ft/min}$ |
+
+* **Time Zone**: Enforce a strict timezone-naive UTC standard. All loaded timestamps must strip timezone tags (e.g. by converting to datetime and calling `.dt.tz_localize(None)` in pandas) to ensure seamless comparisons.
+* **OpenSky Coordinates**: Raw OpenSky coordinates (WGS84 lat/lon) are kept as degrees, but all other raw fields (like altitude in feet, velocity in knots, and vertical rate in ft/min) must be standardized into SI units upon ingestion (e.g. altitude in meters, speed in m/s, ROCD in m/s).
 
 ---
 
@@ -60,6 +68,7 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 * **Logging Setup**: 
   - Call `logging.basicConfig()` only inside the `if __name__ == "__main__":` block to avoid global log-format pollution when modules are imported.
   - Mirrored file logs must be saved as `extraction.log` or `simulation.log` in the active run directories.
+  - Exceptions are explicitly permitted for background daemon/scheduler tasks, which may write to specific files like `weather_acquisition.log`.
 * **CLI Invocation**: All script runs must use Python's module format:
   `python -m src.folder.script_name --args`
 

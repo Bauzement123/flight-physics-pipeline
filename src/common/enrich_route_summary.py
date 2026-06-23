@@ -18,8 +18,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 from src.common.config import FLIGHT_REGISTRY_DIR
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [DISTANCE ENRICHMENT] - %(message)s")
-logger = logging.getLogger("DistanceEnrichment")
+logger = logging.getLogger(__name__)
 
 def calculate_haversine_numpy(
     lon1: pd.Series, 
@@ -134,6 +133,7 @@ def enrich_route_summary(
     return True
 
 if __name__ == "__main__":
-    pkl_file = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
-    csv_file = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.csv"
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [DISTANCE ENRICHMENT] - %(message)s")
+    pkl_file = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
+    csv_file = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.csv"
     enrich_route_summary(pkl_file, csv_file)

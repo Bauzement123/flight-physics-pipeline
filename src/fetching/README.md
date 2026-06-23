@@ -72,21 +72,21 @@ Module Objectives
 graph TD
     A[data/flight_lists/DEP-ARR.parquet] -->|Target Flight Corridor| B[fetcher_orchestrator.py]
     B -->|Calls| C[opensky_fetcher.py]
-    D[data/flight_registry/global_trajectory_registry.parquet] -->|Pre-fetch Cache check| C
+    D[data/flight_registry/registries/global_trajectory_registry.parquet] -->|Pre-fetch Cache check| C
     C -->|Cache Hit: Load Waypoints| E[Load from existing raw Parquet in raw/]
     C -->|Cache Miss: Query Trino| F[(Trino Database)]
     F -->|Raw ADSB Data| C
     C -->|Update Cache Registry| D
-    C -->|Save Manifest & Log| G[data/trajectories/ranks_..._01_hash/manifest.json & extraction.log]
-    C -->|Save Raw Trajectories| H[data/trajectories/ranks_..._01_hash/raw/DEP-ARR_raw.parquet]
+    C -->|Save Manifest & Log| G[data/trajectories/ranks_..._01_hash/DEP-ARR_hash_manifest.json & extraction.log]
+    C -->|Save Raw Trajectories| H[data/trajectories/ranks_..._01_hash/raw/DEP-ARR_hash_raw.parquet]
 ```
 
-1. **Local Trajectory Cache Check**: For each flight schedule, the fetcher checks `global_trajectory_registry.parquet` for an existing `flight_id`.
+1. **Local Trajectory Cache Check**: For each flight schedule, the fetcher checks `registries/global_trajectory_registry.parquet` for an existing `flight_id`.
    - **Cache Hit**: Waypoints are read locally from the existing raw file path, avoiding database queries and API costs.
    - **Cache Miss**: A Trino query is executed with exponential backoff to retrieve coordinates from the remote OpenSky database.
 2. **In-Memory Filtering**: Flights are filtered in-memory using the provided start/end dates and aircraft typecodes.
-3. **Dynamic Cohort Isolation**: Saves data into uniquely named folders like `data/trajectories/<corridors>_strat_..._seed_..._[hash]/` containing an `extraction.log`, a run `manifest.json`, and raw parquet files written to a `raw/` sub-folder.
-4. **Registry Updates**: Freshly fetched trajectory records are registered in `global_trajectory_registry.parquet` for future cache hits.
+3. **Dynamic Cohort Isolation**: Saves data into uniquely named folders like `data/trajectories/<corridors>_strat_..._seed_..._[hash]/` containing an `extraction.log`, a run `[base_name]_[cohort_hash]_manifest.json`, and raw parquet files (`[base_name]_[cohort_hash]_raw.parquet`) written to a `raw/` sub-folder.
+4. **Registry Updates**: Freshly fetched trajectory records are registered in `registries/global_trajectory_registry.parquet` for future cache hits.
 
 ---
 
@@ -151,8 +151,10 @@ python -m src.fetching.fetcher_orchestrator `
 - `--ranks`: Comma-separated ranks to extract.
 - `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.
 - `--strategy`: Quota strategy (`fixed` / `percent` / `all`).
-- `--value`: Integer size value mapping to the chosen strategy (e.g. `50`).
+- `--value`: Numeric size value mapping to the chosen strategy, accepting float values (e.g. `50.0`).
 - `--seed`: Seed value for random state reproducibility (default: `42`, allowed values: `0` to `4294967295`).
+- `--start-date` / `--end-date`: Temporal departure windows (ISO format).
+- `--typecode`: Aircraft model designator (e.g. `A320`).
 - `--min-distance`: Minimum route distance in kilometers (default: `800.0` km).
 
 ---

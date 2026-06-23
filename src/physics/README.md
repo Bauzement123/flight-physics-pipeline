@@ -27,14 +27,14 @@ Module Objectives
  └── Physical simulation of flight trajectories under CoCiP and PSFlight models (Loop 3b)
       │
       ├── Sub-objective 1: Standard trajectory modeling
-      │    └── Solution: simulate_clean_trajectories() in simulation.py
+      │    └── Solution: run_physics_pipeline() in simulation.py
       │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory
-      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints
+      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints (*_simulated.parquet), global_simulation_registry.parquet, skipped_aircraft.log, simulation.log
       │
       ├── Sub-objective 2: Batch clone corridor flight simulation
       │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
       │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance
-      │         ├── Outputs: Incremental flight-level simulated parquets and updated manifests
+      │         ├── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_synthesized_simulation_registry.parquet, skipped_aircraft.log, simulation.log
       │         └── Role: Orchestrates daily weather batches and flight schedule simulations
       │
       ├── Sub-objective 3: Slicing cohort schedules from master registry
@@ -63,25 +63,31 @@ Module Objectives
 ```mermaid
 graph TD
     A[data/flight_registry/master_flights.parquet] -->|1. Load & Filter Schedules| B(clone_simulation.py)
-    C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve Base Paths| B
-    K[data/flight_registry/registries/global_flight_cluster_map.parquet] -->|3. Resolve Flight Cluster ID| B
-    D[data/weather/*.nc] -->|4. Load ERA5 Offline| B
+    C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve Base Paths & Cluster IDs| B
+    D[data/weather/*.nc] -->|3. Load ERA5 Offline| B
     
-    B -->|5. Time-Shift Baseline| E[Time-Shift Trajectory]
-    E -->|6. Evaluate Performance| F[PSFlight Model]
+    B -->|4. Time-Shift Baseline| E[Time-Shift Trajectory]
+    E -->|5. Evaluate Performance| F[PSFlight Model]
     F -->|True Airspeed, Fuel Flow, Emissions| G[CoCiP Model]
-    G -->|7. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
+    G -->|6. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
     
-    H -->|8. Incremental Save with Metadata| I[data/results/cloned_simulations/<route>_cloned_simulated/]
-    H -->|9. Update global registry| J[global_synthesized_simulation_registry.parquet]
+    H -->|7. Incremental Save with Metadata| I[data/results/cloned_simulations/<route>_cloned_simulated/]
+    H -->|8. Update Global Registries| J[global_synthesized_simulation_registry.parquet]
 ```
 
 1. **Schedule Filtering**: Loads schedules from the `master_flights.parquet` database and slices them based on rank bounds.
-2. **Flight Base Tracking**: Retrieves the synthesized base flight trajectory (DTW tracks) and looks up its corresponding `cluster_id` from the global registries.
+2. **Flight Base Tracking**: Retrieves the synthesized base flight trajectory (DTW tracks) and looks up its corresponding `cluster_id` from the global registries (e.g., `global_synthesized_registry.parquet`).
 3. **Offline Weather Loading**: Automatically loads matching ERA5 NetCDF weather datasets from `data/weather/` cache for the simulation time frame.
 4. **Time Shifting & Evaluation**: Temporally shifts the baseline trajectory to match the scheduled flight time. Evaluates the coordinates via the PSFlight model (obtaining True Airspeed, fuel flow, and emissions parameters).
 5. **Contrail Simulation**: Runs the CoCiP advection model using the 3D weather variables to compute contrail formation, persistence, and radiative forcing metrics.
-6. **Incremental Save**: Writes outputs individually on completion to provide fault-tolerant, resume-ready check-points, and appends finished runs to the global registries.
+6. **Incremental Save & Registry Update**: Writes outputs individually on completion to provide fault-tolerant, resume-ready checkpoints. It appends finished runs to the global registries: standard simulations update `global_simulation_registry.parquet`, and batch clone simulations update `global_synthesized_simulation_registry.parquet`. Any flights with unsupported aircraft types are skipped, and logged in `skipped_aircraft.log`.
+
+### Skipped Aircraft Log (`skipped_aircraft.log`)
+If a flight's aircraft type is not supported by the PSFlight model, the flight is skipped. Details of any skipped flights are appended to `skipped_aircraft.log` under the output directory in a comma-separated format:
+```text
+<flight_id>,<unsupported_typecode>
+```
+This ensures strict tracking of unsupported aircraft performance models without causing simulation-wide failures.
 
 ---
 
@@ -123,6 +129,15 @@ python -m src.physics.clone_simulation `
     --out-dir "data/results/cloned_simulations"
 ```
 
+### Parameter Reference (`simulation.py`)
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--input-file` | `str` | *None* | Path to cleaned SI trajectory Parquet file (`*_clean_si.parquet`) or directory containing multiple cleaned Parquet files. (Required) |
+| `--out-dir` | `str` | *None* | Output directory for simulation results, logs, and skipped aircraft files. (Required) |
+| `--weather-cache` | `str` | *None* | Path to the NetCDF ERA5 weather files directory. (Required) |
+| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. (Optional) |
+
 ### Parameter Reference (`clone_simulation.py`)
 
 | CLI Option | Type | Default | Description |
@@ -130,11 +145,14 @@ python -m src.physics.clone_simulation `
 | `--ranks` | `str` | *None* | Comma-separated list of route ranks to process (e.g., `"1,3"`). Mutually exclusive with `--lower-rank`. |
 | `--lower-rank` | `int` | *None* | Start of a corridor rank range to simulate. Requires `--upper-rank`. |
 | `--upper-rank` | `int` | *None* | End of a corridor rank range to simulate. Requires `--lower-rank`. |
+| `--start-date` | `str` | *None* | Start date (YYYY-MM-DD) for flight scheduling. (Required unless `--test-mode` is active) |
+| `--end-date` | `str` | *None* | End date (YYYY-MM-DD) for flight scheduling. (Required unless `--test-mode` is active) |
 | `--weather-cache` | `str` | `data/weather` | Path to the NetCDF ERA5 weather files directory. |
 | `--out-dir` | `str` | `data/results/cloned_simulations` | Output directory for simulation results and logs. |
 | `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
 | `--overwrite` | `flag` | *False* | Forces re-simulation of already simulated flights. |
-| `--test-mode` | `flag` | *False* | Limit to the first 1 flights of each corridor, and override departure dates starting at `2025-01-01 00:00:00 UTC` spaced 2 hours apart. |
+| `--test-mode` | `flag` | *False* | Enables test mode: slices the cohort to 1 flight total, sets the start/end date to `2025-01-01`, and disables day-by-day temporal windowing (runs as a single batch without 2-hour spacing). |
+| `--no-day-by-day` | `flag` | *True* (default is true) | Disables day-by-day temporal weather windowing and runs the entire cohort as a single batch. |
 | `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 
@@ -153,6 +171,7 @@ python -m src.physics.clone_simulation `
 ### Data Requirements
 * **Weather Cache**: Populated weather NetCDF files covering the flight timelines plus advection padding.
 * **Flight Lists**: Standard corridor lists Parquet files matching schedules.
+* **Master Flight Schedules & Routes**: `master_flights.parquet` and `master_flights_route_summary.pkl` located in the `data/flight_registry/` directory.
 * **Synthesized Baseline**: Synthesized trajectories registered in `global_synthesized_registry.parquet`.
 
 For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.

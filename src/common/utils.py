@@ -9,7 +9,7 @@ import logging
 
 from src.common.config import FLIGHT_REGISTRY_DIR, TRAJECTORIES_DIR
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+logger = logging.getLogger(__name__)
 
 def load_route_summary(summary_path=None) -> pd.DataFrame:
     """
@@ -17,10 +17,12 @@ def load_route_summary(summary_path=None) -> pd.DataFrame:
     """
     if summary_path is None:
         summary_path = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
+        if not summary_path.exists():
+            summary_path = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
     
     path = Path(summary_path)
     if not path.exists():
-        logging.error(f"RouteSummary pickle file not found at: {path}")
+        logger.error(f"RouteSummary pickle file not found at: {path}")
         return pd.DataFrame()
 
     try:
@@ -28,7 +30,7 @@ def load_route_summary(summary_path=None) -> pd.DataFrame:
             df = pickle.load(f)
         return df
     except Exception as e:
-        logging.error(f"Error loading RouteSummary pickle: {e}")
+        logger.error(f"Error loading RouteSummary pickle: {e}")
         return pd.DataFrame()
 
 def split_route_string(route_str: str) -> tuple:
@@ -120,13 +122,13 @@ def generate_dataset_name(
 
 
 
-def setup_file_logger(out_dir: Path) -> logging.FileHandler:
+def setup_file_logger(out_dir: Path, log_filename: str = "extraction.log") -> logging.FileHandler:
     """
-    Adds a FileHandler to the root logger to mirror console output to <out_dir>/extraction.log.
+    Adds a FileHandler to the root logger to mirror console output to <out_dir>/<log_filename>.
     If a handler for that file already exists, it does not add a duplicate.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_file = (out_dir / "extraction.log").resolve()
+    log_file = (out_dir / log_filename).resolve()
     
     root_logger = logging.getLogger()
     # Check if already added
@@ -163,8 +165,8 @@ def update_global_registry(registry_file: Path, new_entries: list):
             
         registry_file.parent.mkdir(parents=True, exist_ok=True)
         df_updated.to_parquet(registry_file, index=False)
-        logging.info(f"Updated global registry {registry_file.name} with {len(new_entries)} entries.")
+        logger.info(f"Updated global registry {registry_file.name} with {len(new_entries)} entries.")
     except Exception as e:
-        logging.error(f"Failed to update global registry {registry_file.name}: {e}")
+        logger.error(f"Failed to update global registry {registry_file.name}: {e}")
 
 

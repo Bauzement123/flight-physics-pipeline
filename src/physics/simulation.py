@@ -32,7 +32,6 @@ from src.common.config import (
     ERA5_GRID
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants (Must match era5_manager.py for cache hits)
@@ -141,6 +140,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     
     # 4. Simulation Loop
     success_count = 0
+    skip_count = 0
     failure_count = 0
     log_messages = []
     
@@ -152,19 +152,11 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         # Get typecode dynamically from metadata or default to B738
         typecode = fl.attrs.get('aircraft_type', 'B738')
         
-        # Validate typecode and resolve fallback mappings
-        if typecode not in ps_supported_types:
-            fallback = "B738"
-            if typecode.startswith("A32") or typecode.startswith("A31") or typecode.startswith("A2"):
-                fallback = "A320"
-            elif typecode.startswith("B73") or typecode.startswith("B3"):
-                fallback = "B738"
-            logger.warning(f"Aircraft type '{typecode}' is not supported by PSFlight. Falling back to '{fallback}'.")
-            log_messages.append(f"[{flight_id}] Warning: aircraft type '{typecode}' not supported. Falling back to '{fallback}'.")
-            typecode = fallback
-            fl.attrs['aircraft_type'] = typecode
-            
         try:
+            # Validate typecode and raise error if unsupported
+            if typecode not in ps_supported_types:
+                raise ValueError(f"Unsupported aircraft: {typecode}")
+                
             # Evaluate aircraft performance and contrail modeling
             fl = ps_model.eval(fl)
             fl_out = cocip_model.eval(source=fl)
@@ -172,6 +164,17 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
             simulated_flights.append(fl_out)
             success_count += 1
             log_messages.append(f"[{flight_id}] Success: Simulated successfully.")
+        except ValueError as ve:
+            if "Unsupported aircraft" in str(ve):
+                skip_count += 1
+                logger.warning(f"Skipping flight {flight_id}: Unsupported aircraft {typecode}")
+                log_messages.append(f"[{flight_id}] Skipped: Unsupported aircraft {typecode}")
+                with open(Path(out_dir) / "skipped_aircraft.log", "a") as f:
+                    f.write(f"{flight_id},{typecode}\n")
+            else:
+                failure_count += 1
+                logger.error(f"Error simulating flight {flight_id}: {ve}")
+                log_messages.append(f"[{flight_id}] Failed: {str(ve)}")
         except Exception as e:
             failure_count += 1
             logger.error(f"Error simulating flight {flight_id}: {e}")
@@ -184,6 +187,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         log_file.write(f"Source clean file: {input_path}\n")
         log_file.write(f"Total flights: {len(flights_dict)}\n")
         log_file.write(f"Success: {success_count}\n")
+        log_file.write(f"Skipped: {skip_count}\n")
         log_file.write(f"Failure: {failure_count}\n")
         log_file.write(f"==================================================\n")
         for msg in log_messages:
@@ -208,6 +212,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         logger.warning("No flights were successfully simulated.")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     parser = argparse.ArgumentParser(description="Run PSFlight and Cocip Physics Simulation")
     parser.add_argument("--input-file", required=True, help="Path to cleaned SI trajectory Parquet file or directory containing cleaned Parquet files")
     parser.add_argument("--out-dir", required=True, help="Output directory for simulation results")

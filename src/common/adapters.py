@@ -9,7 +9,6 @@ import logging
 from pathlib import Path
 from pycontrails import Flight
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
 def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str = "UNKNOWN") -> Flight:
@@ -49,6 +48,10 @@ def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str = "UNKNOWN")
     }
     
     df_pc = df_flight.rename(columns=rename_map).copy()
+    if 'time' in df_pc.columns:
+        df_pc['time'] = pd.to_datetime(df_pc['time'])
+        if df_pc['time'].dt.tz is not None:
+            df_pc['time'] = df_pc['time'].dt.tz_localize(None)
     
     # Drop EKF projection specific columns to match standard PyContrails schemas
     ekf_cols = ['x', 'y', 'track_unwrapped']
@@ -101,6 +104,11 @@ def read_flights_from_parquet(parquet_path: str) -> dict:
         dict: A dictionary mapping flight_id -> pycontrails.Flight
     """
     df = pd.read_parquet(parquet_path)
+    for col in ['time', 'timestamp']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+            if df[col].dt.tz is not None:
+                df[col] = df[col].dt.tz_localize(None)
     flights = {}
     
     for flight_id, group_df in df.groupby('flight_id'):
@@ -167,17 +175,21 @@ def parquet_to_pycontrails(path: str) -> dict:
     if rename_map:
         df = df.rename(columns=rename_map)
         
-    # Ensure time/timestamp columns are parsed to datetime
+    # Ensure time/timestamp columns are parsed to datetime (timezone-naive UTC)
     if 'time' in df.columns:
         if pd.api.types.is_numeric_dtype(df['time']):
-            df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+            df['time'] = pd.to_datetime(df['time'], unit='s', utc=True).dt.tz_localize(None)
         else:
             df['time'] = pd.to_datetime(df['time'])
+            if df['time'].dt.tz is not None:
+                df['time'] = df['time'].dt.tz_localize(None)
     elif 'timestamp' in df.columns:
         if pd.api.types.is_numeric_dtype(df['timestamp']):
-            df['time'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
+            df['time'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_localize(None)
         else:
             df['time'] = pd.to_datetime(df['timestamp'])
+            if df['time'].dt.tz is not None:
+                df['time'] = df['time'].dt.tz_localize(None)
             
     # Drop rows with NaN in critical columns if they exist
     critical_cols = ['latitude', 'longitude', 'altitude', 'time']
@@ -233,9 +245,11 @@ def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
     df['callsign'] = pyc_flight.attrs.get('callsign', 'UNK')
     df['typecode'] = pyc_flight.attrs.get('aircraft_type', 'UNK')
     
-    # Ensure timestamp is datetime with UTC timezone
-    if 'timestamp' in df.columns and not isinstance(df['timestamp'].dtype, pd.DatetimeTZDtype):
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    # Ensure timestamp is datetime timezone-naive UTC
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df['timestamp'].dt.tz is not None:
+            df['timestamp'] = df['timestamp'].dt.tz_localize(None)
         
     return TrafficFlight(df)
 

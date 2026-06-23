@@ -20,7 +20,7 @@ from src.common.config import BASE_DIR, REGISTRIES_DIR
 from src.common.utils import split_route_string, setup_file_logger, update_global_registry
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+# logging.basicConfig is configured inside the __main__ block to prevent importing script pollution.
 
 def fetch_with_backoff(trino_client, query, max_retries=10):
     """Executes a Trino query with exponential backoff on failure."""
@@ -198,11 +198,16 @@ def fetch_trajectories(
 
         try:
             firstseen_dt = pd.to_datetime(firstseen)
+            if firstseen_dt.tzinfo is not None:
+                firstseen_dt = firstseen_dt.tz_localize(None)
             lastseen_dt = pd.to_datetime(lastseen)
+            if lastseen_dt.tzinfo is not None:
+                lastseen_dt = lastseen_dt.tz_localize(None)
+                
             fs_str = firstseen_dt.strftime('%Y%m%d_%H%M')
             
-            firstseen_hour = firstseen_dt.floor('h').tz_localize(None).to_pydatetime()
-            lastseen_hour = lastseen_dt.ceil('h').tz_localize(None).to_pydatetime()
+            firstseen_hour = firstseen_dt.floor('h').to_pydatetime()
+            lastseen_hour = lastseen_dt.ceil('h').to_pydatetime()
         except Exception as e:
             logging.error(f"Time parsing error for {icao24}: {e}")
             continue
@@ -315,6 +320,7 @@ def fetch_trajectories(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
     parser = argparse.ArgumentParser(description="Fetch Trajectories from OpenSky Trino")
     parser.add_argument("--input-list", required=True, help="Path to the filtered target list Parquet file")
     parser.add_argument("--out-dir", required=True, help="Output directory for raw trajectories")

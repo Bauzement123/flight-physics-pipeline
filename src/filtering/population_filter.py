@@ -10,8 +10,8 @@ from pathlib import Path
 
 from src.common.config import FLIGHT_REGISTRY_DIR, FLIGHT_LISTS_DIR
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+# Configure logger
+logger = logging.getLogger(__name__)
 
 def filter_population_in_memory(
     master_flights,
@@ -32,15 +32,19 @@ def filter_population_in_memory(
     # 1. Load master flights
     if isinstance(master_flights, (str, Path)):
         file_path = str(master_flights)
-        logging.info(f"Loading master file from: {file_path}")
+        logger.info(f"Loading master file from: {file_path}")
         if not Path(file_path).exists():
-            logging.error(f"File not found: {file_path}")
+            logger.error(f"File not found: {file_path}")
             return pd.DataFrame()
         if file_path.endswith('.parquet'):
             # Load only required columns if reading from path directly
-            req_cols = ['firstseen', 'estdepartureairport', 'estarrivalairport', 'icao24', 'callsign', 'typecode', 'lastseen']
+            # Support both correct and typo departure airport columns
             try:
-                df = pd.read_parquet(file_path, columns=req_cols)
+                import pyarrow.parquet as pq
+                schema = pq.read_schema(file_path)
+                req_cols = ['firstseen', 'estdepartureairport', 'estdepatureairport', 'estarrivalairport', 'icao24', 'callsign', 'typecode', 'lastseen']
+                existing_cols = [c for c in req_cols if c in schema.names]
+                df = pd.read_parquet(file_path, columns=existing_cols)
             except Exception:
                 df = pd.read_parquet(file_path)
         else:
@@ -51,32 +55,27 @@ def filter_population_in_memory(
     if df.empty:
         return df
 
-    df_filtered = df
+    df_filtered = df.copy()
 
-    # Apply date filters first (slicing creates lightweight views)
-    if start_date:
-        start_dt = pd.to_datetime(start_date, utc=True)
-        df_filtered = df_filtered[df_filtered['firstseen'] >= start_dt]
-        logging.info(f"Filtered by start date >= {start_date}. Remaining: {len(df_filtered):,}")
-
-    if end_date:
-        end_dt_str = f"{end_date} 23:59:59" if len(end_date) <= 10 else end_date
-        end_dt = pd.to_datetime(end_dt_str, utc=True)
-        df_filtered = df_filtered[df_filtered['firstseen'] <= end_dt]
-        logging.info(f"Filtered by end date <= {end_dt_str}. Remaining: {len(df_filtered):,}")
-
-    # Now make a copy of only the sliced subset before performing modifications
-    df_filtered = df_filtered.copy()
-
-    # Ensure tz-awareness for datetime columns on the copy
+    # Convert datetime columns to timezone-naive UTC
     for col in ['firstseen', 'lastseen']:
         if col in df_filtered.columns:
             if not pd.api.types.is_datetime64_any_dtype(df_filtered[col]):
                 df_filtered[col] = pd.to_datetime(df_filtered[col], utc=True)
-            elif df_filtered[col].dt.tz is None:
-                df_filtered[col] = df_filtered[col].dt.tz_localize('UTC')
-            else:
-                df_filtered[col] = df_filtered[col].dt.tz_convert('UTC')
+            if df_filtered[col].dt.tz is not None:
+                df_filtered[col] = df_filtered[col].dt.tz_convert('UTC').dt.tz_localize(None)
+
+    # Apply date filters (using timezone-naive UTC)
+    if start_date:
+        start_dt = pd.to_datetime(start_date, utc=True).tz_localize(None)
+        df_filtered = df_filtered[df_filtered['firstseen'] >= start_dt]
+        logger.info(f"Filtered by start date >= {start_date}. Remaining: {len(df_filtered):,}")
+
+    if end_date:
+        end_dt_str = f"{end_date} 23:59:59" if len(end_date) <= 10 else end_date
+        end_dt = pd.to_datetime(end_dt_str, utc=True).tz_localize(None)
+        df_filtered = df_filtered[df_filtered['firstseen'] <= end_dt]
+        logger.info(f"Filtered by end date <= {end_dt_str}. Remaining: {len(df_filtered):,}")
 
 
     # Load RouteSummary if needed for distance or rank filtering
@@ -99,10 +98,10 @@ def filter_population_in_memory(
                 if dep != 'UNK' and arr != 'UNK':
                     valid_routes.add((dep, arr))
             
-            # Dynamic column resolution for departure/arrival
+            # Dynamic column resolution for departure/arrival (with typo fallback)
             dep_col = None
             arr_col = None
-            for col in ['estdepartureairport', 'origin', 'departure']:
+            for col in ['estdepartureairport', 'estdepatureairport', 'origin', 'departure']:
                 if col in df_filtered.columns:
                     dep_col = col
                     break
@@ -115,11 +114,11 @@ def filter_population_in_memory(
                 route_keys = df_filtered[dep_col] + '-' + df_filtered[arr_col]
                 valid_keys = {f"{dep}-{arr}" for dep, arr in valid_routes}
                 df_filtered = df_filtered[route_keys.isin(valid_keys)].copy()
-                logging.info(f"Filtered by minimum route distance >= {min_distance} km. Remaining: {len(df_filtered):,}")
+                logger.info(f"Filtered by minimum route distance >= {min_distance} km. Remaining: {len(df_filtered):,}")
             else:
-                logging.warning("Could not identify airport columns for distance filtering.")
+                logger.warning("Could not identify airport columns for distance filtering.")
         else:
-            logging.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
+            logger.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
 
     # Apply rank filter via RouteSummary
     if ranks is not None and len(ranks) > 0:
@@ -132,10 +131,10 @@ def filter_population_in_memory(
                     if dep != 'UNK' and arr != 'UNK':
                         target_routes.add((dep, arr))
                 
-                # Dynamic column resolution for departure/arrival
+                # Dynamic column resolution for departure/arrival (with typo fallback)
                 dep_col = None
                 arr_col = None
-                for col in ['estdepartureairport', 'origin', 'departure']:
+                for col in ['estdepartureairport', 'estdepatureairport', 'origin', 'departure']:
                     if col in df_filtered.columns:
                         dep_col = col
                         break
@@ -149,28 +148,28 @@ def filter_population_in_memory(
                     for dep, arr in target_routes:
                         mask |= (df_filtered[dep_col] == dep) & (df_filtered[arr_col] == arr)
                     df_filtered = df_filtered[mask]
-                    logging.info(f"Filtered by ranks {ranks}. Remaining: {len(df_filtered):,}")
+                    logger.info(f"Filtered by ranks {ranks}. Remaining: {len(df_filtered):,}")
                 else:
-                    logging.warning(f"Could not identify airport columns for rank filtering. Columns: {list(df_filtered.columns)}")
+                    logger.warning(f"Could not identify airport columns for rank filtering. Columns: {list(df_filtered.columns)}")
             else:
-                logging.warning(f"No matching ranks found in RouteSummary. Returning empty DataFrame.")
+                logger.warning(f"No matching ranks found in RouteSummary. Returning empty DataFrame.")
                 return pd.DataFrame()
         else:
-            logging.warning("RouteSummary is empty or missing. Skipping rank filtering.")
+            logger.warning("RouteSummary is empty or missing. Skipping rank filtering.")
 
     # Apply standard attributes filter
     if typecode:
         df_filtered = df_filtered[df_filtered['typecode'] == typecode]
-        logging.info(f"Filtered by typecode == {typecode}. Remaining: {len(df_filtered):,}")
+        logger.info(f"Filtered by typecode == {typecode}. Remaining: {len(df_filtered):,}")
 
     if origin:
         orig_col = 'estdepartureairport' if 'estdepartureairport' in df_filtered.columns else 'estdepatureairport'
         df_filtered = df_filtered[df_filtered[orig_col] == origin]
-        logging.info(f"Filtered by origin == {origin}. Remaining: {len(df_filtered):,}")
+        logger.info(f"Filtered by origin == {origin}. Remaining: {len(df_filtered):,}")
 
     if dest:
         df_filtered = df_filtered[df_filtered['estarrivalairport'] == dest]
-        logging.info(f"Filtered by destination == {dest}. Remaining: {len(df_filtered):,}")
+        logger.info(f"Filtered by destination == {dest}. Remaining: {len(df_filtered):,}")
 
     # Drop loops if specified
     if drop_airport_loops:
@@ -178,7 +177,7 @@ def filter_population_in_memory(
         arr_col = 'estarrivalairport'
         if dep_col in df_filtered.columns and arr_col in df_filtered.columns:
             df_filtered = df_filtered[df_filtered[dep_col] != df_filtered[arr_col]]
-            logging.info(f"Dropped airport loops. Remaining: {len(df_filtered):,}")
+            logger.info(f"Dropped airport loops. Remaining: {len(df_filtered):,}")
 
     return df_filtered
 
@@ -208,7 +207,7 @@ def filter_population(
     )
     
     if df_filtered.empty:
-        logging.warning("Filter resulted in 0 flights. No file will be saved.")
+        logger.warning("Filter resulted in 0 flights. No file will be saved.")
         return
 
     # Build filename parts dynamically based on filter parameters
@@ -246,14 +245,17 @@ def filter_population(
     req_cols = ['icao24', 'callsign', 'firstseen', 'lastseen']
     missing_cols = [c for c in req_cols if c not in df_filtered.columns]
     if missing_cols:
-        logging.warning(f"Warning: The following required columns are missing for Trino fetching: {missing_cols}")
+        logger.warning(f"Warning: The following required columns are missing for Trino fetching: {missing_cols}")
 
     # Save to Parquet
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     df_filtered.to_parquet(out_path, index=False)
-    logging.info(f"Successfully saved {len(df_filtered):,} flights to {out_path}")
+    logger.info(f"Successfully saved {len(df_filtered):,} flights to {out_path}")
 
 if __name__ == "__main__":
+    # Configure logging at application entry point
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+
     parser = argparse.ArgumentParser(description="Filter Master Flight Population Registry")
     parser.add_argument("--csv", "--file", dest="file_path", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to the master CSV or Parquet registry")
     parser.add_argument("--out-dir", default=str(FLIGHT_LISTS_DIR), help="Output directory for sliced flight lists")
@@ -299,4 +301,4 @@ if __name__ == "__main__":
             min_distance=args.min_distance
         )
     except FileExistsError as e:
-        logging.info(str(e))
+        logger.info(str(e))

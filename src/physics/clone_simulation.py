@@ -29,7 +29,6 @@ os.environ['TMPDIR'] = temp_dir
 from src.common.utils import load_route_summary, split_route_string, update_global_registry
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants matching simulation standards
@@ -657,14 +656,16 @@ def run_batch_clone_simulation(
         logger.info(f"Successfully updated global cloned simulation registry at {cloned_registry_file.name}")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
     parser = argparse.ArgumentParser(description="Batch Cloned Trajectory Simulation Engine")
     
     # Ranks specifications (Mutually Exclusive)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--ranks", type=str, help="Comma-separated ranks list (e.g. '1,3')")
-    group.add_argument("--lower-rank", type=int, help="Lower bound of corridor ranks")
     
+    group.add_argument("--lower-rank", type=int, help="Lower bound of corridor ranks")
     parser.add_argument("--upper-rank", type=int, help="Upper bound of corridor ranks")
+    
     parser.add_argument("--start-date", help="Start date (YYYY-MM-DD) for flight scheduling")
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD) for flight scheduling")
     

@@ -26,3 +26,6 @@ extraction.log
 .idea/
 *.code-workspace
 desktop.ini
+
+# Project management and thesis artifacts
+PA/

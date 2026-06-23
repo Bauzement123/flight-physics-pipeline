@@ -1,3 +1,4 @@
+"""Centralized Flight Pipeline Configurations"""
 import os
 from pathlib import Path
 

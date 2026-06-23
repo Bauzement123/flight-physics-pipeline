@@ -20,8 +20,7 @@ GEODESIC_DISTANCE_THRESHOLD_M = 100000.0
 # Suppress pandas FutureWarnings to keep console output clean
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Configure logging for better observability during batch processing
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Logging is configured inside __main__ block to avoid polluting imports
 
 def clean_trajectories(input_file: str, out_dir: str):
     logging.info(f"Loading raw trajectories from: {input_file}")
@@ -253,6 +252,9 @@ def clean_trajectories(input_file: str, out_dir: str):
 if __name__ == "__main__":
     import argparse
     from pathlib import Path
+    
+    # Configure logging for better observability during batch processing
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-file", required=True, help="Path to raw Parquet file or directory containing raw Parquet files")

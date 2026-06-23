@@ -6,20 +6,14 @@ reference flight paths, and manages skipping already generated paths.
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 import pandas as pd
 
-# Add project root to path for imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
+from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
 from src.common.utils import load_route_summary, split_route_string
 from src.synthesis.path_generator import create_synthesized_trajectory
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [ORCHESTRATOR] - %(message)s')
 logger = logging.getLogger(__name__)
 
 def main():
@@ -54,7 +48,7 @@ def main():
         ranks_list = list(range(args.lower_rank, args.upper_rank + 1))
         
     # Load synthesized registry once at startup to find existing ranks
-    registry_file = FLIGHT_REGISTRY_DIR / "registries" / "global_synthesized_registry.parquet"
+    registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
     existing_ranks = set()
     if registry_file.exists():
         try:
@@ -127,4 +121,5 @@ def main():
     logger.info(f"Failed: {failed_count}")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [ORCHESTRATOR] - %(message)s')
     main()

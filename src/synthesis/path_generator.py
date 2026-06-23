@@ -35,8 +35,6 @@ SILHOUETTE_THRESHOLD = 0.35
 MAX_K = 4
 CHAOS_THRESHOLD = 200.0
 
-# Configure logging to match pipeline standards
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -534,7 +532,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         # Timeline normalization (Sub-objective 6)
         df_final = synthesized_flight.to_dataframe()
         delta_time = df_final['time'] - df_final['time'].min()
-        df_final['time'] = pd.Timestamp("2025-01-01 00:00:00", tz="UTC") + delta_time
+        df_final['time'] = pd.Timestamp("2025-01-01 00:00:00") + delta_time
         
         # Re-inject metadata in final df
         df_final['route_class'] = route_class
@@ -578,6 +576,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
     parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from raw OpenSky cohorts.")
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")
     parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for the synthesized trajectory.")

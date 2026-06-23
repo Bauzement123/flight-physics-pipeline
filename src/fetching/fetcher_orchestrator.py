@@ -15,7 +15,7 @@ from src.common.utils import load_route_summary, split_route_string, generate_da
 from src.fetching import opensky_fetcher
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+# logging.basicConfig is configured inside the __main__ block to prevent importing script pollution.
 
 def extract_target_routes(
     summary_path: str, 
@@ -211,6 +211,14 @@ def execute_batch_fetch(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    
+    def check_seed_range(value):
+        ivalue = int(value)
+        if ivalue < 0 or ivalue > 4294967295:
+            raise argparse.ArgumentTypeError(f"Seed {value} must be between 0 and 4294967295")
+        return ivalue
+
     parser = argparse.ArgumentParser(description="OpenSky Fetcher Orchestrator - Batch Trajectory Downloader")
     parser.add_argument("--route-summary", default=str(FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"), help="Path to RouteSummary pickle file")
     parser.add_argument("--input-dir", default=str(FLIGHT_LISTS_DIR), help="Directory containing sliced flight list parquets")
@@ -226,7 +234,7 @@ if __name__ == "__main__":
     # Quota Strategy
     parser.add_argument("--strategy", choices=['fixed', 'percent', 'all'], default='fixed', help="Sampling strategy")
     parser.add_argument("--value", type=float, default=50, help="Value for fixed/percent strategies")
-    parser.add_argument("--seed", type=int, default=42, help="Seed value for randomized sampling state")
+    parser.add_argument("--seed", type=check_seed_range, default=42, help="Seed value for randomized sampling state")
     
     # Optional filtering parameters
     parser.add_argument("--start-date", default=None, help="Start bounds of flight departure window (ISO format)")
