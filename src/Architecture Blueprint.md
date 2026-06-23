@@ -38,6 +38,47 @@ data/
 └── results/                 # Output simulated Parquet files (PSFlight + CoCiP outcomes)
 ```
 
+### 2.1 Source Code Directory Structure
+
+The source files under `src/` are structured by pipeline module:
+
+```text
+src/
+├── common/                  # Shared serialization, configurations, and registries manager
+│   ├── adapters.py
+│   ├── build_global_manifest.py
+│   ├── config.py
+│   ├── enrich_route_summary.py
+│   ├── migrate_directories.py
+│   ├── utils.py
+│   └── README.md
+├── fetching/                # OpenSky Trino database querying and caching
+│   ├── fetcher_orchestrator.py
+│   ├── opensky_fetcher.py
+│   └── README.md
+├── filtering/               # Corridor schedules slicing and filter workflows
+│   ├── filter_orchestrator.py
+│   ├── population_filter.py
+│   └── README.md
+├── processing/              # Coordinate EKF smoothing and 1-minute resampling
+│   ├── kalman_filter.py
+│   ├── TRAFFIC_LIBRARY_EKF_ANALYSIS.md
+│   └── README.md
+├── synthesis/               # Dynamic Time Warping (DTW) route synthesis
+│   ├── path_generator.py
+│   ├── synthesis_orchestrator.py
+│   └── README.md
+├── weather/                 # ERA5 NetCDF reanalysis downloads from CDS API
+│   ├── era5_manager.py
+│   └── README.md
+├── physics/                 # PSFlight performance and CoCiP contrail simulations
+│   ├── clone_simulation.py
+│   ├── simulation.py
+│   └── README.md
+├── Architecture Blueprint.md # This architecture overview
+└── conventions.md           # Project-wide programming and coding standards
+```
+
 ### Run Folder Naming Template
 Run directories under `data/trajectories/` and `data/results/` are generated dynamically based on CLI configurations:
 `ranks_[lower]to[upper]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_mindist_[dist]_[hash]`

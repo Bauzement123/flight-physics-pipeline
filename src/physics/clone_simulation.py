@@ -20,7 +20,7 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR
+from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR, WEATHER_DIR
 temp_dir = str(BASE_DIR / "data" / "temp")
 os.makedirs(temp_dir, exist_ok=True)
 os.environ['TEMP'] = temp_dir
@@ -30,17 +30,6 @@ from src.common.utils import load_route_summary, split_route_string, update_glob
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
 logger = logging.getLogger(__name__)
-
-# Constants matching simulation standards
-PRESSURE_LEVEL_VARIABLES = [
-    "air_temperature", "specific_humidity", "eastward_wind", 
-    "northward_wind", "lagrangian_tendency_of_air_pressure", "specific_cloud_ice_water_content"
-]
-SURFACE_VARIABLES = ["top_net_solar_radiation", "top_net_thermal_radiation"]
-REQUIRED_PRESSURE_LEVELS = [
-    900, 850, 800, 750, 700, 650, 600, 550, 500, 
-    450, 400, 350, 300, 250, 225, 200, 150
-]
 
 def simulate_cloned_flight(
     fl_cloned: Flight, 
@@ -72,17 +61,17 @@ def simulate_cloned_flight(
         
         era5_pl = ERA5(
             time=(start_date, end_date),
-            variables=PRESSURE_LEVEL_VARIABLES,
-            pressure_levels=REQUIRED_PRESSURE_LEVELS,
-            grid=0.5,
+            variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+            pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+            grid=ERA5_GRID,
             cachestore=disk_cache
         )
         
         era5_sl = ERA5(
             time=(start_date, end_date),
-            variables=SURFACE_VARIABLES,
+            variables=ERA5_SURFACE_VARIABLES,
             pressure_levels=-1,
-            grid=0.5,
+            grid=ERA5_GRID,
             cachestore=disk_cache
         )
         
@@ -310,16 +299,16 @@ def load_weather_for_flights(
             era5_pl = ERA5(
                 time=(start_str, end_str),
                 paths=pl_paths,
-                variables=PRESSURE_LEVEL_VARIABLES,
-                pressure_levels=REQUIRED_PRESSURE_LEVELS,
-                grid=0.5
+                variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+                pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+                grid=ERA5_GRID
             )
             era5_sl = ERA5(
                 time=(start_str, end_str),
                 paths=sl_paths,
-                variables=SURFACE_VARIABLES,
+                variables=ERA5_SURFACE_VARIABLES,
                 pressure_levels=-1,
-                grid=0.5
+                grid=ERA5_GRID
             )
             met = era5_pl.open_metdataset()
             rad = era5_sl.open_metdataset()
@@ -334,17 +323,17 @@ def load_weather_for_flights(
     
     era5_pl = ERA5(
         time=(start_str, end_str),
-        variables=PRESSURE_LEVEL_VARIABLES,
-        pressure_levels=REQUIRED_PRESSURE_LEVELS,
-        grid=0.5,
+        variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+        pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+        grid=ERA5_GRID,
         cachestore=disk_cache
     )
     
     era5_sl = ERA5(
         time=(start_str, end_str),
-        variables=SURFACE_VARIABLES,
+        variables=ERA5_SURFACE_VARIABLES,
         pressure_levels=-1,
-        grid=0.5,
+        grid=ERA5_GRID,
         cachestore=disk_cache
     )
     
@@ -669,7 +658,7 @@ if __name__ == "__main__":
     parser.add_argument("--start-date", help="Start date (YYYY-MM-DD) for flight scheduling")
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD) for flight scheduling")
     
-    parser.add_argument("--weather-cache", default=str(BASE_DIR / "data" / "weather"), help="Directory containing ERA5 NetCDF cache files")
+    parser.add_argument("--weather-cache", default=str(WEATHER_DIR), help="Directory containing ERA5 NetCDF cache files")
     parser.add_argument("--out-dir", default=str(BASE_DIR / "data" / "results" / "cloned_simulations"), help="Output directory for simulation results")
     parser.add_argument("--max-age", "--age", type=int, default=48, dest="max_age", help="Maximum contrail simulation/advection age in hours (default: 48)")
     parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")

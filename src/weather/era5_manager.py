@@ -23,7 +23,8 @@ from src.common.config import (
     ERA5_PRESSURE_LEVEL_VARIABLES,
     ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS,
-    ERA5_GRID
+    ERA5_GRID,
+    WEATHER_DIR
 )
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ def retrieve_dataset(
         )
         download_with_retry(era5_client)
 
-def fetch_era5_data(start: str, end: str, cache_dir: str = "data/weather/era5/") -> None:
+def fetch_era5_data(start: str, end: str, cache_dir: str = None) -> None:
     """
     Fetches ERA5 reanalysis data for temporal bounds.
     Queries both pressure level and single-level variables sequentially.
@@ -132,8 +133,10 @@ def fetch_era5_data(start: str, end: str, cache_dir: str = "data/weather/era5/")
     Args:
         start (str): Start date/time string (e.g., "2025-01-01T00:00:00" or "2025-01-01").
         end (str): End date/time string (e.g., "2025-01-02T23:59:59" or "2025-01-02").
-        cache_dir (str): Path to store the cached NetCDF (.nc) files.
+        cache_dir (str): Path to store the cached NetCDF (.nc) files. Defaults to WEATHER_DIR from config.
     """
+    if cache_dir is None:
+        cache_dir = str(WEATHER_DIR)
     # Step 1: Get cache storage engine
     cache_store = init_cache_store(cache_dir)
     
@@ -160,7 +163,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--start", required=True, help="Start date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
     parser.add_argument("--end", required=True, help="End date/time string (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
-    parser.add_argument("--out-dir", default="data/weather/era5/", help="Path to directory for caching downloading NetCDFs")
+    parser.add_argument("--out-dir", default=str(WEATHER_DIR), help="Path to directory for caching downloading NetCDFs")
     parser.add_argument("--debug", action="store_true", help="Enable verbose DEBUG logging level")
     
     args = parser.parse_args()
