@@ -21,7 +21,7 @@ from pycontrails import Flight
 from traffic.core import Traffic, Flight as TrafficFlight
 from openap.phase import FlightPhase
 
-from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
+from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, M_TO_FT
 from src.common.utils import load_route_summary, split_route_string
 from src.common.adapters import (
     parquet_to_pycontrails,
@@ -496,17 +496,17 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         }
         centroid_df = centroid_df.rename(columns=rename_si)
         
-        centroid_df['altitude'] = centroid_df['altitude'] / 3.28084
-        if 'gs' in centroid_df.columns:
-            centroid_df['gs'] = centroid_df['gs'] / 1.9438447
-        if 'rocd' in centroid_df.columns:
-            centroid_df['rocd'] = centroid_df['rocd'] / 196.8504
+        centroid_df['altitude'] = centroid_df['altitude'] / M_TO_FT
+        
+        # Drop outdated columns before instantiating the Flight object to force PyContrails to recalculate kinematics
+        cols_to_drop = ['gs', 'track', 'vertical_rate', 'groundspeed', 'heading', 'rocd']
+        centroid_df = centroid_df.drop(columns=[c for c in cols_to_drop if c in centroid_df.columns], errors='ignore')
             
         # Re-verify altitude threshold (FL250) (Sub-objective 5)
         max_alt_m = centroid_df['altitude'].max()
-        min_threshold_m = 25000.0 / 3.28084
+        min_threshold_m = 25000.0 / M_TO_FT
         if max_alt_m < min_threshold_m:
-            logger.warning(f"Cluster {cluster_id} synthesis aborted: Synthesized cruise altitude {max_alt_m*3.28084:.0f} ft is below FL250.")
+            logger.warning(f"Cluster {cluster_id} synthesis aborted: Synthesized cruise altitude {max_alt_m*M_TO_FT:.0f} ft is below FL250.")
             continue
             
         # Inject metadata columns
@@ -546,7 +546,10 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         pycontrails_to_parquet(final_flight, out_path)
         
         # Register in synthesized registry
-        rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
+        try:
+            rel_path_to_save = out_path.resolve().relative_to(BASE_DIR).as_posix()
+        except ValueError:
+            rel_path_to_save = out_path.resolve().as_posix()
         update_synthesized_registry(
             synthesized_registry_file,
             route=f"{dep}-{arr}",

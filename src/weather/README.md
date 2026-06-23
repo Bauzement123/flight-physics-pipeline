@@ -62,10 +62,10 @@ graph TD
     D -->|Cache Misses Found| H[download_with_retry]
     H -->|CDS API Request| I[(Copernicus Climate Data Store)]
     I -->|NetCDF Weather Data| H
-    H -->|Write clean .nc file| J[data/weather/era5/*.nc]
+    H -->|Write clean .nc file| J[data/weather/*.nc]
 ```
 
-1. **Initialization**: The manager initializes the pycontrails `DiskCacheStore` pointing to `data/weather/era5/` and creates the directory if it does not exist.
+1. **Initialization**: The manager initializes the pycontrails `DiskCacheStore` pointing to `data/weather/` and creates the directory if it does not exist.
 2. **Reactive Cache Checking**: The script queries the cache using the Pycontrails `list_timesteps_not_cached()` method.
    - **Normal execution**: Checks file availability on disk. If all files exist and are valid, it completes immediately.
    - **Self-Healing on Corruption**: If `list_timesteps_not_cached()` hits a corrupted NetCDF file, it raises an `OSError`. The script intercepts this exception, parses the file path from the error details using a regular expression, deletes the corrupted file, and retries checking the cache.
@@ -106,7 +106,7 @@ python -m src.weather.era5_manager `
 
 **Parameters**:
 * `--start` / `--end`: ISO timestamps (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`).
-* `--out-dir`: The target folder to store NetCDF cache files (defaults to `data/weather/era5/`).
+* `--out-dir`: The target folder to store NetCDF cache files (defaults to `data/weather/`).
 * `--debug`: Enables verbose output for tracing cache checks and downloader status.
 
 ---

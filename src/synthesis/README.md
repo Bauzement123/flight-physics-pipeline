@@ -34,9 +34,9 @@ Module Objectives
       │    └── Solution: Use OpenAP to locate TOC/TOD, identify holding-pattern outliers, and correct them using cohort median ROCDs
       │         ├── Phase Classification: Run `openap.phase.FlightPhase` on each flight to locate TOC and TOD.
       │         ├── Kinematic Metrics: Calculate average climb ROCD (takeoff to TOC) and descent ROCD (TOD to landing).
-      │         ├── Clustering: Group flights into clean flights and holding-pattern outliers (e.g. descent ROCD < 1200 ft/min).
+      │         ├── Clustering: Group flights into clean flights and holding-pattern outliers (e.g. climb ROCD < 1800 ft/min or descent ROCD < 1200 ft/min).
       │         ├── Median Derivation: Compute median climb/descent ROCD of clean flights.
-      │         └── Segment Correction: For holding-pattern flights, replace climb/descent with linear paths scaled to the median clean ROCD duration, preserving original cruise tracks.
+      │         └── Segment Correction: For holding-pattern flights, replace climb/descent with linear segments scaled to the median clean ROCD duration, preserving original cruise tracks.
       │
       ├── Sub-objective 3: Geospatial Projection & Dynamic Spatial Standardization
       │    └── Solution: Project and resample all normalized cohort flights onto oversampled spatial checkpoints
@@ -58,14 +58,14 @@ Module Objectives
       │
       ├── Sub-objective 5: Kinematic Validation & Temporal Gridding (APPLIED TO ALL K)
       │    └── Solution: Snap the centroid back to a uniform temporal grid using pycontrails
-      │         ├── pycontrails.Flight(centroid_df) -> Ingest back to PyContrails (converting back to SI units, stamping route_class and cluster_id).
+      │         ├── pycontrails.Flight(centroid_df) -> Ingest back to PyContrails (converting back to SI units, dropping gs/rocd/heading columns to force dynamic kinematics recalculation, stamping route_class and cluster_id).
       │         └── Flight.resample_and_fill(freq=f"{grid_seconds}s") -> Snap to uniform CLI temporal grid.
       │
       └── Sub-objective 6: [MODIFIED] Timeline Normalization & File Output Updates
            └── Solution: Write multiple outputs if k > 1 and update metadata registries
                  ├── Shift: Shift timeline to project baseline (2025-01-01 00:00:00 UTC).
                  ├── Serialize: Save as DEP-ARR_synthesized_c{cluster_id}.parquet.
-                 ├── Register: Append route, rank, filepath, route_class, and cluster_id to registries/global_synthesized_registry.parquet.
+                 ├── Register: Append route, rank, file_path, route_class, and cluster_id to registries/global_synthesized_registry.parquet.
                  └── Map: Save raw flight ID mappings inside registries/global_flight_cluster_map.parquet.
 ```
 
@@ -88,7 +88,7 @@ graph TD
     H -->|Split into K sub-cohorts| I[8. Multi-Centroid Spatial DTW Centroid Generation]
     I --> J[9. Temporal Resampling to Fixed Baseline]
     J -->|2025-01-01 00:00:00 UTC Baseline + Metadata| K[10. Save Synthesized Parquet files]
-    K -->|adapters.py pycontrails_to_parquet| L[data/synthesized_paths/DEP-ARR_synthesized_cID.parquet]
+    K -->|adapters.py pycontrails_to_parquet| L[data/synthesized_paths/DEP-ARR_synthesized_c{cluster_id}.parquet]
     L --> M[11. Update Registries]
     M -->|registries/global_synthesized_registry.parquet & registries/global_flight_cluster_map.parquet| N[Registered Entries]
 ```

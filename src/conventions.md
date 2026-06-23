@@ -23,9 +23,12 @@ data/
 
 ### Dataset Subfolder Naming Schema
 To prevent different cross-validation cohorts from overwriting each other, run folders inside `data/trajectories/` and `data/results/` must use the dynamic hashing naming template:
-`ranks_[lower]to[upper]_strat_[strategy]_val_[val]_seed_[seed]_start_[start]_end_[end]_type_[typecode]_[hash_suffix]`
+`ranks_[lower]-[upper]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
 * Example: `ranks_1-5_strat_fixed_val_50_seed_42_format_roundtrip_a9f1`
 * **Hash Suffix**: The `[hash_suffix]` is a deterministic 6-character MD5 checksum calculated based on all CLI and folder parameters to ensure uniqueness.
+
+### Rank-Distance Slicing Interaction
+Slicing flight list data cohorts by route rank is also subject to the minimum route distance threshold (defaulting to 800.0 km). Ranked routes shorter than this distance will be filtered out unless `--min-distance 0` is explicitly specified.
 
 ---
 
@@ -53,17 +56,18 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 | **Speed** | Knots (kt) | Meters per second (m/s) | $1 \text{ kt} \approx 0.5144 \text{ m/s}$ |
 | **Distance** | Kilometers (km) | Meters (m) | $1 \text{ km} = 1000 \text{ m}$ |
 | **Coordinates** | Degrees (WGS84) | Meters (LAEA Projection) | Transformed using `pyproj` centered at mean latitude/longitude. |
-| **Time** | Local/Varying timezone | UTC (timezone-naive) | Stamped to standard UTC. |
+| **Time** | Local/Varying timezone | UTC (timezone-naive or aware) | Stamped to standard UTC. |
 | **Vertical Rate (ROCD)** | Feet per minute (ft/min) | Meters per second (m/s) | $1 \text{ m/s} \approx 196.8504 \text{ ft/min}$ |
 
-* **Time Zone**: Enforce a strict timezone-naive UTC standard. All loaded timestamps must strip timezone tags (e.g. by converting to datetime and calling `.dt.tz_localize(None)` in pandas) to ensure seamless comparisons.
-* **OpenSky Coordinates**: Raw OpenSky coordinates (WGS84 lat/lon) are kept as degrees, but all other raw fields (like altitude in feet, velocity in knots, and vertical rate in ft/min) must be standardized into SI units upon ingestion (e.g. altitude in meters, speed in m/s, ROCD in m/s).
+* **Time Zone**: Datetime columns can be timezone-aware UTC (e.g., with `+00:00` offset or `'UTC'`) or timezone-naive UTC, consistently used within each module to ensure seamless comparisons. Standard fetched data from Trino/OpenSky outputs timezone-aware UTC. Enforce timezone-naive UTC for internal simulation engine processing if required by third-party packages (e.g., PyContrails).
+* **OpenSky Coordinates/Units**: Raw OpenSky coordinates (WGS84 lat/lon) are kept as degrees. OpenSky data fetched directly from the Trino database is already stored in SI units (meters, meters per second) upon ingestion. If raw OpenSky data is loaded from non-Trino sources in aviation units (altitude in feet, velocity in knots, vertical rate in ft/min), they must be standardized into SI units upon ingestion.
 
 ---
 
 ## 4. Coding Standards and Paradigms
 
 * **Functional Programming**: Scripts should favor pure, stateless functions. Avoid complex state-holding classes unless wrapped around third-party APIs.
+* **EKF Index Mismatch Exception**: In `src/processing/kalman_filter.py`, the index setting code before calling `ekf.apply` is intentionally commented out to prevent JSON time serialization issues. This is a documented exception to standard pandas row index alignment conventions.
 * **Global Configuration**: Shared variables (e.g., vertical levels, weather variables lists, grid resolutions) must be imported from the centralized `src/common/config.py` rather than defined locally.
 * **Logging Setup**: 
   - Call `logging.basicConfig()` only inside the `if __name__ == "__main__":` block to avoid global log-format pollution when modules are imported.

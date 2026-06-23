@@ -146,7 +146,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Master Filter Orchestrator - Corridor slicing.")
     
     parser.add_argument("--route-summary", default=str(FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"), help="Path to RouteSummary pickle file")
-    parser.add_argument("--master-file", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to master flights database Parquet/CSV file")
+    parser.add_argument("--master-file", "--file", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to master flights database Parquet/CSV file")
     parser.add_argument("--out-dir", default=str(FLIGHT_LISTS_DIR), help="Output directory for sliced parquet lists")
     
     # Selection Strategy (Mutually Exclusive)
@@ -158,6 +158,10 @@ if __name__ == "__main__":
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()
+
+    # Set up file logger to mirror stdout to extraction.log in output directory
+    from src.common.utils import setup_file_logger
+    setup_file_logger(Path(args.out_dir), "extraction.log")
 
     # Validate corridor bounds
     if args.lower_rank is not None and args.upper_rank is None:

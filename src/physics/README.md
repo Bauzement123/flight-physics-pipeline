@@ -175,8 +175,8 @@ python -m src.physics.clone_simulation `
 | `--out-dir` | `str` | `data/results/cloned_simulations` | Output directory for simulation results and logs. |
 | `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
 | `--overwrite` | `flag` | *False* | Forces re-simulation of already simulated flights. |
-| `--test-mode` | `flag` | *False* | Enables test mode: slices the cohort to 1 flight total, sets the start/end date to `2025-01-01`, and disables day-by-day temporal windowing (runs as a single batch without 2-hour spacing). |
-| `--no-day-by-day` | `flag` | *True* (default is true) | Disables day-by-day temporal weather windowing and runs the entire cohort as a single batch. |
+| `--test-mode` | `flag` | *False* | Enables test mode: slices the cohort to 1 flight total, sets the start/end date to `2025-01-01`, and disables day-by-day temporal windowing. |
+| `--no-day-by-day` | `flag` | *False* (default is false) | Disables day-by-day temporal weather windowing and runs the entire cohort as a single batch. (By default, day-by-day windowing is active) |
 | `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 

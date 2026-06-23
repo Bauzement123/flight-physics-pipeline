@@ -77,16 +77,16 @@ graph TD
     C -->|Cache Miss: Query Trino| F[(Trino Database)]
     F -->|Raw ADSB Data| C
     C -->|Update Cache Registry| D
-    C -->|Save Manifest & Log| G[data/trajectories/ranks_..._01_hash/DEP-ARR_hash_manifest.json & extraction.log]
-    C -->|Save Raw Trajectories| H[data/trajectories/ranks_..._01_hash/raw/DEP-ARR_hash_raw.parquet]
+    C -->|Save Manifest & Log| G[data/trajectories/ranks_..._param_hash/DEP-ARR_cohort_hash_manifest.json & extraction.log]
+    C -->|Save Raw Trajectories| H[data/trajectories/ranks_..._param_hash/raw/DEP-ARR_cohort_hash_raw.parquet]
 ```
 
-1. **Local Trajectory Cache Check**: For each flight schedule, the fetcher checks `registries/global_trajectory_registry.parquet` for an existing `flight_id`.
+1. **Local Trajectory Cache Check**: For each flight schedule, the fetcher checks `data/flight_registry/registries/global_trajectory_registry.parquet` for an existing `flight_id`.
    - **Cache Hit**: Waypoints are read locally from the existing raw file path, avoiding database queries and API costs.
    - **Cache Miss**: A Trino query is executed with exponential backoff to retrieve coordinates from the remote OpenSky database.
 2. **In-Memory Filtering**: Flights are filtered in-memory using the provided start/end dates and aircraft typecodes.
 3. **Dynamic Cohort Isolation**: Saves data into uniquely named folders like `data/trajectories/<corridors>_strat_..._seed_..._[hash]/` containing an `extraction.log`, a run `[base_name]_[cohort_hash]_manifest.json`, and raw parquet files (`[base_name]_[cohort_hash]_raw.parquet`) written to a `raw/` sub-folder.
-4. **Registry Updates**: Freshly fetched trajectory records are registered in `registries/global_trajectory_registry.parquet` for future cache hits.
+4. **Registry Updates**: Freshly fetched trajectory records are registered in `data/flight_registry/registries/global_trajectory_registry.parquet` for future cache hits.
 
 ---
 

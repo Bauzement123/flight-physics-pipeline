@@ -612,7 +612,7 @@ def run_batch_clone_simulation(
                     if "Unsupported aircraft" in str(e):
                         skip_count += 1
                         logger.warning(f"Skipping flight {flight_id}: Unsupported aircraft {typecode}")
-                        with open(corridor_out_dir / "skipped_aircraft.log", "a") as f:
+                        with open(out_dir_path / "skipped_aircraft.log", "a") as f:
                             f.write(f"{flight_id},{typecode}\n")
                     else:
                         failure_count += 1

@@ -13,7 +13,7 @@ The filter maintains a **6D state vector** tracking the aircraft's spatial and k
 $$x_k = \begin{bmatrix} x_k \\ y_k \\ z^{baro}_k \\ \theta_k \\ v_k \\ w_k \end{bmatrix}$$
 
 Where:
-*   $x_k, y_k$: Projected horizontal coordinates (meters, projected using `EPSG:3857` or another projection).
+*   $x_k, y_k$: Projected horizontal coordinates (meters, projected using a custom local Lambert Azimuthal Equal Area (LAEA) projection centered at the flight's average coordinates).
 *   $z^{baro}_k$: Barometric altitude (meters).
 *   $\theta_k$: Heading angle in math radians (unwrapped, counter-clockwise from the East).
 *   $v_k$: Groundspeed / horizontal velocity (m/s).
@@ -88,8 +88,8 @@ The EKF expects the input DataFrame to contain the following columns:
 | Column Name | Data Type | Units | Description |
 | :--- | :--- | :--- | :--- |
 | `timestamp` | `datetime64[ns, UTC]` | - | Time index (pandas timezone-aware DatetimeIndex) |
-| `x` | `float64` | meters | Projected 2D Cartesian X coordinate (e.g., EPSG:3857) |
-| `y` | `float64` | meters | Projected 2D Cartesian Y coordinate (e.g., EPSG:3857) |
+| `x` | `float64` | meters | Projected 2D Cartesian X coordinate (custom LAEA projection) |
+| `y` | `float64` | meters | Projected 2D Cartesian Y coordinate (custom LAEA projection) |
 | `altitude` | `float64` | feet | Barometric altitude (measured in feet) |
 | `track` | `float64` | degrees | Course/heading angle (compass degrees, $0^\circ \text{ to } 360^\circ$) |
 | `groundspeed` | `float64` | knots | Horizontal ground speed |

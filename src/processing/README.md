@@ -28,7 +28,7 @@ Module Objectives
       │    └── Solution: Reset DataFrame index, rename columns, drop NaNs, and convert metric/SI columns to aviation units in kalman_filter.py
       │
       ├── Sub-objective 2: Group trajectories and filter to valid airborne tracks
-      │    └── Solution: Ingest DataFrame into traffic collection, run airborne() segmentation, and drop flights with < 10 points
+      │    └── Solution: Ingest DataFrame into traffic collection, run airborne() segmentation, and bypass flights with unknown/missing typecodes or < 10 points
       │
       ├── Sub-objective 3: Check cache index for processed flights
       │    └── Solution: Query global_clean_registry.parquet to skip already-smoothed flight paths
@@ -70,9 +70,9 @@ graph TD
 ```
 
 1. **Pre-Execution Cache Checks**: Bypasses processing if the target output file already exists on disk (file-level check) or skips individual flight coordinates if their IDs are already indexed in `global_clean_registry.parquet` (flight-level check).
-2. **Schema & Unit Conversion**: Ingests raw coordinate DataFrames, renames columns to match the `traffic` schema, drops missing `NaN` values, and converts SI metrics to standard aviation units (feet, knots, ft/min) required by the EKF formulas.
+2. **Schema & Unit Conversion**: Ingests raw coordinate DataFrames, renames columns to match the `traffic` schema, drops missing `NaN` values, and converts SI metrics to standard aviation units (feet, knots, ft/min) required by the EKF formulas. Flights with unknown or missing typecodes (e.g., `UNKNOWN` or `None`) are bypassed.
 3. **EKF Mathematical Smoothing**: Projects flight tracks onto a flat 2D Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the flight's average coordinates. Applies the Extended Kalman Filter (RTS backward pass) to smooth coordinate noise.
-4. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Reverts units to SI standards (meters, m/s, UTC timestamps), converts variables via Pycontrails adapters, writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry.
+4. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Reverts units to SI standards (meters, m/s, UTC timestamps), converts variables via Pycontrails adapters, writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry. Logs and run statistics are written to `extraction.log` (previously `cleaning.log`).
 
 ---
 
@@ -97,7 +97,7 @@ python -m src.processing.kalman_filter `
 
 # 2. Batch smooth an entire directory of raw trajectories
 python -m src.processing.kalman_filter `
-    --input-file "data\trajectories\ranks_1to5_strat_fixed_val_1.0_seed_42_format_oneway_mindist_400.0_a84204"
+    --input-file "data\trajectories\ranks_1-2_strat_fixed_val_1.0_seed_42_format_oneway_start_2025-01-01T00-00-00_end_2025-01-31T23-59-59_198b87"
 ```
 
 **Parameters**:
@@ -172,5 +172,7 @@ The diagnostic analysis during the V3 pipeline refactoring identified a critical
    ```
 5. Because `data` (RangeIndex) and EKF outputs (DatetimeIndex) have non-overlapping indices, pandas fails to align the rows and fills the entire columns (`altitude`, `groundspeed`, `track`, `vertical_rate`, `x`, `y`) with `NaN`.
 
-### Resolution
-The EKF engine in `kalman_filter.py` was updated to explicitly reset the index of the EKF outputs back to a `RangeIndex` using `.reset_index(drop=True)` before mapping coordinates and unit conversions, ensuring clean row alignment. Additionally, we clear pandas custom attributes (`df.attrs = {}`) before exporting to Parquet to prevent PyArrow serialization crashes.
+### Resolution & Exception
+To resolve the row alignment issue, the EKF engine in `kalman_filter.py` was updated to explicitly reset the index of the EKF outputs back to a `RangeIndex` using `.reset_index(drop=True)` before mapping coordinates and unit conversions, ensuring clean row alignment.
+Additionally, to prevent JSON time serialization issues from a historical fix (May 27), the index setting code immediately prior to the EKF call remains commented out. This represents an intentional exception to the standard indexing convention.
+Finally, we clear pandas custom attributes (`df.attrs = {}`) before exporting to Parquet to prevent PyArrow serialization crashes.

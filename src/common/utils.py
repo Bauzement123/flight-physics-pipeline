@@ -16,9 +16,9 @@ def load_route_summary(summary_path=None) -> pd.DataFrame:
     Safely loads the RouteSummary pickle file and returns a DataFrame.
     """
     if summary_path is None:
-        summary_path = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
+        summary_path = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
         if not summary_path.exists():
-            summary_path = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
+            summary_path = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
     
     path = Path(summary_path)
     if not path.exists():

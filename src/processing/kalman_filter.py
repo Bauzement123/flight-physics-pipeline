@@ -28,10 +28,10 @@ def clean_trajectories(input_file: str, out_dir: str):
     if df.empty: 
         return
 
-    # Ensure out_dir exists and set up cleaning.log
+    # Ensure out_dir exists and set up extraction.log
     out_dir_path = Path(out_dir).resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)
-    cleaning_log_path = out_dir_path / "cleaning.log"
+    cleaning_log_path = out_dir_path / "extraction.log"
 
     # 1. Rename columns to match the 'traffic' library's expected schema
     df = df.rename(columns={
@@ -51,12 +51,12 @@ def clean_trajectories(input_file: str, out_dir: str):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
     
     # 2. Units (Crucial for EKF)
-    df['groundspeed'] = df['groundspeed'] * 1.943844      # m/s to knots
-    df['altitude'] = df['altitude'] * 3.28084             # meters to feet
-    df['vertical_rate'] = df['vertical_rate'] * 196.8504  # m/s to ft/min
+    df['groundspeed'] = df['groundspeed'] * MPS_TO_KT      # m/s to knots
+    df['altitude'] = df['altitude'] * M_TO_FT             # meters to feet
+    df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM  # m/s to ft/min
     
     # Load clean EKF registry to support flight-level cache hits
-    from src.common.config import REGISTRIES_DIR, BASE_DIR
+    from src.common.config import REGISTRIES_DIR, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
     clean_registry_file = REGISTRIES_DIR / "global_clean_registry.parquet"
     cached_clean_flights = {}
     if clean_registry_file.exists():
@@ -196,9 +196,9 @@ def clean_trajectories(input_file: str, out_dir: str):
             df_smoothed['longitude'] = lon_vals
             
             # Revert units back to SI (meters, m/s, m/s)
-            df_smoothed['groundspeed'] = df_smoothed['groundspeed'] / 1.9438447
-            df_smoothed['altitude'] = df_smoothed['altitude'] / 3.28084
-            df_smoothed['vertical_rate'] = df_smoothed['vertical_rate'] / 196.8504
+            df_smoothed['groundspeed'] = df_smoothed['groundspeed'] / MPS_TO_KT
+            df_smoothed['altitude'] = df_smoothed['altitude'] / M_TO_FT
+            df_smoothed['vertical_rate'] = df_smoothed['vertical_rate'] / MPS_TO_FPM
             
             # Slice/sample the DataFrame at the 1-minute grid times
             df_resampled = df_smoothed[df_smoothed['timestamp'].isin(grid_times)].copy()

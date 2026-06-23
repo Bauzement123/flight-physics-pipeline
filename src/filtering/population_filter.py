@@ -257,7 +257,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
     parser = argparse.ArgumentParser(description="Filter Master Flight Population Registry")
-    parser.add_argument("--csv", "--file", dest="file_path", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to the master CSV or Parquet registry")
+    parser.add_argument("--csv", "--file", "--master-file", dest="file_path", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to the master CSV or Parquet registry")
     parser.add_argument("--out-dir", default=str(FLIGHT_LISTS_DIR), help="Output directory for sliced flight lists")
     parser.add_argument("--start-date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
@@ -273,6 +273,10 @@ if __name__ == "__main__":
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()
+    
+    # Set up file logger to mirror stdout to extraction.log in output directory
+    from src.common.utils import setup_file_logger
+    setup_file_logger(Path(args.out_dir), "extraction.log")
     
     # Validate ranks
     if args.lower_rank is not None and args.upper_rank is None:

@@ -74,7 +74,11 @@ def retrieve_dataset(
     detect, delete, and retry if any corrupted NetCDF files are encountered.
     """
     is_surface = (pressure_levels == -1)
-    dataset_desc = "2D surface-level" if is_surface else f"{len(pressure_levels)} pressure levels"
+    if is_surface:
+        dataset_desc = "2D surface-level"
+    else:
+        levels_list = [pressure_levels] if isinstance(pressure_levels, int) else pressure_levels
+        dataset_desc = f"{len(levels_list)} pressure levels"
     
     logger.info(f"Initializing ERA5 client for retrieving {dataset_desc} globally.")
     era5_client = ERA5(
@@ -169,12 +173,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Ensure the logs directory exists
-    out_path = Path(args.out_dir)
-    if out_path.name == "era5":
-        weather_data_dir = out_path.parent
-    else:
-        weather_data_dir = out_path
-        
+    weather_data_dir = Path(args.out_dir)
     log_dir = weather_data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "weather_acquisition.log"

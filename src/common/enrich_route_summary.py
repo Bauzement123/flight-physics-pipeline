@@ -13,8 +13,6 @@ import pandas as pd
 import numpy as np
 from traffic.data import airports
 
-# Add project root to path if needed for imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.config import FLIGHT_REGISTRY_DIR
 
 # Configure logging

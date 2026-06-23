@@ -29,6 +29,8 @@ Module Objectives
       │         │    ├── start_date / end_date (str): YYYY-MM-DD temporal filters
       │         │    ├── typecode (str): Aircraft type filter (e.g., B777)
       │         │    ├── origin / dest (str): Departure/arrival airport ICAOs
+      │         │    ├── ranks (list): List of rank integers to select
+      │         │    ├── route_summary_path (str): Path to summary pickle
       │         │    └── min_distance (float): Minimum route distance in kilometers (default: 800.0)
       │         └── Outputs: Sliced Parquet list named '<typecode>_<origin>-<dest>_<dates>.parquet'
       │
@@ -60,6 +62,7 @@ graph TD
     A[data/flight_registry/master_flights.parquet] -->|Loaded by| B[population_filter.py]
     A -->|Loaded by| C[filter_orchestrator.py]
     D[data/flight_registry/master_flights_RouteSummary.pkl] -->|Rank lookup| C
+    D -->|Rank & distance lookup| B
     B -->|Slices target route| E[data/flight_lists/DEP-ARR.parquet]
     C -->|Orchestrates batch slicing| E
 ```
@@ -104,7 +107,7 @@ python -m src.filtering.filter_orchestrator `
 ```
 
 **Parameters (`population_filter.py`)**:
-- `--csv` / `--file`: Path to the master CSV or Parquet registry (default: `data/flight_registry/master_flights.parquet`).
+- `--csv` / `--file` / `--master-file`: Path to the master CSV or Parquet registry (default: `data/flight_registry/master_flights.parquet`).
 - `--out-dir`: Where to save sliced corridors (default: `data/flight_lists/`).
 - `--start-date` / `--end-date`: Date bounds `YYYY-MM-DD`.
 - `--typecode`: Filter by specific aircraft designator (e.g. `B777`).
@@ -114,13 +117,16 @@ python -m src.filtering.filter_orchestrator `
 - `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract (if `--lower-rank` is provided, `--upper-rank` is required).
 - `--route-summary`: Custom path to RouteSummary pickle file (default: `data/flight_registry/master_flights_RouteSummary.pkl`).
 
+> [!WARNING]
+> If specific ranks are explicitly requested using `--ranks`, they are still filtered out if their distance is shorter than `--min-distance` (which defaults to `800.0` km). To extract shorter ranked corridors, set `--min-distance 0`.
+
 *Argument Relationships & Priority*: 
 * If both `--ranks` and a rank range (`--lower-rank` and `--upper-rank`) are specified, `--ranks` takes precedence.
 * Default output files are named dynamically: `<typecode>_<origin>-<dest>_ranks_<ranks>_<start_date>-<end_date>.parquet` (e.g., `B777_ranks_1-2-3_20250101-20250107.parquet`). Parts are omitted if they are not provided in the CLI, defaulting to `AllFlights.parquet` if no filter arguments are passed. Dates are formatted with hyphens removed (e.g. `_20250101-20250107`).
 
 **Parameters (`filter_orchestrator.py`)**:
 - `--route-summary`: Custom path to RouteSummary pickle file (default: `data/flight_registry/master_flights_RouteSummary.pkl`).
-- `--master-file`: Custom path to master flights registry (default: `data/flight_registry/master_flights.parquet`).
+- `--master-file` / `--file`: Custom path to master flights registry (default: `data/flight_registry/master_flights.parquet`).
 - `--out-dir`: Sliced lists output folder (default: `data/flight_lists/`).
 - `--ranks`: Comma-separated ranks to extract (e.g. `"1, 76"`).
 - `--lower-rank` & `--upper-rank`: Corridor bounds of ranks to extract.

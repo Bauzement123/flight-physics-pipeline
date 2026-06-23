@@ -8,6 +8,7 @@ import pandas as pd
 import logging
 from pathlib import Path
 from pycontrails import Flight
+from src.common.config import M_TO_FT, MPS_TO_KT, MPS_TO_FPM
 
 logger = logging.getLogger(__name__)
 
@@ -233,11 +234,11 @@ def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
     
     # Scale SI units to standard aviation units for traffic & OpenAP
     if 'altitude' in df.columns:
-        df['altitude'] = df['altitude'] * 3.28084
+        df['altitude'] = df['altitude'] * M_TO_FT
     if 'groundspeed' in df.columns:
-        df['groundspeed'] = df['groundspeed'] * 1.943844
+        df['groundspeed'] = df['groundspeed'] * MPS_TO_KT
     if 'vertical_rate' in df.columns:
-        df['vertical_rate'] = df['vertical_rate'] * 196.8504
+        df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM
         
     # Re-inject static metadata from Flight attributes as repeated columns
     df['flight_id'] = pyc_flight.attrs.get('flight_id', 'UNK')

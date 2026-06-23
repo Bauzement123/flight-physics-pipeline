@@ -245,6 +245,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Validate range
+    if args.ranks is not None and args.upper_rank is not None:
+        parser.error("--upper-rank cannot be used when --ranks is specified.")
+
     if args.lower_rank is not None and args.upper_rank is None:
         parser.error("--upper-rank is required if --lower-rank is specified.")
 

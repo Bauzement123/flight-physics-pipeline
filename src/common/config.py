@@ -46,6 +46,11 @@ SIMULATION_PROFILES_DIR = BASE_DIR / "data" / "simulation_profiles"
 SYNTHESIZED_FLIGHT_PATHS_DIR = BASE_DIR / "data" / "synthesized_paths"
 RESULTS_DIR = BASE_DIR / "data" / "results"
 
+# Physical unit conversion factors
+M_TO_FT = 3.280839895
+MPS_TO_KT = 1.9438444924
+MPS_TO_FPM = 196.8503937
+
 def get_dataset_dir(dataset_name: str) -> Path:
     """
     Returns the unified folder path for a given dataset.
