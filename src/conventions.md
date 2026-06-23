@@ -22,10 +22,18 @@ data/
 ```
 
 ### Dataset Subfolder Naming Schema
-To prevent different cross-validation cohorts from overwriting each other, run folders inside `data/trajectories/` and `data/results/` must use the dynamic hashing naming template:
-`ranks_[lower]-[upper]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
-* Example: `ranks_1-5_strat_fixed_val_50_seed_42_format_roundtrip_a9f1`
-* **Hash Suffix**: The `[hash_suffix]` is a deterministic 6-character MD5 checksum calculated based on all CLI and folder parameters to ensure uniqueness.
+To prevent different cross-validation cohorts from overwriting each other, run folders inside `data/trajectories/` must use the dynamic hashing naming template:
+`ranks_[ranks_spec]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
+
+*   **Ranks Specification (`[ranks_spec]`)**:
+    *   **Range of ranks**: Uses the `to` format (e.g., `ranks_1to5` for ranks 1 through 5).
+    *   **Specific list of ranks**: Uses hyphens to separate specific ranks in the list (e.g., `ranks_1-5` for ranks 1 and 5, or `ranks_1-2-3` for ranks 1, 2, and 3).
+*   **Examples**:
+    *   Range run directory: `ranks_1to5_strat_fixed_val_50.0_seed_42_format_oneway_start_2025-01-01_end_2025-01-31_a9f1b2`
+    *   List run directory: `ranks_1-5_strat_fixed_val_50.0_seed_42_format_oneway_start_2025-01-01_end_2025-01-31_e4a3b8`
+*   **Hash Suffix**: The `[hash_suffix]` is a deterministic 6-character MD5 checksum calculated based on all CLI and folder parameters to ensure uniqueness.
+
+Note that **simulation results** stored under `data/results/` do not use this hashing naming scheme. Instead, the simulation output directory is either manually specified or defaults to `data/results/cloned_simulations/`, inside which results are saved iteratively corridor-by-corridor in route-specific subfolders (e.g., `<origin>-<destination>_cloned_simulated/`).
 
 ### Rank-Distance Slicing Interaction
 Slicing flight list data cohorts by route rank is also subject to the minimum route distance threshold (defaulting to 800.0 km). Ranked routes shorter than this distance will be filtered out unless `--min-distance 0` is explicitly specified.

@@ -79,9 +79,12 @@ src/
 ```
 
 ### Run Folder Naming Template
-Run directories under `data/trajectories/` and `data/results/` are generated dynamically based on CLI configurations:
-`ranks_[lower]to[upper]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_mindist_[dist]_[hash]`
+Run directories under `data/trajectories/` are generated dynamically based on CLI configurations:
+`ranks_[ranks_spec]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
+*   **Ranks Specification (`[ranks_spec]`)**: Range uses `to` (e.g., `ranks_1to5`), list uses hyphens (e.g., `ranks_1-5`).
 *   **Hash Suffix**: A deterministic 6-character MD5 checksum of the parameter prefix to guarantee unique cohort namespaces.
+
+Simulation results stored under `data/results/` do not use this naming scheme and are instead saved iteratively corridor-by-corridor in route-specific folders inside `data/results/cloned_simulations/`.
 
 ---
 
