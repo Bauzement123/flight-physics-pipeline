@@ -20,7 +20,11 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.common.config import BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR, WEATHER_DIR
+from src.common.config import (
+    BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR, WEATHER_DIR,
+    ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
+    ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID
+)
 temp_dir = str(BASE_DIR / "data" / "temp")
 os.makedirs(temp_dir, exist_ok=True)
 os.environ['TEMP'] = temp_dir

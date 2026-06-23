@@ -105,13 +105,25 @@ python -m src.fetching.opensky_fetcher \
 
 # 2. Orchestrate batch downloading for specific ranked routes
 python -m src.fetching.fetcher_orchestrator \
-    --ranks "1, 76" \
+    --ranks "1,76" \
     --strategy fixed \
     --value 5 \
     --seed 42 \
     --start-date "2025-01-02" \
     --end-date "2025-01-05" \
     --typecode "A320"
+
+# 3. Batch fetch with rank range and percentage quota
+python -m src.fetching.fetcher_orchestrator \
+    --lower-rank 1 \
+    --upper-rank 50 \
+    --format oneway \
+    --strategy percent \
+    --value 10.0 \
+    --seed 99 \
+    --start-date "2025-01-01" \
+    --end-date "2025-01-10" \
+    --min-distance 500.0
 ```
 
 ### PowerShell
@@ -127,13 +139,25 @@ python -m src.fetching.opensky_fetcher `
 
 # 2. Orchestrate batch downloading for specific ranked routes
 python -m src.fetching.fetcher_orchestrator `
-    --ranks "1, 76" `
+    --ranks "1,76" `
     --strategy fixed `
     --value 5 `
     --seed 42 `
     --start-date "2025-01-02" `
     --end-date "2025-01-05" `
     --typecode "A320"
+
+# 3. Batch fetch with rank range and percentage quota
+python -m src.fetching.fetcher_orchestrator `
+    --lower-rank 1 `
+    --upper-rank 50 `
+    --format oneway `
+    --strategy percent `
+    --value 10.0 `
+    --seed 99 `
+    --start-date "2025-01-01" `
+    --end-date "2025-01-10" `
+    --min-distance 500.0
 ```
 
 **Parameters (`opensky_fetcher.py`)**:
@@ -156,6 +180,100 @@ python -m src.fetching.fetcher_orchestrator `
 - `--start-date` / `--end-date`: Temporal departure windows (ISO format).
 - `--typecode`: Aircraft model designator (e.g. `A320`).
 - `--min-distance`: Minimum route distance in kilometers (default: `800.0` km).
+
+### Maximal CLI Examples
+
+Here are comprehensive examples showing all available parameters in action:
+
+#### Example 1: Direct Single Corridor Fetch with Full Options (Bash)
+```bash
+python -m src.fetching.opensky_fetcher \
+    --input-list "data/flight_lists/LEPA-LEBL.parquet" \
+    --out-dir "data/trajectories/lepa_blb_detailed_analysis" \
+    --sample-size 50 \
+    --seed 123 \
+    --start-date "2025-01-01T06:00:00" \
+    --end-date "2025-01-31T22:00:00" \
+    --typecode "A320"
+```
+
+#### Example 2: Batch Fetch Specific High-Value Routes (PowerShell)
+```powershell
+python -m src.fetching.fetcher_orchestrator `
+    --ranks "1,3,5,10" `
+    --format oneway `
+    --strategy fixed `
+    --value 100 `
+    --seed 42 `
+    --start-date "2025-01-01" `
+    --end-date "2025-01-15" `
+    --typecode "A380" `
+    --min-distance 800.0
+```
+
+#### Example 3: Large-Scale Batch with Percentage-Based Quota (Bash)
+```bash
+python -m src.fetching.fetcher_orchestrator \
+    --lower-rank 1 \
+    --upper-rank 100 \
+    --format oneway \
+    --strategy percent \
+    --value 5.0 \
+    --seed 99 \
+    --start-date "2024-12-01" \
+    --end-date "2025-01-31" \
+    --min-distance 600.0
+```
+
+#### Example 4: Complete Dataset with All Available Flights (Production)
+```bash
+python -m src.fetching.fetcher_orchestrator \
+    --lower-rank 1 \
+    --upper-rank 926 \
+    --format roundtrip \
+    --strategy all \
+    --seed 42 \
+    --start-date "2025-01-01" \
+    --end-date "2025-12-31" \
+    --min-distance 400.0
+```
+
+#### Example 5: Limited Test Fetch (Quick Validation)
+```bash
+python -m src.fetching.opensky_fetcher \
+    --input-list "data/flight_lists/KJFK-EGLL.parquet" \
+    --out-dir "data/trajectories/test_kjfk_egll" \
+    --sample-size 10 \
+    --seed 42 \
+    --start-date "2025-01-02" \
+    --end-date "2025-01-02"
+```
+
+### Key Configuration Notes
+
+**Strategy Modes** (`fetcher_orchestrator.py`):
+- `--strategy fixed`: Fetches exactly `N` flights per route (e.g., `--value 50` fetches 50 flights per corridor). Best for controlled sampling.
+- `--strategy percent`: Fetches a percentage of available flights per route (e.g., `--value 10.0` fetches 10% of each route). Best for proportional representation.
+- `--strategy all`: Fetches **all** available flights for all routes. Highest data volume, longest runtime, highest API cost.
+
+**Route Format**:
+- `--format oneway`: One-directional routes (A→B only). Lower data volume.
+- `--format roundtrip`: Bidirectional routes (A→B and B→A). Doubles coverage per corridor pair.
+
+**Sampling & Reproducibility**:
+- `--seed`: Controls random sampling order. Use same seed for reproducible runs (default: `42`).
+- `--sample-size` (opensky_fetcher): Direct flight count override for single-corridor fetches.
+
+**Cost & Performance**:
+- `--min-distance`: Skip short routes to focus on long-haul (e.g., `800.0` km). Reduces API queries and data volume.
+- `--typecode`: Filter to specific aircraft (e.g., `A320`, `B787`). Narrows scope and speeds up queries.
+- Larger date ranges (`--start-date` to `--end-date`) increase data volume and API cost linearly.
+
+**Caching Behavior**:
+- All fetches are automatically cached in `registries/global_trajectory_registry.parquet`.
+- Re-running the same fetch parameters will use cached data for previously fetched flights, avoiding redundant API queries.
+- Cache is persistent across runs and modules.
+
 
 ---
 

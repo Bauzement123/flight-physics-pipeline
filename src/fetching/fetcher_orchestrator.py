@@ -255,6 +255,24 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("--ranks must be a comma-separated list of integers.")
 
+    # Generate dynamic dataset directory name early and set up file logger
+    dataset_name = generate_dataset_name(
+        ranks=specific_ranks_list,
+        lower_rank=args.lower_rank,
+        upper_rank=args.upper_rank,
+        strategy=args.strategy,
+        value=args.value,
+        seed=args.seed,
+        fetch_format=args.format,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        typecode=args.typecode,
+        min_distance=args.min_distance
+    )
+    out_dir_path = get_dataset_dir(dataset_name)
+    setup_file_logger(out_dir_path)
+    logging.info(f"Generated dynamic dataset directory: data/trajectories/{dataset_name}/")
+
     # 1. Resolve corridors to fetch
     routes = extract_target_routes(
         summary_path=args.route_summary, 
@@ -278,24 +296,6 @@ if __name__ == "__main__":
         )
         
         if plan:
-            # 3. Generate dynamic dataset directory name using prompt parameter state
-            dataset_name = generate_dataset_name(
-                ranks=specific_ranks_list,
-                lower_rank=args.lower_rank,
-                upper_rank=args.upper_rank,
-                strategy=args.strategy,
-                value=args.value,
-                seed=args.seed,
-                fetch_format=args.format,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                typecode=args.typecode,
-                min_distance=args.min_distance
-            )
-            out_dir_path = get_dataset_dir(dataset_name)
-            setup_file_logger(out_dir_path)
-            logging.info(f"Generated dynamic dataset directory: data/trajectories/{dataset_name}/")
-            
             # 4. Run batch downloader
             import time
             start_time = time.time()

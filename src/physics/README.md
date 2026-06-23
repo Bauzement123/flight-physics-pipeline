@@ -109,6 +109,18 @@ python -m src.physics.clone_simulation \
     --end-date "2025-01-05" \
     --weather-cache "data/weather" \
     --out-dir "data/results/cloned_simulations"
+
+# 3. Run cloned batch simulation for a rank range with multiple clusters per flight
+python -m src.physics.clone_simulation \
+    --lower-rank 1 \
+    --upper-rank 20 \
+    --start-date "2025-01-01" \
+    --end-date "2025-01-31" \
+    --weather-cache "data/weather" \
+    --out-dir "data/results/cloned_simulations" \
+    --max-age 72 \
+    --clusters-per-flight 3 \
+    --min-distance 800.0
 ```
 
 ### PowerShell
@@ -127,6 +139,18 @@ python -m src.physics.clone_simulation `
     --end-date "2025-01-05" `
     --weather-cache "data/weather" `
     --out-dir "data/results/cloned_simulations"
+
+# 3. Run cloned batch simulation for a rank range with multiple clusters per flight
+python -m src.physics.clone_simulation `
+    --lower-rank 1 `
+    --upper-rank 20 `
+    --start-date "2025-01-01" `
+    --end-date "2025-01-31" `
+    --weather-cache "data/weather" `
+    --out-dir "data/results/cloned_simulations" `
+    --max-age 72 `
+    --clusters-per-flight 3 `
+    --min-distance 800.0
 ```
 
 ### Parameter Reference (`simulation.py`)
@@ -156,7 +180,72 @@ python -m src.physics.clone_simulation `
 | `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 
-> [!TIP]
+### Maximal CLI Examples
+
+Here are comprehensive examples showing all available parameters in action:
+
+#### Example 1: Full Range Simulation with All Options (Bash)
+```bash
+python -m src.physics.clone_simulation \
+    --lower-rank 1 \
+    --upper-rank 10 \
+    --start-date "2025-01-01" \
+    --end-date "2025-01-15" \
+    --weather-cache "G:/Meine Ablage/UNI/SS26/PythonPipeline - Kopie/data/weather" \
+    --out-dir "data/results/cloned_simulations/full_analysis" \
+    --max-age 72 \
+    --min-distance 1000.0 \
+    --clusters-per-flight 3 \
+    --no-day-by-day
+```
+
+#### Example 2: Selective Ranks with Overwrite (PowerShell)
+```powershell
+python -m src.physics.clone_simulation `
+    --ranks "1,3,5,10,50" `
+    --start-date "2025-01-02" `
+    --end-date "2025-01-10" `
+    --weather-cache "data/weather" `
+    --out-dir "data/results/high_priority_routes" `
+    --max-age 48 `
+    --min-distance 800.0 `
+    --clusters-per-flight 2 `
+    --overwrite
+```
+
+#### Example 3: Test Mode Verification (Quick Local Test)
+```bash
+python -m src.physics.clone_simulation \
+    --ranks 1,3 \
+    --test-mode \
+    --weather-cache "data/weather" \
+    --out-dir "data/results/test_run" \
+    --clusters-per-flight 1
+```
+
+#### Example 4: High-Resolution Multi-Cluster Batch (Production)
+```bash
+python -m src.physics.clone_simulation \
+    --lower-rank 1 \
+    --upper-rank 76 \
+    --start-date "2025-01-01" \
+    --end-date "2025-01-31" \
+    --weather-cache "/path/to/weather/cache" \
+    --out-dir "data/results/production_batch_jan2025" \
+    --max-age 72 \
+    --min-distance 500.0 \
+    --clusters-per-flight 5 \
+    --no-day-by-day
+```
+
+### Key Configuration Notes
+
+- **`--clusters-per-flight`**: Controls synthetic variation. Higher values (e.g., 5-10) generate multiple alternative trajectories per flight for uncertainty quantification. Default (1) is fastest.
+- **`--min-distance`**: Routes shorter than this threshold are skipped (airport-loop filtering). Common values: `0` (none), `500` (medium), `800` (long-haul).
+- **`--no-day-by-day`**: Trades memory for speed. Disables daily weather batching; use only if RAM and weather coverage allow full-period loading.
+- **`--overwrite`**: Re-simulates flights even if outputs exist. Useful after model updates or parameter changes.
+- **`--test-mode`**: Always use first before production runs to validate setup against local cached data (`2024-12-31` to `2025-01-10`).
+
 > **Offline Verification**: `--test-mode` ensures the simulation runs against the local cached weather data (`2024-12-31` to `2025-01-10`), avoiding the need to fetch new ERA5 data from Copernicus API during verification.
 
 ---
