@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from traffic.data import airports
 
-from src.common.config import FLIGHT_REGISTRY_DIR
+from src.common.config import ROUTE_SUMMARY_PKL, ROUTE_SUMMARY_CSV
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -132,6 +132,6 @@ def enrich_route_summary(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - [DISTANCE ENRICHMENT] - %(message)s")
-    pkl_file = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
-    csv_file = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.csv"
+    pkl_file = ROUTE_SUMMARY_PKL
+    csv_file = ROUTE_SUMMARY_CSV
     enrich_route_summary(pkl_file, csv_file)

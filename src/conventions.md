@@ -76,7 +76,9 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 
 * **Functional Programming**: Scripts should favor pure, stateless functions. Avoid complex state-holding classes unless wrapped around third-party APIs.
 * **EKF Index Mismatch Exception**: In `src/processing/kalman_filter.py`, the index setting code before calling `ekf.apply` is intentionally commented out to prevent JSON time serialization issues. This is a documented exception to standard pandas row index alignment conventions.
-* **Global Configuration**: Shared variables (e.g., vertical levels, weather variables lists, grid resolutions) must be imported from the centralized `src/common/config.py` rather than defined locally.
+* **Global Configuration & Path Centralization**: Shared variables (e.g., vertical levels, weather variables lists, grid resolutions) and all directory/file path configurations (such as global registry `.parquet` databases, default logs, and route summary pickles/CSVs) must be centrally declared in `src/common/config.py` and imported rather than constructed or hardcoded locally. 
+  - All paths should be manipulated as `pathlib.Path` objects rather than raw strings for OS compatibility.
+  - *Google Drive Fallback Note*: The project base directory (`BASE_DIR`) is dynamically resolved relative to the location of `config.py`. However, to support execution within isolated virtual sandboxes running on the `C:` drive, `config.py` implements a hardcoded fallback override: if the script detects it is running on a `C:` drive, it automatically checks if the locally mounted/offline-cached Google Drive path `G:/Meine Ablage/UNI/SS26/PythonPipeline - Kopie` exists and, if so, redirects `BASE_DIR` there.
 * **Logging Setup**: 
   - Call `logging.basicConfig()` only inside the `if __name__ == "__main__":` block to avoid global log-format pollution when modules are imported.
   - Mirrored file logs must be saved as `extraction.log` or `simulation.log` in the active run directories.

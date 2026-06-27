@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 from pathlib import Path
 
-from src.common.config import FLIGHT_REGISTRY_DIR, FLIGHT_LISTS_DIR
+from src.common.config import FLIGHT_LISTS_DIR, ROUTE_SUMMARY_PKL, MASTER_FLIGHTS_FILE
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
     parser = argparse.ArgumentParser(description="Filter Master Flight Population Registry")
-    parser.add_argument("--csv", "--file", "--master-file", dest="file_path", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to the master CSV or Parquet registry")
+    parser.add_argument("--csv", "--file", "--master-file", dest="file_path", default=str(MASTER_FLIGHTS_FILE), help="Path to the master CSV or Parquet registry")
     parser.add_argument("--out-dir", default=str(FLIGHT_LISTS_DIR), help="Output directory for sliced flight lists")
     parser.add_argument("--start-date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--ranks", type=str, help="Comma-separated list of specific ranks (e.g., '1,76,205')")
     parser.add_argument("--lower-rank", type=int, help="Lower bound of rank corridor")
     parser.add_argument("--upper-rank", type=int, help="Upper bound of rank corridor")
-    parser.add_argument("--route-summary", default=str(FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"), help="Path to RouteSummary pickle file")
+    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PKL), help="Path to RouteSummary pickle file")
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()

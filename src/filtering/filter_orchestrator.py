@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import FLIGHT_REGISTRY_DIR, FLIGHT_LISTS_DIR
+from src.common.config import FLIGHT_LISTS_DIR, ROUTE_SUMMARY_PKL, MASTER_FLIGHTS_FILE
 from src.common.utils import load_route_summary, split_route_string
 
 # Configure logger
@@ -145,8 +145,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Master Filter Orchestrator - Corridor slicing.")
     
-    parser.add_argument("--route-summary", default=str(FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"), help="Path to RouteSummary pickle file")
-    parser.add_argument("--master-file", "--file", default=str(FLIGHT_REGISTRY_DIR / "master_flights.parquet"), help="Path to master flights database Parquet/CSV file")
+    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PKL), help="Path to RouteSummary pickle file")
+    parser.add_argument("--master-file", "--file", default=str(MASTER_FLIGHTS_FILE), help="Path to master flights database Parquet/CSV file")
     parser.add_argument("--out-dir", default=str(FLIGHT_LISTS_DIR), help="Output directory for sliced parquet lists")
     
     # Selection Strategy (Mutually Exclusive)

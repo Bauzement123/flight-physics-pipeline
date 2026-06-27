@@ -24,7 +24,7 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 from src.common.config import (
-    REGISTRIES_DIR, 
+    GLOBAL_SIMULATION_REGISTRY, 
     BASE_DIR, 
     ERA5_PRESSURE_LEVEL_VARIABLES,
     ERA5_SURFACE_VARIABLES,
@@ -204,7 +204,7 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         # Update simulation registry cache index
         from src.common.utils import update_global_registry
         
-        sim_registry_file = REGISTRIES_DIR / "global_simulation_registry.parquet"
+        sim_registry_file = GLOBAL_SIMULATION_REGISTRY
         rel_sim_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
         new_entries = [{"flight_id": fid, "file_path": rel_sim_path} for fid in [f.attrs['flight_id'] for f in simulated_flights]]
         update_global_registry(sim_registry_file, new_entries)

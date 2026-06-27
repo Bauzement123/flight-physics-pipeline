@@ -7,7 +7,7 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-from src.common.config import FLIGHT_REGISTRY_DIR, TRAJECTORIES_DIR
+from src.common.config import ROUTE_SUMMARY_PKL, TRAJECTORIES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +16,8 @@ def load_route_summary(summary_path=None) -> pd.DataFrame:
     Safely loads the RouteSummary pickle file and returns a DataFrame.
     """
     if summary_path is None:
-        summary_path = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
-        if not summary_path.exists():
-            summary_path = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
+        summary_path = ROUTE_SUMMARY_PKL
+        logger.info(f"Loading RouteSummary from default: {summary_path}")
     
     path = Path(summary_path)
     if not path.exists():

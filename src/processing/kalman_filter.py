@@ -56,8 +56,8 @@ def clean_trajectories(input_file: str, out_dir: str):
     df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM  # m/s to ft/min
     
     # Load clean EKF registry to support flight-level cache hits
-    from src.common.config import REGISTRIES_DIR, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
-    clean_registry_file = REGISTRIES_DIR / "global_clean_registry.parquet"
+    from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
+    clean_registry_file = GLOBAL_CLEAN_REGISTRY
     cached_clean_flights = {}
     if clean_registry_file.exists():
         try:
@@ -239,10 +239,10 @@ def clean_trajectories(input_file: str, out_dir: str):
         write_flights_to_parquet(pc_flights, out_path)
         
         # Update Clean EKF Registry Cache Index
-        from src.common.config import REGISTRIES_DIR, BASE_DIR
+        from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR
         from src.common.utils import update_global_registry
         
-        clean_registry_file = REGISTRIES_DIR / "global_clean_registry.parquet"
+        clean_registry_file = GLOBAL_CLEAN_REGISTRY
         rel_clean_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
         new_entries = [{"flight_id": fid, "file_path": rel_clean_path} for fid in [f.attrs['flight_id'] for f in pc_flights]]
         update_global_registry(clean_registry_file, new_entries)

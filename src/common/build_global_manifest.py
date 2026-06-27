@@ -4,7 +4,11 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-from src.common.config import BASE_DIR, REGISTRIES_DIR, TRAJECTORIES_DIR, RESULTS_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
+from src.common.config import (
+    BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR,
+    GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
+    GLOBAL_SYNTH_SIM_REGISTRY, GLOBAL_SYNTHESIZED_REGISTRY
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +165,7 @@ def build_global_manifest():
     # 1. Raw trajectories registry
     index_parquet_files(
         pattern="*_raw.parquet",
-        registry_file=REGISTRIES_DIR / "global_trajectory_registry.parquet",
+        registry_file=GLOBAL_TRAJECTORY_REGISTRY,
         search_dirs=[
             TRAJECTORIES_DIR
         ],
@@ -171,7 +175,7 @@ def build_global_manifest():
     # 2. Clean EKF trajectories registry
     index_parquet_files(
         pattern="*_clean_si.parquet",
-        registry_file=REGISTRIES_DIR / "global_clean_registry.parquet",
+        registry_file=GLOBAL_CLEAN_REGISTRY,
         search_dirs=[
             TRAJECTORIES_DIR
         ],
@@ -181,7 +185,7 @@ def build_global_manifest():
     # 3. Simulated outputs registry
     index_parquet_files(
         pattern="*_simulated.parquet",
-        registry_file=REGISTRIES_DIR / "global_simulation_registry.parquet",
+        registry_file=GLOBAL_SIMULATION_REGISTRY,
         search_dirs=[
             RESULTS_DIR,
             TRAJECTORIES_DIR
@@ -192,7 +196,7 @@ def build_global_manifest():
     # 4. Synthesized simulated outputs registry
     index_parquet_files(
         pattern="*_simulated.parquet",
-        registry_file=REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet",
+        registry_file=GLOBAL_SYNTH_SIM_REGISTRY,
         search_dirs=[
             RESULTS_DIR / "cloned_simulations"
         ],
@@ -201,7 +205,7 @@ def build_global_manifest():
     
     # 5. Synthesized paths registry
     index_synthesized_files(
-        registry_file=REGISTRIES_DIR / "global_synthesized_registry.parquet",
+        registry_file=GLOBAL_SYNTHESIZED_REGISTRY,
         search_dir=SYNTHESIZED_FLIGHT_PATHS_DIR
     )
 

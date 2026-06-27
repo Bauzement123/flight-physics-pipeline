@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR
+from src.common.config import BASE_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, GLOBAL_SYNTHESIZED_REGISTRY
 from src.common.utils import load_route_summary, split_route_string
 from src.synthesis.path_generator import create_synthesized_trajectory
 
@@ -48,7 +48,7 @@ def main():
         ranks_list = list(range(args.lower_rank, args.upper_rank + 1))
         
     # Load synthesized registry once at startup to find existing ranks
-    registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
+    registry_file = GLOBAL_SYNTHESIZED_REGISTRY
     existing_ranks = set()
     if registry_file.exists():
         try:

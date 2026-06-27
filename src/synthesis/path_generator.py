@@ -21,7 +21,11 @@ from pycontrails import Flight
 from traffic.core import Traffic, Flight as TrafficFlight
 from openap.phase import FlightPhase
 
-from src.common.config import BASE_DIR, REGISTRIES_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, M_TO_FT
+from src.common.config import (
+    BASE_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, M_TO_FT,
+    GLOBAL_SYNTHESIZED_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
+    GLOBAL_FLIGHT_CLUSTER_MAP
+)
 from src.common.utils import load_route_summary, split_route_string
 from src.common.adapters import (
     parquet_to_pycontrails,
@@ -255,7 +259,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
     
     # Registry-based Skip check
-    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
+    synthesized_registry_file = GLOBAL_SYNTHESIZED_REGISTRY
     if synthesized_registry_file.exists():
         try:
             df_reg = pd.read_parquet(synthesized_registry_file)
@@ -270,7 +274,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             logger.warning(f"Could not check synthesized registry skip: {e}")
     
     # 2. Query registry to find raw flight files
-    raw_registry_file = REGISTRIES_DIR / "global_trajectory_registry.parquet"
+    raw_registry_file = GLOBAL_TRAJECTORY_REGISTRY
     if not raw_registry_file.exists():
         logger.error("Global raw trajectory registry file not found.")
         return None
@@ -572,7 +576,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
         
     # Write flight-to-cluster mappings registry
-    cluster_map_file = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+    cluster_map_file = GLOBAL_FLIGHT_CLUSTER_MAP
     update_flight_cluster_map(cluster_map_file, flight_mappings)
     
     return final_output_paths

@@ -21,15 +21,11 @@ from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.config import (
-    BASE_DIR, FLIGHT_REGISTRY_DIR, REGISTRIES_DIR, WEATHER_DIR,
+    BASE_DIR, WEATHER_DIR, RESULTS_DIR, MASTER_FLIGHTS_FILE,
+    GLOBAL_SYNTHESIZED_REGISTRY, GLOBAL_SYNTH_SIM_REGISTRY,
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID
 )
-temp_dir = str(BASE_DIR / "data" / "temp")
-os.makedirs(temp_dir, exist_ok=True)
-os.environ['TEMP'] = temp_dir
-os.environ['TMP'] = temp_dir
-os.environ['TMPDIR'] = temp_dir
 from src.common.utils import load_route_summary, split_route_string, update_global_registry
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
@@ -191,7 +187,7 @@ def filter_cohort_flights(
     # 3. Already simulated checklist (manifest + file check)
     if not overwrite:
         logger.info("Filtering out already simulated flights...")
-        cloned_registry_file = REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet"
+        cloned_registry_file = GLOBAL_SYNTH_SIM_REGISTRY
         simulated_ids = set()
         if cloned_registry_file.exists():
             try:
@@ -423,10 +419,9 @@ def run_batch_clone_simulation(
     clusters_per_flight: int = 1
 ):
     # Setup paths
-    master_flights_file = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
-    route_summary_file = FLIGHT_REGISTRY_DIR / "master_flights_RouteSummary.pkl"
-    synthesized_registry_file = REGISTRIES_DIR / "global_synthesized_registry.parquet"
-    cloned_registry_file = REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet"
+    master_flights_file = MASTER_FLIGHTS_FILE
+    synthesized_registry_file = GLOBAL_SYNTHESIZED_REGISTRY
+    cloned_registry_file = GLOBAL_SYNTH_SIM_REGISTRY
     
     # 1. Output Dir
     out_dir_path = Path(out_dir)
@@ -663,7 +658,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD) for flight scheduling")
     
     parser.add_argument("--weather-cache", default=str(WEATHER_DIR), help="Directory containing ERA5 NetCDF cache files")
-    parser.add_argument("--out-dir", default=str(BASE_DIR / "data" / "results" / "cloned_simulations"), help="Output directory for simulation results")
+    parser.add_argument("--out-dir", default=str(RESULTS_DIR / "cloned_simulations"), help="Output directory for simulation results")
     parser.add_argument("--max-age", "--age", type=int, default=48, dest="max_age", help="Maximum contrail simulation/advection age in hours (default: 48)")
     parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")
     parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 1 flight and defaults date to 2025-01-01")
