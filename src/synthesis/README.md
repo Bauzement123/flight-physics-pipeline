@@ -104,7 +104,6 @@ graph TD
     * Configures `route_class` based on best clustering score: `Class 1` (Single Track), `Class 2` (Binary Split), `Class 3` (Multi-Track), or `Class 4` (Chaos if variance is high but clustering score is low).
 7.  **Multi-Centroid DTW Centroid Generation**: Loops over the identified clusters and computes a spatial track centroid using Dynamic Time Warping (DTW) for each sub-cohort independently.
 8.  **Baseline Temporal Resampling**: Snaps each centroid to SI units, stamps `route_class` and `cluster_id` columns, and temporal-interpolates to a uniform grid (default 60s) starting at `2025-01-01 00:00:00 UTC`.
-    *   **Cruise Altitude Filter**: Checks if the maximum altitude of the generated track centroid is below FL250 (25,000 ft or ~7,620 m). If it is, the synthesis for that cluster is aborted/skipped.
 9.  **Serialization & Registration**:
     *   Saves each track to `<DEP-ARR>_synthesized_c{cluster_id}.parquet`.
     *   Updates `registries/global_synthesized_registry.parquet` with the new route files, class, and cluster ID.

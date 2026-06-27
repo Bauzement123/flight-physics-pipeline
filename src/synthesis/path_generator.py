@@ -287,14 +287,12 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         logger.error(f"No raw flights found in registry matching route pattern '{route_pattern}'.")
         return None
         
-    unique_file_paths = matching_flights['file_path'].unique()
-    logger.info(f"Found {len(matching_flights)} matching flights across {len(unique_file_paths)} raw files.")
-    
     # 3. Load flights sequentially and build the traffic cohort
     raw_flights = []
     typecodes = []
     
-    for rel_path in unique_file_paths:
+    # Group registry matches by file path to load only registered flight IDs
+    for rel_path, group in matching_flights.groupby('file_path'):
         abs_path = BASE_DIR / rel_path
         if not abs_path.exists():
             logger.warning(f"File listed in registry not found: {abs_path}")
@@ -303,8 +301,9 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         try:
             flights_dict = parquet_to_pycontrails(str(abs_path))
             
-            for flight_id, fl in flights_dict.items():
-                if route_pattern in flight_id:
+            for flight_id in group['flight_id']:
+                if flight_id in flights_dict:
+                    fl = flights_dict[flight_id]
                     trf_flight = pycontrails_to_traffic(fl)
                     airborne_flight = trf_flight.airborne()
                     if airborne_flight is not None and len(airborne_flight) >= 10:
@@ -506,12 +505,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         cols_to_drop = ['gs', 'track', 'vertical_rate', 'groundspeed', 'heading', 'rocd']
         centroid_df = centroid_df.drop(columns=[c for c in cols_to_drop if c in centroid_df.columns], errors='ignore')
             
-        # Re-verify altitude threshold (FL250) (Sub-objective 5)
-        max_alt_m = centroid_df['altitude'].max()
-        min_threshold_m = 25000.0 / M_TO_FT
-        if max_alt_m < min_threshold_m:
-            logger.warning(f"Cluster {cluster_id} synthesis aborted: Synthesized cruise altitude {max_alt_m*M_TO_FT:.0f} ft is below FL250.")
-            continue
+
             
         # Inject metadata columns
         centroid_df['route_class'] = route_class
