@@ -13,6 +13,7 @@ if BASE_DIR.drive.upper() == 'C:':
 
 # Centralized data directory
 DATA_DIR = BASE_DIR / "data"
+LOGS_DIR = DATA_DIR / "logs"
 
 # Static registries and global data directories
 FLIGHT_REGISTRY_DIR = DATA_DIR / "flight_registry"

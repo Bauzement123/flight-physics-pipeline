@@ -26,7 +26,7 @@ from src.common.config import (
     GLOBAL_SYNTHESIZED_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_FLIGHT_CLUSTER_MAP
 )
-from src.common.utils import load_route_summary, split_route_string
+from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.common.adapters import (
     parquet_to_pycontrails,
     pycontrails_to_traffic,
@@ -584,6 +584,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="synthesis.log")
     parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from raw OpenSky cohorts.")
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")
     parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for the synthesized trajectory.")

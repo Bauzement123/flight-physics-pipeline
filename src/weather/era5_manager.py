@@ -26,6 +26,7 @@ from src.common.config import (
     ERA5_GRID,
     WEATHER_DIR
 )
+from src.common.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
@@ -172,28 +173,23 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Ensure the logs directory exists
-    weather_data_dir = Path(args.out_dir)
-    log_dir = weather_data_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "weather_acquisition.log"
-    
     # Configure root logging level and format only when invoked as a standalone script
     log_level = logging.DEBUG if args.debug else logging.INFO
     
-    handlers = [
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_file, mode='a', encoding='utf-8')
-    ]
+    # Configure StreamHandler for console output with standardized format
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s'))
     
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=handlers
-    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.handlers = [console_handler]
+    
+    # Configure centralized FileHandler
+    file_handler = setup_file_logger(log_filename="weather.log")
+    file_handler.setLevel(log_level)
     
     if args.debug:
-        logger.setLevel(logging.DEBUG)
         logging.getLogger("pycontrails").setLevel(logging.DEBUG)
         logger.debug("Verbose debug logging enabled.")
     

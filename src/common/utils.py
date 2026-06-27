@@ -121,13 +121,19 @@ def generate_dataset_name(
 
 
 
-def setup_file_logger(out_dir: Path, log_filename: str = "extraction.log") -> logging.FileHandler:
+def setup_file_logger(out_dir: Path = None, log_filename: str = "extraction.log") -> logging.FileHandler:
     """
-    Adds a FileHandler to the root logger to mirror console output to <out_dir>/<log_filename>.
+    Adds a FileHandler to the root logger to mirror console output to LOGS_DIR / log_filename.
     If a handler for that file already exists, it does not add a duplicate.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    log_file = (out_dir / log_filename).resolve()
+    from src.common.config import LOGS_DIR
+    
+    # Handle cases where log_filename was passed as the first positional argument
+    if isinstance(out_dir, str) and out_dir.endswith(".log"):
+        log_filename = out_dir
+        
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = (LOGS_DIR / log_filename).resolve()
     
     root_logger = logging.getLogger()
     # Check if already added
@@ -140,7 +146,7 @@ def setup_file_logger(out_dir: Path, log_filename: str = "extraction.log") -> lo
                 pass
                 
     file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s'))
     root_logger.addHandler(file_handler)
     return file_handler
 

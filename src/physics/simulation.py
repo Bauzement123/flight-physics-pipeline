@@ -31,6 +31,7 @@ from src.common.config import (
     ERA5_REQUIRED_PRESSURE_LEVELS,
     ERA5_GRID
 )
+from src.common.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ SURFACE_VARIABLES = ERA5_SURFACE_VARIABLES
 REQUIRED_PRESSURE_LEVELS = ERA5_REQUIRED_PRESSURE_LEVELS
 
 def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_hours: int = 48):
+    setup_file_logger(log_filename="simulation.log")
     logger.info(f"Loading cleaned trajectories: {Path(input_path).name}")
     
     # Load Flight Groupings first to inspect time bounds
@@ -134,9 +136,8 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     
     logger.info(f"Found {len(flights_dict)} flights to simulate.")
 
-    # Create output directory and setup simulation.log
+    # Create output directory
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    sim_log_path = Path(out_dir) / "simulation.log"
     
     # 4. Simulation Loop
     success_count = 0
@@ -180,20 +181,20 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
             logger.error(f"Error simulating flight {flight_id}: {e}")
             log_messages.append(f"[{flight_id}] Failed: {str(e)}")
 
-    # Write simulation statistics and logs to simulation.log
-    with open(sim_log_path, "a") as log_file:
-        log_file.write(f"\n==================================================\n")
-        log_file.write(f"SIMULATION RUN SUMMARY - {pd.Timestamp.now()}\n")
-        log_file.write(f"Source clean file: {input_path}\n")
-        log_file.write(f"Total flights: {len(flights_dict)}\n")
-        log_file.write(f"Success: {success_count}\n")
-        log_file.write(f"Skipped: {skip_count}\n")
-        log_file.write(f"Failure: {failure_count}\n")
-        log_file.write(f"==================================================\n")
-        for msg in log_messages:
-            log_file.write(msg + "\n")
-            
-    logger.info(f"Simulation run complete. Status details written to {sim_log_path}")
+    # Log simulation statistics and messages to standard logs
+    summary = (
+        f"\n==================================================\n"
+        f"SIMULATION RUN SUMMARY - {pd.Timestamp.now()}\n"
+        f"Source clean file: {input_path}\n"
+        f"Total flights: {len(flights_dict)}\n"
+        f"Success: {success_count}\n"
+        f"Skipped: {skip_count}\n"
+        f"Failure: {failure_count}\n"
+        f"=================================================="
+    )
+    logger.info(summary)
+    for msg in log_messages:
+        logger.info(msg)
 
     # 5. Save the simulated flight paths
     if simulated_flights:

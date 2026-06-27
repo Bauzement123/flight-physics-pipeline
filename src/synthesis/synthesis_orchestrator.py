@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.common.config import BASE_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, GLOBAL_SYNTHESIZED_REGISTRY
-from src.common.utils import load_route_summary, split_route_string
+from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.synthesis.path_generator import create_synthesized_trajectory
 
 logger = logging.getLogger(__name__)
@@ -122,4 +122,5 @@ def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [ORCHESTRATOR] - %(message)s')
+    setup_file_logger(log_filename="synthesis.log")
     main()

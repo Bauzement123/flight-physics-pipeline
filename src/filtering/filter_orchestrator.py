@@ -159,9 +159,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Set up file logger to mirror stdout to extraction.log in output directory
+    # Set up file logger to mirror stdout to filtering.log in centralized directory
     from src.common.utils import setup_file_logger
-    setup_file_logger(Path(args.out_dir), "extraction.log")
+    setup_file_logger(log_filename="filtering.log")
 
     # Validate corridor bounds
     if args.lower_rank is not None and args.upper_rank is None:

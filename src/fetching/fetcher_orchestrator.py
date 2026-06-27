@@ -273,7 +273,7 @@ if __name__ == "__main__":
         min_distance=args.min_distance
     )
     out_dir_path = get_dataset_dir(dataset_name)
-    setup_file_logger(out_dir_path)
+    setup_file_logger(log_filename="fetching.log")
     logging.info(f"Generated dynamic dataset directory: data/trajectories/{dataset_name}/")
 
     # 1. Resolve corridors to fetch

@@ -104,7 +104,7 @@ def fetch_trajectories(
 ):
     start_time = time.time()
     out_dir_path = Path(out_dir)
-    setup_file_logger(out_dir_path)
+    setup_file_logger(log_filename="fetching.log")
     
     logging.info(f"Loading filtered flight list from: {input_list_path}")
     

@@ -12,6 +12,7 @@ import warnings
 from traffic.core import Traffic, Flight
 from traffic.algorithms.filters.ekf import EKF
 from src.common.adapters import dataframe_to_pycontrails, write_flights_to_parquet
+from src.common.utils import setup_file_logger
 from pyproj import CRS, Transformer, Geod
 
 # Threshold in meters (100 km). Gaps larger than this will use geodesic interpolation.
@@ -28,10 +29,10 @@ def clean_trajectories(input_file: str, out_dir: str):
     if df.empty: 
         return
 
-    # Ensure out_dir exists and set up extraction.log
+    # Set up processing log
+    setup_file_logger(log_filename="processing.log")
     out_dir_path = Path(out_dir).resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)
-    cleaning_log_path = out_dir_path / "extraction.log"
 
     # 1. Rename columns to match the 'traffic' library's expected schema
     df = df.rename(columns={
@@ -93,8 +94,6 @@ def clean_trajectories(input_file: str, out_dir: str):
                             pc_flights.append(pc_flight)
                             msg = f"Flight {flight.callsign}: Cache Hit (loaded from EKF clean cache)"
                             logging.info(msg)
-                            with open(cleaning_log_path, "a") as log_f:
-                                log_f.write(f"[{pd.Timestamp.now()}] {msg}\n")
                             continue
                 except Exception as e:
                     logging.warning(f"Failed to load cached flight {flight.callsign} from {cached_clean_flights[flight_id]}: {e}. Falling back to EKF smoothing.")
@@ -104,8 +103,6 @@ def clean_trajectories(input_file: str, out_dir: str):
         if not typecode or typecode == "UNKNOWN" or pd.isna(typecode):
             warn_msg = f"Flight {flight.callsign} has missing or unknown typecode ('{typecode}'). Skipping EKF cleaning."
             logging.warning(warn_msg)
-            with open(cleaning_log_path, "a") as log_f:
-                log_f.write(f"[{pd.Timestamp.now()}] {warn_msg}\n")
             continue
             
         f = flight.airborne()
@@ -220,18 +217,17 @@ def clean_trajectories(input_file: str, out_dir: str):
         except Exception as e:
             warn_msg = f"Failed to process flight {flight.callsign}: {e}"
             logging.warning(warn_msg)
-            with open(cleaning_log_path, "a") as log_f:
-                log_f.write(f"[{pd.Timestamp.now()}] {warn_msg}\n")
 
-    # Write cleaning statistics and logs to cleaning.log
-    with open(cleaning_log_path, "a") as log_f:
-        log_f.write(f"\n==================================================\n")
-        log_f.write(f"CLEANING RUN SUMMARY - {pd.Timestamp.now()}\n")
-        log_f.write(f"Source raw file: {input_file}\n")
-        log_f.write(f"Total flights: {len(t)}\n")
-        log_f.write(f"Success (Cleaned): {len(pc_flights)}\n")
-        log_f.write(f"Failure/Skipped: {len(t) - len(pc_flights)}\n")
-        log_f.write(f"==================================================\n")
+    # Write cleaning statistics and logs to standard loggers
+    logging.info(
+        f"\n==================================================\n"
+        f"CLEANING RUN SUMMARY - {pd.Timestamp.now()}\n"
+        f"Source raw file: {input_file}\n"
+        f"Total flights: {len(t)}\n"
+        f"Success (Cleaned): {len(pc_flights)}\n"
+        f"Failure/Skipped: {len(t) - len(pc_flights)}\n"
+        f"=================================================="
+    )
 
     # 5. Save the adapted pycontrails objects
     if pc_flights:

@@ -26,7 +26,7 @@ from src.common.config import (
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID
 )
-from src.common.utils import load_route_summary, split_route_string, update_global_registry
+from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 
 logger = logging.getLogger(__name__)
@@ -424,9 +424,9 @@ def run_batch_clone_simulation(
     cloned_registry_file = GLOBAL_SYNTH_SIM_REGISTRY
     
     # 1. Output Dir
+    setup_file_logger(log_filename="clone_simulation.log")
     out_dir_path = Path(out_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
-    sim_log_path = out_dir_path / "simulation.log"
     
     # 2. Handle Test Mode
     if test_mode:
@@ -445,7 +445,7 @@ def run_batch_clone_simulation(
     logger.info(f"Targeting date range: {start_date} to {end_date} ({len(dates)} days)")
     
     # Load RouteSummary (only once globally)
-    df_summary = load_route_summary(str(route_summary_file))
+    df_summary = load_route_summary(None)
     if df_summary.empty:
         logger.error("RouteSummary is empty or missing.")
         return
@@ -626,17 +626,17 @@ def run_batch_clone_simulation(
         gc.collect()
         
         # Log stats
-        with open(sim_log_path, "a") as log_file:
-            log_file.write(f"\n==================================================\n")
-            log_file.write(f"CLONED SIMULATION DAILY SUMMARY - {pd.Timestamp.now()}\n")
-            log_file.write(f"Period/Date: {desc}\n")
-            log_file.write(f"Total flights: {len(cohort_df)}\n")
-            log_file.write(f"Success: {success_count}\n")
-            log_file.write(f"Skipped: {skip_count}\n")
-            log_file.write(f"Failure: {failure_count}\n")
-            log_file.write(f"==================================================\n")
-            
-        logger.info(f"Cohort {desc} complete. Stats appended to {sim_log_path.name}")
+        summary = (
+            f"\n==================================================\n"
+            f"CLONED SIMULATION DAILY SUMMARY - {pd.Timestamp.now()}\n"
+            f"Period/Date: {desc}\n"
+            f"Total flights: {len(cohort_df)}\n"
+            f"Success: {success_count}\n"
+            f"Skipped: {skip_count}\n"
+            f"Failure: {failure_count}\n"
+            f"=================================================="
+        )
+        logger.info(summary)
         
     # 4. Update global cloned simulation registry manifest
     if new_registry_entries:
