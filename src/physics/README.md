@@ -1,9 +1,13 @@
 # Physics Simulation Module
 
-This module handles the physical simulation of aircraft trajectories under the **CoCiP** (Contrail Cirrus Prediction) and **PSFlight** (Performance-based System Flight) models in `pycontrails`. It contains two primary entrypoints:
+This module handles the physical simulation of aircraft trajectories under the **CoCiP** (Contrail Cirrus Prediction) and **PSFlight** (Performance-based System Flight) models in `pycontrails`. 
 
-1. **Standard Simulation (`simulation.py`)**: Runs weather-canned physics evaluations on already-recorded and cleaned trajectories.
-2. **Batch Clone Simulation (`clone_simulation.py`)**: A fault-tolerant engine that takes a single synthesized corridor trajectory, clones it, shifts it to match real flight schedules in timezone-aware UTC, and batch-simulates them against ECMWF ERA5 weather grids.
+It has been refactored into a highly modular, thread-safe, and memory-optimized architecture. The core simulation logic is decoupled from file loading and schedule management into a dedicated core engine, allowing it to be easily reused for future studies (such as variational flight level changes).
+
+It contains three primary files:
+1. **Core Physics Engine (`engine.py`)**: A stateless module containing atomized helper functions for weather dataset cropping, model creation, vectorized batch evaluation (with error recovery), and thread-pool execution.
+2. **Standard Simulation (`simulation.py`)**: The entrypoint that runs weather-canned physics evaluations on already-recorded and cleaned trajectories.
+3. **Batch Clone Simulation (`clone_simulation.py`)**: A fault-tolerant schedule-cloning engine that takes synthesized corridor trajectories, clones them, time-shifts them to match flight schedules, and batch-simulates them daily.
 
 It operates as **Loop 3b** of the Flight Physics Pipeline.
 
@@ -14,8 +18,9 @@ It operates as **Loop 3b** of the Flight Physics Pipeline.
 ```text
 src/physics/
 ├── README.md              # This documentation file
-├── simulation.py          # Runs CoCiP and PSFlight models on standard clean trajectories
-└── clone_simulation.py    # Batch clones, shifts, and simulates synthesized corridor flights
+├── engine.py              # [NEW] stateless, reusable core physics simulation helper functions
+├── simulation.py          # [REFACTORED] Entrypoint for standard clean trajectories (uses engine.py)
+└── clone_simulation.py    # [REFACTORED] Entrypoint for batch cloned corridor flights (uses engine.py)
 ```
 
 ---
@@ -28,130 +33,176 @@ Module Objectives
       │
       ├── Sub-objective 1: Standard trajectory modeling
       │    └── Solution: run_physics_pipeline() in simulation.py
-      │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory
+      │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory, max contrail age
       │         └── Outputs: Parquet file(s) containing simulated contrail waypoints (*_simulated.parquet), global_simulation_registry.parquet, skipped_aircraft.log, simulation.log
       │
       ├── Sub-objective 2: Batch clone corridor flight simulation
       │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
-      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance
-      │         ├── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_synthesized_simulation_registry.parquet, skipped_aircraft.log, simulation.log
-      │         └── Role: Orchestrates daily weather batches and flight schedule simulations
+      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance, clusters_per_flight
+      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_synthesized_simulation_registry.parquet, skipped_aircraft.log, simulation.log
       │
-      ├── Sub-objective 3: Slicing cohort schedules from master registry
-      │    └── Solution: filter_cohort_flights() in clone_simulation.py
-      │         ├── Inputs: master_flights.parquet, RouteSummary, ranks, start/end dates, synthesized manifest, min_distance
-      │         └── Outputs: Sorted and filtered cohort DataFrame of target flights
+      ├── Sub-objective 3: Spatial weather downselection
+      │    └── Solution: crop_met_dataset() in engine.py
+      │         ├── Inputs: MetDataset, bounding box [West, South, East, North], coordinate padding
+      │         └── Outputs: Spatially cropped MetDataset (supports descending latitudes)
       │
-      ├── Sub-objective 4: Offline-first ERA5 weather dataset loading
-      │    └── Solution: load_weather_for_flights() in clone_simulation.py
-      │         ├── Inputs: cohort DataFrame, weather cache directory, max age hours
-      │         └── Outputs: Merged meteorological and radiative datasets (met, rad)
+      ├── Sub-objective 4: Thread-safe model creation
+      │    └── Solution: create_simulation_models() in engine.py
+      │         ├── Inputs: cropped met/rad datasets, max age, low-memory flag
+      │         └── Outputs: Instantiated (PSFlight, Cocip) model tuple (with preprocess_lowmem if active)
       │
-      └── Sub-objective 5: Single flight cloned simulation under CoCiP/PSFlight
-           └── Solution: simulate_single_flight() in clone_simulation.py
-                ├── Inputs: flight schedule row, base synthesized flight path, weather datasets
-                └── Outputs: Simulated Flight object containing contrail and emission metrics
+      ├── Sub-objective 5: Vectorized batch simulation with resilient fallback
+      │    └── Solution: simulate_flight_batch() in engine.py
+      │         ├── Inputs: list of Flight objects, met/rad datasets, max age, low-memory flag
+      │         └── Outputs: Tuple of (list of simulated Flights, list of skipped flight_ids and typecodes)
+      │         └── Safety: Falls back to individual flight simulation if vectorized batch evaluation fails
+      │
+      └── Sub-objective 6: Concurrency & execution orchestration
+           └── Solution: simulate_flights_parallel() in engine.py
+                ├── Inputs: list of Flights, met/rad datasets, max age, batch size, max workers, low-memory flag
+                └── Outputs: Tuple of (list of simulated Flights, list of skipped flight_ids and typecodes)
+                └── Concurrency: runs batches in ThreadPoolExecutor (or sequentially if low-memory is active)
 ```
 
 ---
 
-## 3. Data Workflow
+## 3. Data Workflows
 
-> [!NOTE]
-> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
-
+### A. Standard Simulation Workflow (`simulation.py`)
 ```mermaid
 graph TD
-    A[data/flight_registry/master_flights.parquet] -->|1. Load & Filter Schedules| B(clone_simulation.py)
-    C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve Base Paths & Cluster IDs| B
-    D[data/weather/*.nc] -->|3. Load ERA5 Offline| B
+    A[data/trajectories/<corridor>/clean/*_clean_si.parquet] -->|1. Ingest clean flights| B(simulation.py)
+    C[data/weather/*.nc] -->|2. Crop to WEATHER_BOUNDS_BBOX| D[cropped MetDataset & MetDataArray]
+    D -->|3. Load cropped dataset to RAM| E[In-memory weather cache]
     
-    B -->|4. Time-Shift Baseline| E[Time-Shift Trajectory]
-    E -->|5. Evaluate Performance| F[PSFlight Model]
-    F -->|True Airspeed, Fuel Flow, Emissions| G[CoCiP Model]
-    G -->|6. Advect & Simulate Contrails| H[Contrail Radiative Forcing]
+    B -->|4. Pass flights to engine| F(engine.py: simulate_flights_parallel)
+    E -->|Shared weather memory| F
     
-    H -->|7. Incremental Save with Metadata| I[data/results/cloned_simulations/<route>_cloned_simulated/]
-    H -->|8. Update Global Registries| J[global_synthesized_simulation_registry.parquet]
+    F -->|5. Chunk into batches| G[Batch of flights]
+    G -->|6. ThreadPoolExecutor or sequential| H[engine.py: simulate_flight_batch]
+    H -->|7. Filter unsupported types| I[Valid flights]
+    I -->|8. PSFlight eval| J[PSFlight evaluated]
+    J -->|9. CoCiP eval| K[CoCiP evaluated]
+    
+    K -->|10. Return simulated flights| B
+    B -->|11. Save output parquet| L[data/results/test_scenario/*_simulated.parquet]
+    B -->|12. Update global registry| M[global_simulation_registry.parquet]
 ```
 
-1. **Schedule Filtering**: Loads schedules from the `master_flights.parquet` database and slices them based on rank bounds.
-2. **Flight Base Tracking**: Retrieves the synthesized base flight trajectory (DTW tracks) and looks up its corresponding `cluster_id` from the global registries (e.g., `global_synthesized_registry.parquet`).
-3. **Offline Weather Loading**: Automatically loads matching ERA5 NetCDF weather datasets from `data/weather/` cache for the simulation time frame.
-4. **Time Shifting & Evaluation**: Temporally shifts the baseline trajectory to match the scheduled flight time. Evaluates the coordinates via the PSFlight model (obtaining True Airspeed, fuel flow, and emissions parameters).
-5. **Contrail Simulation**: Runs the CoCiP advection model using the 3D weather variables to compute contrail formation, persistence, and radiative forcing metrics.
-6. **Incremental Save & Registry Update**: Writes outputs individually on completion to provide fault-tolerant, resume-ready checkpoints. It appends finished runs to the global registries: standard simulations update `global_simulation_registry.parquet`, and batch clone simulations update `global_synthesized_simulation_registry.parquet`. Any flights with unsupported aircraft types are skipped, and logged in `skipped_aircraft.log`.
-
-### Skipped Aircraft Log (`skipped_aircraft.log`)
-If a flight's aircraft type is not supported by the PSFlight model, the flight is skipped. Details of any skipped flights are appended to `skipped_aircraft.log` under the output directory in a comma-separated format:
-```text
-<flight_id>,<unsupported_typecode>
+### B. Batch Clone Simulation Workflow (`clone_simulation.py`)
+```mermaid
+graph TD
+    A[data/flight_registry/master_flights.parquet] -->|1. Ingest flight schedules| B(clone_simulation.py)
+    C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve synthesized base path| B
+    D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_single_day_weather_cropped]
+    E -->|4. Crop to WEATHER_BOUNDS_BBOX & load to RAM| F[Cached daily MetDatasets]
+    F -->|5. Concatenate days| G[In-memory 3-day weather window]
+    
+    B -->|6. Time-shift baseline path to schedule| H[Cloned Flight list]
+    H -->|7. Pass to engine| I(engine.py: simulate_flights_parallel)
+    G -->|Shared weather memory| I
+    
+    I -->|8. Chunk into batches| J[Batch of flights]
+    J -->|9. ThreadPoolExecutor or sequential| K[engine.py: simulate_flight_batch]
+    K -->|10. Filter unsupported types| L[Valid flights]
+    L -->|11. PSFlight & CoCiP eval| M[Simulated flights]
+    
+    M -->|12. Return simulated flights| B
+    B -->|13. Serialize individually| N[data/results/cloned_simulations/<route>_cloned_simulated/*_simulated.parquet]
+    B -->|14. Log skipped aircraft| O[skipped_aircraft.log]
+    B -->|15. Update global registry| P[global_synthesized_simulation_registry.parquet]
 ```
-This ensures strict tracking of unsupported aircraft performance models without causing simulation-wide failures.
 
 ---
 
-## 4. CLI Usage Guide
+## 4. Optimization & Memory Modes
+
+To support simulation runs across a variety of hardware (from desktops with high RAM/CPU count to laptops with less than 1 GB of free RAM), the engine supports two distinct execution profiles:
+
+### Standard Mode (High Performance)
+*   **Weather Dataset Loading**: The cropped weather datasets (covering `WEATHER_BOUNDS_BBOX` plus spatial padding) are fully loaded into RAM using `.load()` at the start of the cohort day. Slicing reduces the global grid down to a lightweight subset (under 400 MB), allowing fast memory access.
+*   **Concurrency**: Batches of flights (default size: 50) are dispatched in parallel using a `ThreadPoolExecutor` (releasing Python's GIL inside NumPy/Pandas C-loops). 
+*   **RAM Safety**: Multiple threads read from the *same shared in-memory weather datasets*, ensuring weather grids are not duplicated in memory.
+
+### Low-Memory Mode (`--low-mem` flag)
+*   **Weather Dataset Loading**: The cropped weather datasets are kept **lazy** on disk (using Dask). Coordinates are interpolated on-demand.
+*   **CoCiP Parameter Tuning**: Injects `preprocess_lowmem=True` to enforce chunk-by-chunk coordinate lazy interpolation, avoiding massive in-memory array allocations.
+*   **Concurrency**: Forces sequential execution (`max_workers=1`). Evaluating one batch at a time prevents concurrent Dask reading tasks, keeping peak memory allocations within the 1 GB envelope.
+
+---
+
+## 5. CLI Usage Guide
 
 ### Bash
+
 ```bash
-# 1. Run simulation on a single cleaned trajectory file
+# 1. Run standard simulation with multithreading and batch optimization
 python -m src.physics.simulation \
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
     --out-dir "data/results/test_scenario/" \
     --weather-cache "data/weather" \
-    --age 48
+    --max-workers 4 \
+    --batch-size 50
 
-# 2. Run cloned batch simulation for specific ranks
+# 2. Run standard simulation in LOW-MEMORY mode
+python -m src.physics.simulation \
+    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
+    --out-dir "data/results/test_scenario/" \
+    --weather-cache "data/weather" \
+    --low-mem
+
+# 3. Run cloned batch simulation for specific ranks (Standard Mode)
 python -m src.physics.clone_simulation \
     --ranks 1,3 \
     --start-date "2025-01-02" \
     --end-date "2025-01-05" \
     --weather-cache "data/weather" \
-    --out-dir "data/results/cloned_simulations"
+    --out-dir "data/results/cloned_simulations" \
+    --max-workers 4 \
+    --batch-size 100
 
-# 3. Run cloned batch simulation for a rank range with multiple clusters per flight
+# 4. Run cloned batch simulation in LOW-MEMORY mode
 python -m src.physics.clone_simulation \
-    --lower-rank 1 \
-    --upper-rank 20 \
-    --start-date "2025-01-01" \
-    --end-date "2025-01-31" \
+    --ranks 1,3 \
+    --start-date "2025-01-02" \
+    --end-date "2025-01-05" \
     --weather-cache "data/weather" \
     --out-dir "data/results/cloned_simulations" \
-    --max-age 72 \
-    --clusters-per-flight 3 \
-    --min-distance 800.0
+    --low-mem
 ```
 
 ### PowerShell
+
 ```powershell
-# 1. Run simulation on a single cleaned trajectory file
+# Run standard simulation in low-memory mode
 python -m src.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
     --out-dir "data/results/test_scenario/" `
     --weather-cache "data/weather" `
-    --age 48
+    --low-mem
 
-# 2. Run cloned batch simulation for specific ranks
+# Run cloned batch simulation in standard mode with 4 threads
 python -m src.physics.clone_simulation `
     --ranks 1,3 `
     --start-date "2025-01-02" `
     --end-date "2025-01-05" `
     --weather-cache "data/weather" `
-    --out-dir "data/results/cloned_simulations"
-
-# 3. Run cloned batch simulation for a rank range with multiple clusters per flight
-python -m src.physics.clone_simulation `
-    --lower-rank 1 `
-    --upper-rank 20 `
-    --start-date "2025-01-01" `
-    --end-date "2025-01-31" `
-    --weather-cache "data/weather" `
     --out-dir "data/results/cloned_simulations" `
-    --max-age 72 `
-    --clusters-per-flight 3 `
-    --min-distance 800.0
+    --max-workers 4 `
+    --batch-size 50
 ```
+
+---
+
+## 6. Parameter References
+
+### Common Optimization Parameters (Both Entrypoints)
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--low-mem` | `flag` | *False* | Enforces low-RAM operations: keeps datasets lazy on disk (Dask), sets `preprocess_lowmem=True` in CoCiP, and runs flight batches sequentially (`max_workers=1`). |
+| `--batch-size` | `int` | `50` | Size of flight batches passed to `pycontrails` for vectorized execution. Larger sizes speed up array calculations but consume more RAM. |
+| `--max-workers` | `int` | `4` | Number of concurrent worker threads. Ignored if `--low-mem` is specified. |
 
 ### Parameter Reference (`simulation.py`)
 
@@ -160,7 +211,7 @@ python -m src.physics.clone_simulation `
 | `--input-file` | `str` | *None* | Path to cleaned SI trajectory Parquet file (`*_clean_si.parquet`) or directory containing multiple cleaned Parquet files. (Required) |
 | `--out-dir` | `str` | *None* | Output directory for simulation results, logs, and skipped aircraft files. (Required) |
 | `--weather-cache` | `str` | *None* | Path to the NetCDF ERA5 weather files directory. (Required) |
-| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. (Optional) |
+| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
 
 ### Parameter Reference (`clone_simulation.py`)
 
@@ -180,82 +231,15 @@ python -m src.physics.clone_simulation `
 | `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 
-### Maximal CLI Examples
-
-Here are comprehensive examples showing all available parameters in action:
-
-#### Example 1: Full Range Simulation with All Options (Bash)
-```bash
-python -m src.physics.clone_simulation \
-    --lower-rank 1 \
-    --upper-rank 10 \
-    --start-date "2025-01-01" \
-    --end-date "2025-01-15" \
-    --weather-cache "G:/Meine Ablage/UNI/SS26/PythonPipeline - Kopie/data/weather" \
-    --out-dir "data/results/cloned_simulations/full_analysis" \
-    --max-age 72 \
-    --min-distance 1000.0 \
-    --clusters-per-flight 3 \
-    --no-day-by-day
-```
-
-#### Example 2: Selective Ranks with Overwrite (PowerShell)
-```powershell
-python -m src.physics.clone_simulation `
-    --ranks "1,3,5,10,50" `
-    --start-date "2025-01-02" `
-    --end-date "2025-01-10" `
-    --weather-cache "data/weather" `
-    --out-dir "data/results/high_priority_routes" `
-    --max-age 48 `
-    --min-distance 800.0 `
-    --clusters-per-flight 2 `
-    --overwrite
-```
-
-#### Example 3: Test Mode Verification (Quick Local Test)
-```bash
-python -m src.physics.clone_simulation \
-    --ranks 1,3 \
-    --test-mode \
-    --weather-cache "data/weather" \
-    --out-dir "data/results/test_run" \
-    --clusters-per-flight 1
-```
-
-#### Example 4: High-Resolution Multi-Cluster Batch (Production)
-```bash
-python -m src.physics.clone_simulation \
-    --lower-rank 1 \
-    --upper-rank 76 \
-    --start-date "2025-01-01" \
-    --end-date "2025-01-31" \
-    --weather-cache "/path/to/weather/cache" \
-    --out-dir "data/results/production_batch_jan2025" \
-    --max-age 72 \
-    --min-distance 500.0 \
-    --clusters-per-flight 5 \
-    --no-day-by-day
-```
-
-### Key Configuration Notes
-
-- **`--clusters-per-flight`**: Controls synthetic variation. Higher values (e.g., 5-10) generate multiple alternative trajectories per flight for uncertainty quantification. Default (1) is fastest.
-- **`--min-distance`**: Routes shorter than this threshold are skipped (airport-loop filtering). Common values: `0` (none), `500` (medium), `800` (long-haul).
-- **`--no-day-by-day`**: Trades memory for speed. Disables daily weather batching; use only if RAM and weather coverage allow full-period loading.
-- **`--overwrite`**: Re-simulates flights even if outputs exist. Useful after model updates or parameter changes.
-- **`--test-mode`**: Always use first before production runs to validate setup against local cached data (`2024-12-31` to `2025-01-10`).
-
-> **Offline Verification**: `--test-mode` ensures the simulation runs against the local cached weather data (`2024-12-31` to `2025-01-10`), avoiding the need to fetch new ERA5 data from Copernicus API during verification.
-
 ---
 
-## 5. Prerequisites & Dependencies
+## 7. Prerequisites & Dependencies
 
 ### Python Libraries
 * `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
 * `numpy` & `scipy` (for math and physics arrays)
 * `pycontrails` (for PSFlight and Cocip contrail physics simulation models)
+* `xarray` & `dask` (for NetCDF grid parsing and lazy-loading)
 
 ### Data Requirements
 * **Weather Cache**: Populated weather NetCDF files covering the flight timelines plus advection padding.

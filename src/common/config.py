@@ -56,6 +56,10 @@ ERA5_REQUIRED_PRESSURE_LEVELS = [
 
 ERA5_GRID = 0.5
 
+# Bounding box for weather downselection: [West, South, East, North]
+# Covers North America, Transatlantic corridor, and European airspace
+WEATHER_BOUNDS_BBOX = [-125.0, 20.0, 45.0, 70.0]
+
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = DATA_DIR / "trajectories"
 SIMULATION_PROFILES_DIR = DATA_DIR / "simulation_profiles"

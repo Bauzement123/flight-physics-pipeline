@@ -1,9 +1,8 @@
 """
 Module 3b: Physics Simulation Engine (PSFlight + Cocip)
 Consumes cleaned trajectories and cached weather data to run aircraft performance
-and contrail modeling. 
-
-Paradigm: Functional
+and contrail modeling.
+Refactored to use vectorized batching, parallel threading, and low-memory options.
 """
 
 import argparse
@@ -16,11 +15,8 @@ import os
 
 from pycontrails import DiskCacheStore
 from pycontrails.datalib.ecmwf import ERA5
-from pycontrails.models.ps_model import PSFlight
-from pycontrails.models.cocip import Cocip
-from pycontrails.models.humidity_scaling import ConstantHumidityScaling
 
-# Ensure we can import the adapter from the common module
+# Ensure we can import the adapters and configurations
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 from src.common.config import (
@@ -29,9 +25,11 @@ from src.common.config import (
     ERA5_PRESSURE_LEVEL_VARIABLES,
     ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS,
-    ERA5_GRID
+    ERA5_GRID,
+    WEATHER_BOUNDS_BBOX
 )
 from src.common.utils import setup_file_logger
+from src.physics.engine import crop_met_dataset, simulate_flights_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +38,15 @@ PRESSURE_LEVEL_VARIABLES = ERA5_PRESSURE_LEVEL_VARIABLES
 SURFACE_VARIABLES = ERA5_SURFACE_VARIABLES
 REQUIRED_PRESSURE_LEVELS = ERA5_REQUIRED_PRESSURE_LEVELS
 
-def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_hours: int = 48):
+def run_physics_pipeline(
+    input_path: str, 
+    out_dir: str, 
+    cache_dir: str, 
+    max_age_hours: int = 48,
+    low_mem: bool = False,
+    batch_size: int = 50,
+    max_workers: int = 4
+):
     setup_file_logger(log_filename="simulation.log")
     logger.info(f"Loading cleaned trajectories: {Path(input_path).name}")
     
@@ -50,10 +56,12 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
         logger.error("No flights found in the input parquet file.")
         return
         
+    flights_list = list(flights_dict.values())
+    
     # Dynamically compute weather temporal window based on flight bounds and max_age_hours
     min_time = None
     max_time = None
-    for flight_id, fl in flights_dict.items():
+    for fl in flights_list:
         f_min = pd.to_datetime(fl['time']).min()
         f_max = pd.to_datetime(fl['time']).max()
         if min_time is None or f_min < min_time:
@@ -101,102 +109,52 @@ def run_physics_pipeline(input_path: str, out_dir: str, cache_dir: str, max_age_
     met = era5_pl.open_metdataset()
     rad = era5_sl.open_metdataset()
     
-    # 2. Initialize Models
-    # PSFlight calculates thrust, fuel flow, TAS, and emissions
-    # Cocip calculates the contrail formation and radiative forcing
-    logger.info("Initializing PSFlight and Cocip models with thesis parameters...")
-    ps_model = PSFlight(
-        met=met,
-        params={
-            "fill_low_altitude_with_isa_temperature": True,
-            "fill_low_altitude_with_zero_wind": False,
-            "correct_fuel_flow": False,
-            "n_iter": 5,
-        },
-    )
+    # Crop to WEATHER_BOUNDS_BBOX
+    met = crop_met_dataset(met, WEATHER_BOUNDS_BBOX)
+    rad = crop_met_dataset(rad, WEATHER_BOUNDS_BBOX)
     
-    cocip_params = {
-        "process_emissions": True,
-        "verbose_outputs": False,
-        "humidity_scaling": ConstantHumidityScaling(rhi_adj=0.97),
-        "max_age": pd.Timedelta(hours=max_age_hours),
-        "dt_integration": np.timedelta64(30, "m"),
-        "dz_m": 200.0,
-        "effective_vertical_resolution": 2000.0,
-        "filter_sac": True,
-        "filter_initially_persistent": True,
-        "min_altitude_m": 6000.0,
-        "max_altitude_m": 13000.0,
-        "max_seg_length_m": 40000.0,
-    }
-    cocip_model = Cocip(met=met, rad=rad, params=cocip_params, aircraft_performance=ps_model)
-
-    # 3. Load Flight Groupings (already loaded at start of function)
-    simulated_flights = []
-    
-    logger.info(f"Found {len(flights_dict)} flights to simulate.")
-
-    # Create output directory
+    if not low_mem:
+        logger.info("Loading weather datasets into RAM...")
+        met.load()
+        rad.load()
+        
+    # 2. Create output directory
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     
-    # 4. Simulation Loop
-    success_count = 0
-    skip_count = 0
-    failure_count = 0
-    log_messages = []
+    # 3. Simulate Parallel Vectorized Batches
+    simulated_flights, skipped_types = simulate_flights_parallel(
+        flights=flights_list,
+        met=met,
+        rad=rad,
+        max_age_hours=max_age_hours,
+        batch_size=batch_size,
+        max_workers=max_workers,
+        low_mem=low_mem
+    )
     
-    ps_supported_types = list(ps_model.aircraft_engine_params.keys())
+    success_count = len(simulated_flights)
+    skip_count = len(skipped_types)
+    failure_count = len(flights_list) - success_count - skip_count
     
-    for flight_id, fl in flights_dict.items():
-        logger.info(f"Simulating {flight_id}...")
-        
-        # Get typecode dynamically from metadata or default to B738
-        typecode = fl.attrs.get('aircraft_type', 'B738')
-        
-        try:
-            # Validate typecode and raise error if unsupported
-            if typecode not in ps_supported_types:
-                raise ValueError(f"Unsupported aircraft: {typecode}")
-                
-            # Evaluate aircraft performance and contrail modeling
-            fl = ps_model.eval(fl)
-            fl_out = cocip_model.eval(source=fl)
-            
-            simulated_flights.append(fl_out)
-            success_count += 1
-            log_messages.append(f"[{flight_id}] Success: Simulated successfully.")
-        except ValueError as ve:
-            if "Unsupported aircraft" in str(ve):
-                skip_count += 1
-                logger.warning(f"Skipping flight {flight_id}: Unsupported aircraft {typecode}")
-                log_messages.append(f"[{flight_id}] Skipped: Unsupported aircraft {typecode}")
-                with open(Path(out_dir) / "skipped_aircraft.log", "a") as f:
-                    f.write(f"{flight_id},{typecode}\n")
-            else:
-                failure_count += 1
-                logger.error(f"Error simulating flight {flight_id}: {ve}")
-                log_messages.append(f"[{flight_id}] Failed: {str(ve)}")
-        except Exception as e:
-            failure_count += 1
-            logger.error(f"Error simulating flight {flight_id}: {e}")
-            log_messages.append(f"[{flight_id}] Failed: {str(e)}")
+    # Log skipped types to output directory
+    for fid, typecode in skipped_types:
+        logger.warning(f"Skipping flight {fid}: Unsupported aircraft {typecode}")
+        with open(Path(out_dir) / "skipped_aircraft.log", "a") as f:
+            f.write(f"{fid},{typecode}\n")
 
-    # Log simulation statistics and messages to standard logs
     summary = (
         f"\n==================================================\n"
         f"SIMULATION RUN SUMMARY - {pd.Timestamp.now()}\n"
         f"Source clean file: {input_path}\n"
-        f"Total flights: {len(flights_dict)}\n"
+        f"Total flights: {len(flights_list)}\n"
         f"Success: {success_count}\n"
         f"Skipped: {skip_count}\n"
         f"Failure: {failure_count}\n"
         f"=================================================="
     )
     logger.info(summary)
-    for msg in log_messages:
-        logger.info(msg)
 
-    # 5. Save the simulated flight paths
+    # 4. Save the simulated flight paths
     if simulated_flights:
         out_name = Path(input_path).name.replace('_clean_si.parquet', '_simulated.parquet')
         out_path = Path(out_dir) / out_name
@@ -219,6 +177,11 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Output directory for simulation results")
     parser.add_argument("--weather-cache", required=True, help="Directory containing ERA5 NetCDF cache files")
     parser.add_argument("--max-age", "--age", type=int, default=48, dest="max_age", help="Maximum contrail simulation/advection age in hours (default: 48)")
+    
+    # New Optimization and RAM options
+    parser.add_argument("--low-mem", action="store_true", help="Enforces low-RAM operations (lazy datasets, sequential workers)")
+    parser.add_argument("--batch-size", type=int, default=50, help="Size of flight batches for vectorized execution (default: 50)")
+    parser.add_argument("--max-workers", type=int, default=4, help="Number of concurrent worker threads (default: 4)")
     
     args = parser.parse_args()
     
@@ -246,14 +209,20 @@ if __name__ == "__main__":
                     input_path=str(clean_file),
                     out_dir=args.out_dir,
                     cache_dir=args.weather_cache,
-                    max_age_hours=args.max_age
+                    max_age_hours=args.max_age,
+                    low_mem=args.low_mem,
+                    batch_size=args.batch_size,
+                    max_workers=args.max_workers
                 )
             except Exception as e:
-                logger.error(f"Failed to simulate {clean_file.name}: {e}")
+                logger.error(f"Failed to process file {clean_file.name}: {e}")
     else:
         run_physics_pipeline(
-            input_path=args.input_file,
+            input_path=str(input_path),
             out_dir=args.out_dir,
             cache_dir=args.weather_cache,
-            max_age_hours=args.max_age
+            max_age_hours=args.max_age,
+            low_mem=args.low_mem,
+            batch_size=args.batch_size,
+            max_workers=args.max_workers
         )
