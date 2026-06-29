@@ -7,7 +7,7 @@ model instantiation, vectorized batch simulation, and parallel orchestration.
 import logging
 import numpy as np
 import pandas as pd
-from pycontrails import Flight, MetDataset
+from pycontrails import Flight, MetDataset, Fleet
 from pycontrails.models.ps_model import PSFlight
 from pycontrails.models.cocip import Cocip
 from pycontrails.models.humidity_scaling import ConstantHumidityScaling
@@ -161,7 +161,9 @@ def simulate_flight_batch(
         fl_evaluated = ps_model.eval(valid_flights)
         fl_out = cocip_model.eval(source=fl_evaluated)
         
-        if isinstance(fl_out, Flight):
+        if isinstance(fl_out, Fleet):
+            fl_out = fl_out.to_flight_list()
+        elif isinstance(fl_out, Flight):
             fl_out = [fl_out]
         return list(fl_out), skipped_flights
         

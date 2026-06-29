@@ -115,8 +115,8 @@ def run_physics_pipeline(
     
     if not low_mem:
         logger.info("Loading weather datasets into RAM...")
-        met.load()
-        rad.load()
+        met.data.load()
+        rad.data.load()
         
     # 2. Create output directory
     Path(out_dir).mkdir(parents=True, exist_ok=True)

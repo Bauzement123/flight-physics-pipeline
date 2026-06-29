@@ -200,13 +200,13 @@ python -m src.fetching.opensky_fetcher \
 #### Example 2: Batch Fetch Specific High-Value Routes (PowerShell)
 ```powershell
 python -m src.fetching.fetcher_orchestrator `
-    --ranks "1,3,5,10" `
+    --ranks "1,76,177,205,209,278,288,321,411,508,509,592,633,710,712,727,761,792,848,888,926" `
     --format oneway `
     --strategy fixed `
-    --value 100 `
+    --value 10 `
     --seed 42 `
     --start-date "2025-01-01" `
-    --end-date "2025-01-15" `
+    --end-date "2025-12-31" `
     --typecode "A380" `
     --min-distance 800.0
 ```

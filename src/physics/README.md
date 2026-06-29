@@ -94,7 +94,7 @@ graph TD
 graph TD
     A[data/flight_registry/master_flights.parquet] -->|1. Ingest flight schedules| B(clone_simulation.py)
     C[data/flight_registry/registries/global_synthesized_registry.parquet] -->|2. Resolve synthesized base path| B
-    D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_single_day_weather_cropped]
+    D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_and_crop_weather]
     E -->|4. Crop to WEATHER_BOUNDS_BBOX & load to RAM| F[Cached daily MetDatasets]
     F -->|5. Concatenate days| G[In-memory 3-day weather window]
     
@@ -183,13 +183,17 @@ python -m src.physics.simulation `
 
 # Run cloned batch simulation in standard mode with 4 threads
 python -m src.physics.clone_simulation `
-    --ranks 1,3 `
-    --start-date "2025-01-02" `
-    --end-date "2025-01-05" `
+    --ranks 1,76,177,205,209,278,288,321,411,508,509,592,633,710,712,727,761,792,848,888,926 `
+    --start-date "2025-12-01" `
+    --end-date "2025-12-05" `
     --weather-cache "data/weather" `
     --out-dir "data/results/cloned_simulations" `
     --max-workers 4 `
     --batch-size 50
+
+# Run cloned bath simulation in low-memory and test mode
+python -m src.physics.clone_simulation --ranks 1,76,177 --test-mode --weather-cache "data/weather" --out-dir "data/results/test_lowmem" --low-mem --overwrite
+
 ```
 
 ---
@@ -233,7 +237,54 @@ python -m src.physics.clone_simulation `
 
 ---
 
-## 7. Prerequisites & Dependencies
+## 7. Logging & Performance Metrics
+
+When executing a batch clone simulation, the engine tracks execution time and logs summaries at both the daily level and the overall run level. The counters distinguish between the number of original schedules and the randomized synthetic trajectory clones.
+
+### A. Daily Cohort Summary
+At the end of each simulated day, a summary is logged showing:
+*   **Cohort Scheduled Flights**: The number of unique flight schedules matched from the database.
+*   **Total Trajectories**: The number of simulated synthetic trajectory tracks (Scheduled Flights × `--clusters-per-flight`).
+*   **Success / Skipped / Failure**: Trajectory-level counts of simulated tracks.
+*   **Time Elapsed**: Duration of the daily simulation loop in seconds, including average time per simulated trajectory.
+
+```text
+==================================================
+CLONED SIMULATION DAILY SUMMARY - 2026-06-29 19:30:00
+Period/Date: 2025-12-06
+Cohort Scheduled Flights: 36
+Total Trajectories: 108
+Success (Trajectories): 93
+Skipped (Trajectories): 15
+Failure (Trajectories): 0
+Time Elapsed: 45.20 seconds (0.42s per trajectory)
+==================================================
+```
+
+### B. Final Run Performance Summary
+At the very end of the script execution, a consolidated summary prints overall counters, total execution time, and a daily timing breakdown:
+
+```text
+==================================================
+CLONED BATCH RUN PERFORMANCE SUMMARY
+Total Simulation Days: 3
+Total Scheduled Flights: 108
+Total Trajectories: 324
+Overall Success: 279
+Overall Skipped: 45
+Overall Failure: 0
+Total Execution Time: 2m 15.6s (Avg: 45.2s per day)
+
+Breakdown:
+  - 2025-12-06: 36 flights (108 trajectories) in 45.20s
+  - 2025-12-07: 36 flights (108 trajectories) in 44.80s
+  - 2025-12-08: 36 flights (108 trajectories) in 45.00s
+==================================================
+```
+
+---
+
+## 8. Prerequisites & Dependencies
 
 ### Python Libraries
 * `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
