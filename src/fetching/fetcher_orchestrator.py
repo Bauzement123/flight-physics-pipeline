@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import FLIGHT_LISTS_DIR, get_dataset_dir, ROUTE_SUMMARY_PARQUET
-from src.common.utils import load_route_summary, split_route_string, generate_dataset_name, setup_file_logger
+from src.common.config import FLIGHT_LISTS_DIR, get_dataset_dir, ROUTE_SUMMARY_PARQUET, MASTER_FLIGHTS_FILE, GLOBAL_TRAJECTORY_REGISTRY
+from src.common.utils import load_route_summary, split_route_string, generate_dataset_name, setup_file_logger, update_global_registry
 from src.fetching import opensky_fetcher
 
 # Setup Logging
@@ -121,20 +121,41 @@ def compute_fetch_targets(
         expected_filename = f"{dep}-{arr}.parquet"
         file_path = base_dir / expected_filename
         
-        # Check if list is missing (no fallback generation)
+        # Check if list is missing (fallback to master flights table)
         if not file_path.exists():
-            logging.error(f"Flight list missing: {expected_filename}. Slicing must be run first. Skipping corridor {dep} -> {arr}.")
-            continue
+            logging.warning(f"Flight list missing: {expected_filename}. Falling back to master flights table...")
+            if not MASTER_FLIGHTS_FILE.exists():
+                logging.error(f"Master flights table not found at: {MASTER_FLIGHTS_FILE}. Skipping corridor {dep} -> {arr}.")
+                continue
+            
+            try:
+                df_flights = pd.read_parquet(
+                    MASTER_FLIGHTS_FILE,
+                    filters=[
+                        ('estdepartureairport', '==', dep),
+                        ('estarrivalairport', '==', arr)
+                    ]
+                )
+                logging.info(f"Loaded {len(df_flights)} flights for corridor {dep} -> {arr} from master flights table.")
+            except Exception as e:
+                logging.error(f"Error reading master flights table for {dep} -> {arr}: {e}")
+                continue
+        else:
+            # Load from local file
+            try:
+                df_flights = pd.read_parquet(file_path)
+            except Exception as e:
+                logging.error(f"Error reading flight list {expected_filename}: {e}")
+                continue
 
-        # Load and filter in-memory to get actual capacity
+        # Filter in-memory to get actual capacity
         try:
-            df_flights = pd.read_parquet(file_path)
             from src.fetching.opensky_fetcher import filter_flight_list
             df_filtered = filter_flight_list(df_flights, start_date=start_date, end_date=end_date, typecode=typecode)
             capacity = len(df_filtered)
             logging.info(f"Corridor {dep} -> {arr}: filtered from {len(df_flights)} to {capacity} flights.")
         except Exception as e:
-            logging.error(f"Error reading/filtering flight list {expected_filename}: {e}")
+            logging.error(f"Error filtering flight list {expected_filename}: {e}")
             continue
 
         if capacity == 0:
@@ -191,7 +212,7 @@ def execute_batch_fetch(
         logging.info(f"Processing [{i}/{total}] - Rank {item['rank']} | {item['dep']} -> {item['arr']}")
         
         try:
-            success = opensky_fetcher.fetch_trajectories(
+            success, new_entries = opensky_fetcher.fetch_trajectories(
                 input_list_path=item['file_path'],
                 out_dir=out_dir,
                 sample_size=item['target'],
@@ -202,6 +223,9 @@ def execute_batch_fetch(
             )
             if success:
                 success_count += 1
+                # Sequential caller — safe to flush immediately (no concurrency).
+                if new_entries:
+                    update_global_registry(GLOBAL_TRAJECTORY_REGISTRY, new_entries)
         except Exception as e:
             logging.error(f"CRITICAL ERROR fetching trajectories for {item['dep']}->{item['arr']}: {e}")
             logging.warning("Continuing pipeline run for next corridor...")

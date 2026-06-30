@@ -18,6 +18,7 @@ import matplotlib.ticker as ticker
 # Central configurations and loaders
 from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET
 from src.common.utils import load_route_summary
+from src.common.registry_utils import load_trajectory_registry, load_registered_trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +37,7 @@ def process_flight_levels(
         logger.error(f"Registry file not found at: {registry_path}")
         return pd.DataFrame()
 
-    try:
-        df_registry = pd.read_parquet(registry_path)
-    except Exception as e:
-        logger.error(f"Failed to read registry Parquet: {e}")
-        return pd.DataFrame()
-
-    if df_registry.empty or 'file_path' not in df_registry.columns:
-        logger.error("Registry file is empty or missing 'file_path' column.")
-        return pd.DataFrame()
+    df_registry = load_trajectory_registry(registry_path)
 
     # Filter to raw flight files
     df_raw_reg = df_registry[df_registry['file_path'].str.endswith('_raw.parquet', na=False)]
@@ -77,34 +70,15 @@ def process_flight_levels(
     unique_files = df_raw_reg['file_path'].unique()
     logger.info(f"Scanning {len(unique_files)} unique parquet files referenced in registry...")
 
-    for rel_path_str, group in df_raw_reg.groupby('file_path'):
-        abs_path = BASE_DIR / rel_path_str
-        if not abs_path.exists():
-            logger.warning(f"File not found on disk: {abs_path}")
-            skipped_files += 1
-            continue
-
-        try:
-            cols_to_read = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
-            df_file = pd.read_parquet(abs_path, columns=cols_to_read)
-            processed_files += 1
-        except Exception as e:
-            logger.warning(f"Could not read columns from {abs_path.name}: {e}. Retrying full read.")
-            try:
-                df_file = pd.read_parquet(abs_path)
-                processed_files += 1
-            except Exception as fe:
-                logger.error(f"Failed to read file {abs_path.name}: {fe}")
-                skipped_files += 1
-                continue
+    cols_to_read = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
+    for abs_path, df_file_filtered in load_registered_trajectories(df_raw_reg, columns=cols_to_read):
+        processed_files += 1
 
         required_cols = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
-        missing_cols = [c for c in required_cols if c not in df_file.columns]
+        missing_cols = [c for c in required_cols if c not in df_file_filtered.columns]
         if missing_cols:
             continue
 
-        registered_ids = set(group['flight_id'])
-        df_file_filtered = df_file[df_file['flight_id'].isin(registered_ids)]
         if df_file_filtered.empty:
             continue
 
@@ -144,6 +118,7 @@ def process_flight_levels(
                 })
 
     df_out = pd.DataFrame(flight_records)
+    skipped_files = len(df_raw_reg['file_path'].unique()) - processed_files
     logger.info(f"Extraction complete. Files processed: {processed_files}, skipped: {skipped_files}")
     logger.info(f"Extracted {len(df_out)} flights with valid cruise Flight Levels.")
     return df_out

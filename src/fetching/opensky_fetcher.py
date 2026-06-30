@@ -16,7 +16,8 @@ from pyopensky.trino import Trino
 from pyopensky.schema import StateVectorsData4
 from sqlalchemy import select
 
-from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY
+from src.common.config import BASE_DIR, MASTER_FLIGHTS_FILE, GLOBAL_TRAJECTORY_REGISTRY
+from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import split_route_string, setup_file_logger, update_global_registry
 
 # Configure logging
@@ -100,8 +101,18 @@ def fetch_trajectories(
     seed: int = 42,
     start_date: str = None,
     end_date: str = None,
-    typecode: str = None
-):
+    typecode: str = None,
+) -> tuple:
+    """
+    Returns
+    -------
+    (success: bool, new_registry_entries: list[dict])
+        new_registry_entries contains {flight_id, file_path} dicts for every
+        flight fetched from Trino in this call.  The caller is responsible for
+        flushing these to GLOBAL_TRAJECTORY_REGISTRY so that concurrent callers
+        (e.g. the streaming pipeline Pool 1) cannot race on the registry file.
+        Cache-hit calls that produce no new Trino data return (True, []).
+    """
     start_time = time.time()
     out_dir_path = Path(out_dir)
     setup_file_logger(log_filename="fetching.log")
@@ -109,11 +120,34 @@ def fetch_trajectories(
     logging.info(f"Loading filtered flight list from: {input_list_path}")
     
     if not Path(input_list_path).exists():
-        logging.error(f"File not found: {input_list_path}")
-        return False
-
-    # Read the target population list
-    target_flights = pd.read_parquet(input_list_path)
+        logging.warning(f"File not found: {input_list_path}. Attempting to fall back to master flights table...")
+        if not MASTER_FLIGHTS_FILE.exists():
+            logging.error(f"Master flights table not found at: {MASTER_FLIGHTS_FILE}. Cannot fall back.")
+            return False, []
+        
+        base_name = Path(input_list_path).stem
+        if '-' in base_name:
+            dep, arr = base_name.split('-', 1)
+        else:
+            logging.error(f"Cannot parse origin and destination from filename: {base_name}. Expected format: 'DEP-ARR.parquet'.")
+            return False
+            
+        logging.info(f"Loading flights for corridor {dep} -> {arr} from master flights table...")
+        try:
+            target_flights = pd.read_parquet(
+                MASTER_FLIGHTS_FILE,
+                filters=[
+                    ('estdepartureairport', '==', dep),
+                    ('estarrivalairport', '==', arr)
+                ]
+            )
+            logging.info(f"Successfully loaded {len(target_flights)} flights from master flights table.")
+        except Exception as e:
+            logging.error(f"Failed to read from master flights table: {e}")
+            return False, []
+    else:
+        # Read the target population list
+        target_flights = pd.read_parquet(input_list_path)
     logging.info(f"Found {len(target_flights)} flights in the list.")
 
     # Apply date and typecode filtering in-memory
@@ -122,7 +156,7 @@ def fetch_trajectories(
 
     if target_flights.empty:
         logging.warning("No flights left in the list after filtering. Skipping corridor.")
-        return False
+        return False, []
 
     # Sample a random subset if requested
     if sample_size and sample_size > 0:
@@ -160,18 +194,17 @@ def fetch_trajectories(
         logging.info(f"Loaded {len(combined_df):,} waypoints from existing file.")
         duration = time.time() - start_time
         logging.info(f"Fetch process for {Path(input_list_path).name} completed (cached) in {duration:.2f} seconds.")
-        return True
+        return True, []  # cache hit — no new Trino entries to register
 
     # Load Global Registry Cache Map
-    registry_file = GLOBAL_TRAJECTORY_REGISTRY
     cached_flights = {}
-    if registry_file.exists():
-        try:
-            df_reg = pd.read_parquet(registry_file)
+    try:
+        df_reg = load_trajectory_registry()
+        if not df_reg.empty:
             cached_flights = dict(zip(df_reg['flight_id'], df_reg['file_path']))
             logging.info(f"Loaded global registry index containing {len(cached_flights):,} flight paths.")
-        except Exception as e:
-            logging.error(f"Error loading global trajectory registry: {e}")
+    except Exception as e:
+        logging.error(f"Error loading global trajectory registry: {e}")
 
     # Initialize OpenSky Trino Connection (lazily initialized on first Trino query)
     trino = None
@@ -308,15 +341,15 @@ def fetch_trajectories(
         with open(manifest_path, 'w') as f:
             json.dump(manifest_data, f, indent=4)
         logging.info(f"Manifest file saved to {manifest_path}")
-        # 3. Update Global Trajectory Registry
-        update_global_registry(registry_file, new_registry_entries)
-                
+        # Registry update is the caller's responsibility — returning new_registry_entries
+        # allows concurrent callers (e.g. the streaming pipeline) to flush via a
+        # single-writer pool and avoid race conditions on the parquet file.
         duration = time.time() - start_time
         logging.info(f"Fetch process for {Path(input_list_path).name} completed in {duration:.2f} seconds ({duration/60:.2f} minutes).")
-        return True
+        return True, new_registry_entries
     else:
         logging.error("No trajectories were successfully retrieved. Nothing to save.")
-        return False
+        return False, []
 
 
 if __name__ == "__main__":

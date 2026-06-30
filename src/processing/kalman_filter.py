@@ -14,6 +14,9 @@ from traffic.algorithms.filters.ekf import EKF
 from src.common.adapters import dataframe_to_pycontrails, write_flights_to_parquet
 from src.common.utils import setup_file_logger
 from pyproj import CRS, Transformer, Geod
+from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
+from src.common.registry_utils import load_trajectory_registry
+
 
 # Threshold in meters (100 km). Gaps larger than this will use geodesic interpolation.
 GEODESIC_DISTANCE_THRESHOLD_M = 100000.0
@@ -57,17 +60,14 @@ def clean_trajectories(input_file: str, out_dir: str):
     df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM  # m/s to ft/min
     
     # Load clean EKF registry to support flight-level cache hits
-    from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
-    clean_registry_file = GLOBAL_CLEAN_REGISTRY
     cached_clean_flights = {}
-    if clean_registry_file.exists():
-        try:
-            df_reg = pd.read_parquet(clean_registry_file)
-            if not df_reg.empty and 'flight_id' in df_reg.columns and 'file_path' in df_reg.columns:
-                cached_clean_flights = dict(zip(df_reg['flight_id'], df_reg['file_path']))
-                logging.info(f"Loaded clean registry index containing {len(cached_clean_flights):,} cleaned flights.")
-        except Exception as e:
-            logging.warning(f"Could not load clean registry index: {e}")
+    try:
+        df_reg = load_trajectory_registry(GLOBAL_CLEAN_REGISTRY)
+        if not df_reg.empty and 'flight_id' in df_reg.columns and 'file_path' in df_reg.columns:
+            cached_clean_flights = dict(zip(df_reg['flight_id'], df_reg['file_path']))
+            logging.info(f"Loaded clean registry index containing {len(cached_clean_flights):,} cleaned flights.")
+    except Exception as e:
+        logging.warning(f"Could not load clean registry index: {e}")
 
     t = Traffic(df)
     pc_flights = []

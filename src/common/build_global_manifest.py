@@ -5,10 +5,11 @@ from pathlib import Path
 import logging
 
 from src.common.config import (
-    BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, REGISTRIES_DIR,
+    BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
-    GLOBAL_SYNTH_SIM_REGISTRY, GLOBAL_SYNTHESIZED_REGISTRY
+    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY
 )
+from src.common.registry_utils import save_model_registry
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
     if df_updated.empty:
         df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
         
-    registry_file.parent.mkdir(parents=True, exist_ok=True)
-    df_updated.to_parquet(registry_file, index=False)
+    save_model_registry(df_updated)
     logger.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
 
 
@@ -193,20 +193,20 @@ def build_global_manifest():
         description="Physics Simulation"
     )
     
-    # 4. Synthesized simulated outputs registry
+    # 4. Corridor simulated outputs registry
     index_parquet_files(
         pattern="*_simulated.parquet",
-        registry_file=GLOBAL_SYNTH_SIM_REGISTRY,
+        registry_file=GLOBAL_CORRIDOR_SIM_REGISTRY,
         search_dirs=[
-            RESULTS_DIR / "cloned_simulations"
+            RESULTS_DIR / "corridor_simulations"
         ],
-        description="Synthesized Physics Simulation"
+        description="Corridor Physics Simulation"
     )
     
-    # 5. Synthesized paths registry
+    # 5. Corridor paths registry
     index_synthesized_files(
-        registry_file=GLOBAL_SYNTHESIZED_REGISTRY,
-        search_dir=SYNTHESIZED_FLIGHT_PATHS_DIR
+        registry_file=GLOBAL_MODEL_REGISTRY,
+        search_dir=CORRIDOR_PATHS_DIR
     )
 
 if __name__ == "__main__":

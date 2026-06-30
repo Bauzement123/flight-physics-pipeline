@@ -14,8 +14,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Import central configurations and utilities
-from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET, GLOBAL_SYNTHESIZED_REGISTRY
+from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET, GLOBAL_MODEL_REGISTRY
 from src.common.utils import load_route_summary, split_route_string
+from src.common.registry_utils import (
+    load_trajectory_registry,
+    load_registered_trajectories,
+    load_model_registry
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +54,9 @@ def process_raw_trajectories(
         return pd.DataFrame()
         
     try:
-        df_registry = pd.read_parquet(registry_path)
+        df_registry = load_trajectory_registry()
     except Exception as e:
-        logger.error(f"Failed to read registry Parquet: {e}")
-        return pd.DataFrame()
-        
-    if df_registry.empty or 'file_path' not in df_registry.columns:
-        logger.error("Registry file is empty or missing 'file_path' column.")
+        logger.error(f"Failed to load trajectory registry: {e}")
         return pd.DataFrame()
 
     logger.info(f"Loading Route Summary: {summary_path}")
@@ -87,43 +88,13 @@ def process_raw_trajectories(
     q_val = max(0.0, min(1.0, q_val)) # clamp to valid range
 
     # Group matches by file path to load only registered flight IDs
-    for rel_path_str, group in df_raw_reg.groupby('file_path'):
-        # Resolve the absolute path from the workspace BASE_DIR
-        abs_path = BASE_DIR / rel_path_str
-
-        if not abs_path.exists():
-            logger.warning(f"Referenced file not found on disk: {abs_path}")
-            skipped_files_count += 1
-            continue
-
-        try:
-            # Read only required columns to optimize performance and memory
-            cols_to_read = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
-            df_file = pd.read_parquet(abs_path, columns=cols_to_read)
-            processed_files_count += 1
-        except Exception as e:
-            logger.warning(f"Could not read columns from {abs_path.name}: {e}. Trying full read as fallback.")
-            try:
-                df_file = pd.read_parquet(abs_path)
-                processed_files_count += 1
-            except Exception as fe:
-                logger.error(f"Failed to read file {abs_path.name}: {fe}")
-                skipped_files_count += 1
-                continue
-
-        # Check if columns are present
-        required_cols = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
-        missing_cols = [c for c in required_cols if c not in df_file.columns]
-        if missing_cols:
-            logger.warning(f"File {abs_path.name} is missing columns: {missing_cols}. Skipping.")
-            continue
-
-        # Keep only the registered flight IDs for this file path (aligning with path_generator.py strategy)
-        registered_ids = set(group['flight_id'])
-        df_file_filtered = df_file[df_file['flight_id'].isin(registered_ids)]
+    cols_to_read = ['flight_id', 'baroaltitude', 'estdepartureairport', 'estarrivalairport']
+    for abs_path, df_file_filtered in load_registered_trajectories(df_raw_reg, columns=cols_to_read):
+        processed_files_count += 1
 
         if df_file_filtered.empty:
             continue
+
 
         # Group by flight_id to aggregate baroaltitude quantile (vectorized for speed)
         grouped_heights = df_file_filtered.groupby('flight_id')['baroaltitude'].quantile(q_val)
@@ -165,6 +136,7 @@ def process_raw_trajectories(
                         'distance_m': distance
                     })
 
+    skipped_files_count = len(df_raw_reg['file_path'].unique()) - processed_files_count
     df_out = pd.DataFrame(flight_records)
     logger.info(f"Extraction complete. Processed files: {processed_files_count}, Skipped files: {skipped_files_count}")
     logger.info(f"Extracted {len(df_out)} flights with valid baroaltitude ({top_k_percent}% threshold) and airport distance within bounds.")
@@ -188,13 +160,9 @@ def process_synthesized_trajectories(
         return pd.DataFrame()
 
     try:
-        df_reg = pd.read_parquet(synthesized_registry_path)
+        df_reg = load_model_registry()
     except Exception as e:
-        logger.error(f"Failed to read synthesized registry: {e}")
-        return pd.DataFrame()
-
-    if df_reg.empty or 'file_path' not in df_reg.columns:
-        logger.warning("Synthesized registry is empty or missing 'file_path' column.")
+        logger.error(f"Failed to load model registry: {e}")
         return pd.DataFrame()
 
     df_summary = load_route_summary(summary_path)
@@ -430,7 +398,7 @@ def main():
     )
     parser.add_argument(
         "--synthesized-registry", 
-        default=str(GLOBAL_SYNTHESIZED_REGISTRY), 
+        default=str(GLOBAL_MODEL_REGISTRY), 
         help="Path to global synthesized trajectory registry parquet file"
     )
     parser.add_argument(

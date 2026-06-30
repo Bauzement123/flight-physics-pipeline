@@ -10,9 +10,9 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import BASE_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, GLOBAL_SYNTHESIZED_REGISTRY
+from src.common.config import BASE_DIR, CORRIDOR_PATHS_DIR, GLOBAL_MODEL_REGISTRY
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger
-from src.synthesis.path_generator import create_synthesized_trajectory
+from src.corridor_modeling.path_generator import create_synthesized_trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def main():
     group.add_argument("--lower-rank", type=int, help="Lower bound of route ranks range")
     
     parser.add_argument("--upper-rank", type=int, help="Upper bound of route ranks range")
-    parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for synthesized trajectories")
+    parser.add_argument("--out-dir", default=str(CORRIDOR_PATHS_DIR), help="Output directory for synthesized trajectories")
     parser.add_argument("--grid-seconds", type=int, default=60, help="Time grid resolution in seconds (default: 60)")
     parser.add_argument("--overwrite", action="store_true", help="Force regeneration of synthesized paths even if they already exist")
     
@@ -48,7 +48,7 @@ def main():
         ranks_list = list(range(args.lower_rank, args.upper_rank + 1))
         
     # Load synthesized registry once at startup to find existing ranks
-    registry_file = GLOBAL_SYNTHESIZED_REGISTRY
+    registry_file = GLOBAL_MODEL_REGISTRY
     existing_ranks = set()
     if registry_file.exists():
         try:

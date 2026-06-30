@@ -26,9 +26,37 @@ MASTER_FLIGHT_PATHS_DIR = DATA_DIR / "master_flight_paths"
 GLOBAL_TRAJECTORY_REGISTRY = REGISTRIES_DIR / "global_trajectory_registry.parquet"
 GLOBAL_CLEAN_REGISTRY = REGISTRIES_DIR / "global_clean_registry.parquet"
 GLOBAL_SIMULATION_REGISTRY = REGISTRIES_DIR / "global_simulation_registry.parquet"
-GLOBAL_SYNTHESIZED_REGISTRY = REGISTRIES_DIR / "global_synthesized_registry.parquet"
-GLOBAL_SYNTH_SIM_REGISTRY = REGISTRIES_DIR / "global_synthesized_simulation_registry.parquet"
-GLOBAL_FLIGHT_CLUSTER_MAP = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+GLOBAL_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
+GLOBAL_CORRIDOR_SIM_REGISTRY = REGISTRIES_DIR / "global_corridor_simulation_registry.parquet"
+GLOBAL_STABILITY_REGISTRY = REGISTRIES_DIR / "global_stability_registry.parquet"
+# Note: GLOBAL_FLIGHT_CLUSTER_MAP removed. Medoid flight_id is stored per-cluster
+# directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+
+# PCA Calibration Constants
+# D_PCA and N_STANDARD are sentinel placeholders (-1). Run the Phase A/B
+# calibration script (Step 5) on 3 oversampled routes to derive these values
+# and update them here. No model file is saved -- PCA is fit fresh per-route.
+D_PCA                 = -1     # Populated by Phase A: number of PCA components (95% variance)
+N_STANDARD            = -1     # Populated by Phase A: per-route query budget = 5 × D_PCA
+DELTA_CV_THRESHOLD    = 0.01   # Populated by Phase B: ΔCV convergence threshold
+DELTA_CV_EPSILON      = 1e-8   # Guard for near-zero std in relative ΔCV formula
+
+# Stability Sampling — Resampling Loop Controls
+STABILITY_RESAMPLE_MULTIPLIER = 2   # On resample: query N_STANDARD × (multiplier^round) flights
+STABILITY_MAX_RESAMPLE_ROUNDS = 3   # Hard cap: max resample rounds before forcing convergence
+
+# Clustering Hyperparameter Tuning Constants
+# Promoted from hardcoded literals in path_generator.py.
+CLUSTERING_MAX_K          = 8      # Maximum k to evaluate in Silhouette loop
+SILHOUETTE_THRESHOLD      = 0.35   # Minimum silhouette score to accept k > 1
+CHAOS_VARIANCE_THRESHOLD  = 200.0  # Total coordinate variance above which k=1 is classified as Chaos
+MIN_FLIGHTS_FOR_CLUSTERING = 3     # Minimum cohort size; below this k=1 is forced
+CORRIDOR_TIME_GRID_SECONDS = 60    # Temporal resolution of saved corridor parquets
+
+# ROCD Classification Thresholds (ft/min)
+# Promoted from hardcoded literals in path_generator.py.
+ROCD_MIN_CLIMB_RATE   = 1800.0  # Minimum acceptable clean-flight climb rate
+ROCD_MIN_DESCENT_RATE = 1200.0  # Minimum acceptable clean-flight descent rate
 
 ROUTE_SUMMARY_PKL = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
 ROUTE_SUMMARY_PARQUET = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.parquet"
@@ -66,8 +94,9 @@ WEATHER_BOUNDS_BBOX = [-55.0, 27.0, 48.0, 80.0]
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = DATA_DIR / "trajectories"
 SIMULATION_PROFILES_DIR = DATA_DIR / "simulation_profiles"
-SYNTHESIZED_FLIGHT_PATHS_DIR = DATA_DIR / "synthesized_paths"
+CORRIDOR_PATHS_DIR = DATA_DIR / "corridor_paths"
 RESULTS_DIR = DATA_DIR / "results"
+CORRIDOR_SIMULATIONS_DIR = RESULTS_DIR / "corridor_simulations"
 
 # Physical unit conversion factors
 M_TO_FT = 3.280839895

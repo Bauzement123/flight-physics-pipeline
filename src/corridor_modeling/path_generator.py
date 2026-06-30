@@ -22,10 +22,11 @@ from traffic.core import Traffic, Flight as TrafficFlight
 from openap.phase import FlightPhase
 
 from src.common.config import (
-    BASE_DIR, SYNTHESIZED_FLIGHT_PATHS_DIR, M_TO_FT,
-    GLOBAL_SYNTHESIZED_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
-    GLOBAL_FLIGHT_CLUSTER_MAP
+    BASE_DIR, CORRIDOR_PATHS_DIR, M_TO_FT,
+    GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
+    ROCD_MIN_CLIMB_RATE, ROCD_MIN_DESCENT_RATE,
 )
+from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.common.adapters import (
     parquet_to_pycontrails,
@@ -259,7 +260,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     logger.info(f"Rank {rank} resolved to route: {dep} -> {arr}")
     
     # Registry-based Skip check
-    synthesized_registry_file = GLOBAL_SYNTHESIZED_REGISTRY
+    synthesized_registry_file = GLOBAL_MODEL_REGISTRY
     if synthesized_registry_file.exists():
         try:
             df_reg = pd.read_parquet(synthesized_registry_file)
@@ -317,126 +318,17 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         return None
         
     logger.info(f"Successfully loaded {len(raw_flights)} airborne trajectories. Identifying phases...")
-    
-    # 4. Phase classification and ROCD statistics calculation
-    flight_metrics = []
-    
-    for idx, flight in enumerate(raw_flights):
-        try:
-            df = flight.data
-            ts = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds().values
-            alt = df['altitude'].values
-            spd = df['groundspeed'].values
-            roc = df['vertical_rate'].values
-            
-            fp = FlightPhase()
-            fp.set_trajectory(ts, alt, spd, roc)
-            labels = fp.phaselabel()
-            
-            toc_idx, tod_idx = find_toc_tod(flight, labels)
-            
-            climb_dur_min = (ts[toc_idx] - ts[0]) / 60.0
-            climb_rocd = (alt[toc_idx] - alt[0]) / climb_dur_min if climb_dur_min > 0 else 0.0
-            
-            descent_dur_min = (ts[-1] - ts[tod_idx]) / 60.0
-            descent_rocd = (alt[tod_idx] - alt[-1]) / descent_dur_min if descent_dur_min > 0 else 0.0
-            
-            flight_metrics.append({
-                'flight': flight,
-                'toc_idx': toc_idx,
-                'tod_idx': tod_idx,
-                'climb_rocd': abs(climb_rocd),
-                'descent_rocd': abs(descent_rocd)
-            })
-        except Exception as e:
-            logger.warning(f"Failed phase identification on flight {idx}: {e}")
-            df = flight.data
-            toc_idx = int(len(df) * 0.2)
-            tod_idx = int(len(df) * 0.8)
-            flight_metrics.append({
-                'flight': flight,
-                'toc_idx': toc_idx,
-                'tod_idx': tod_idx,
-                'climb_rocd': 1800.0,
-                'descent_rocd': 1200.0
-            })
-            
-    # 5. Classify cohort into clean flights vs holding-pattern outliers
-    min_descent_rate = 1200.0
-    min_climb_rate = 1800.0
-    
-    clean_metrics = [m for m in flight_metrics if m['descent_rocd'] >= min_descent_rate and m['climb_rocd'] >= min_climb_rate]
-    
-    if len(clean_metrics) < max(1, len(flight_metrics) * 0.3):
-        threshold_count = max(1, int(len(flight_metrics) * 0.6))
-        sorted_by_descent = sorted(flight_metrics, key=lambda x: x['descent_rocd'], reverse=True)
-        clean_metrics = sorted_by_descent[:threshold_count]
-        logger.info(f"ROCD clustering fallback: selected top {len(clean_metrics)} flights as clean baseline.")
-        
-    median_clean_climb_rocd = np.median([m['climb_rocd'] for m in clean_metrics])
-    median_clean_descent_rocd = np.median([m['descent_rocd'] for m in clean_metrics])
-    
-    if pd.isna(median_clean_climb_rocd) or median_clean_climb_rocd < 500:
-        median_clean_climb_rocd = 1800.0
-    if pd.isna(median_clean_descent_rocd) or median_clean_descent_rocd < 500:
-        median_clean_descent_rocd = 1200.0
-        
-    logger.info(f"Baseline clean rates calculated: Climb={median_clean_climb_rocd:.1f} ft/min, Descent={median_clean_descent_rocd:.1f} ft/min")
-    
-    # 6. Apply Hybrid Normalization to holding-pattern flights
-    normalized_flights = []
-    clean_flight_ids = {m['flight'].callsign for m in clean_metrics}
-    
-    for metric in flight_metrics:
-        flight = metric['flight']
-        
-        if flight.callsign in clean_flight_ids:
-            normalized_flights.append(flight)
-            continue
-            
-        logger.info(f"Normalizing holding-pattern flight {flight.callsign}...")
-        
-        df_new = flight.data.copy()
-        times = (df_new['timestamp'] - df_new['timestamp'].iloc[0]).dt.total_seconds().values
-        altitudes = df_new['altitude'].values.copy()
-        latitudes = df_new['latitude'].values.copy()
-        longitudes = df_new['longitude'].values.copy()
-        
-        toc_idx = metric['toc_idx']
-        tod_idx = metric['tod_idx']
-        
-        if metric['climb_rocd'] < min_climb_rate:
-            alt_diff_climb = altitudes[toc_idx] - altitudes[0]
-            new_climb_duration = (alt_diff_climb / median_clean_climb_rocd) * 60.0
-            old_climb_duration = times[toc_idx] - times[0]
-            time_shift_climb = new_climb_duration - old_climb_duration
-            
-            climb_len = toc_idx + 1
-            latitudes[:climb_len] = np.linspace(latitudes[0], latitudes[toc_idx], climb_len)
-            longitudes[:climb_len] = np.linspace(longitudes[0], longitudes[toc_idx], climb_len)
-            altitudes[:climb_len] = np.linspace(altitudes[0], altitudes[toc_idx], climb_len)
-            
-            times[:climb_len] = np.linspace(times[0], times[0] + new_climb_duration, climb_len)
-            times[climb_len:] = times[climb_len:] + time_shift_climb
-            
-        if metric['descent_rocd'] < min_descent_rate:
-            alt_diff_descent = altitudes[tod_idx] - altitudes[-1]
-            new_descent_duration = (alt_diff_descent / median_clean_descent_rocd) * 60.0
-            
-            descent_len = len(df_new) - tod_idx
-            latitudes[tod_idx:] = np.linspace(latitudes[tod_idx], latitudes[-1], descent_len)
-            longitudes[tod_idx:] = np.linspace(longitudes[tod_idx], longitudes[-1], descent_len)
-            altitudes[tod_idx:] = np.linspace(altitudes[tod_idx], altitudes[-1], descent_len)
-            
-            times[tod_idx:] = np.linspace(times[tod_idx], times[tod_idx] + new_descent_duration, descent_len)
-            
-        df_new['latitude'] = latitudes
-        df_new['longitude'] = longitudes
-        df_new['altitude'] = altitudes
-        df_new['timestamp'] = df_new['timestamp'].iloc[0] + pd.to_timedelta(times, unit='s')
-        
-        normalized_flights.append(TrafficFlight(df_new))
-        
+
+    # 4. ROCD Classification & Holding-Pattern Renormalization
+    # Delegated to pca_compressor.classify_and_normalize_cohort.
+    # is_clean_flags is not consumed here (path_generator uses DTW centroid,
+    # not medoid selection) but will be used by the Step 4 clustering engine.
+    normalized_flights, _ = classify_and_normalize_cohort(raw_flights)
+
+    if not normalized_flights:
+        logger.error("Normalization produced no valid flights.")
+        return None
+
     # 7. Spatial Standardization and Projection setup
     combined_df = pd.concat([f.data for f in normalized_flights], ignore_index=True)
     traffic_cohort = Traffic(combined_df)
@@ -569,10 +461,10 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         final_output_paths.append(str(out_path))
         logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
         
-    # Write flight-to-cluster mappings registry
-    cluster_map_file = GLOBAL_FLIGHT_CLUSTER_MAP
-    update_flight_cluster_map(cluster_map_file, flight_mappings)
-    
+    # Flight-to-cluster mapping removed: GLOBAL_FLIGHT_CLUSTER_MAP was write-only
+    # and has been removed from the pipeline. Medoid flight_id is stored directly
+    # in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+
     return final_output_paths
 
 
@@ -581,7 +473,7 @@ if __name__ == "__main__":
     setup_file_logger(log_filename="synthesis.log")
     parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from raw OpenSky cohorts.")
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")
-    parser.add_argument("--out-dir", default=str(SYNTHESIZED_FLIGHT_PATHS_DIR), help="Output directory for the synthesized trajectory.")
+    parser.add_argument("--out-dir", default=str(CORRIDOR_PATHS_DIR), help="Output directory for the synthesized trajectory.")
     parser.add_argument("--grid-seconds", type=int, default=60, help="Time grid resolution in seconds (default: 60).")
     parser.add_argument("--overwrite", action="store_true", help="Force regeneration of synthesized paths even if they already exist.")
     

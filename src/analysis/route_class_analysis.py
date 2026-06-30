@@ -14,7 +14,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Import Central Configurations
-from src.common.config import BASE_DIR, GLOBAL_SYNTHESIZED_REGISTRY
+from src.common.config import BASE_DIR, GLOBAL_MODEL_REGISTRY
+from src.common.registry_utils import load_model_registry
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def load_data(registry_path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = pd.read_parquet(registry_path)
+        df = load_model_registry()
         return df
     except Exception as e:
         logger.error(f"Failed to read synthesized registry: {e}")
@@ -160,7 +161,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze route class distribution in synthesized registry.")
     parser.add_argument(
         "--registry", 
-        default=str(GLOBAL_SYNTHESIZED_REGISTRY), 
+        default=str(GLOBAL_MODEL_REGISTRY), 
         help="Path to synthesized trajectory registry parquet file"
     )
     parser.add_argument(
