@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def crop_met_dataset(
     met: MetDataset, 
     bbox: list[float], 
-    pad: float = 2.0
+    pad: float = 5.0
 ) -> MetDataset:
     """
     Spatially crops an xarray-backed MetDataset to a bounding box [West, South, East, North]

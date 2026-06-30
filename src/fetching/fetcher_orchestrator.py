@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import FLIGHT_LISTS_DIR, get_dataset_dir, ROUTE_SUMMARY_PKL
+from src.common.config import FLIGHT_LISTS_DIR, get_dataset_dir, ROUTE_SUMMARY_PARQUET
 from src.common.utils import load_route_summary, split_route_string, generate_dataset_name, setup_file_logger
 from src.fetching import opensky_fetcher
 
@@ -220,7 +220,7 @@ if __name__ == "__main__":
         return ivalue
 
     parser = argparse.ArgumentParser(description="OpenSky Fetcher Orchestrator - Batch Trajectory Downloader")
-    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PKL), help="Path to RouteSummary pickle file")
+    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PARQUET), help="Path to RouteSummary parquet file")
     parser.add_argument("--input-dir", default=str(FLIGHT_LISTS_DIR), help="Directory containing sliced flight list parquets")
     parser.add_argument("--format", choices=['oneway', 'roundtrip'], default='oneway', help="Fetch format directionality")
     

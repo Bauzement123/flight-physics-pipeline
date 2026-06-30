@@ -34,7 +34,10 @@ data/
 ├── master_flight_paths/     # Flight route boundary and definition files
 ├── simulation_profiles/     # Configuration profiles for physics runs
 ├── synthesized_paths/       # DTW-synthesized baseline route centroid Parquet files
-└── results/                 # Output simulated Parquet files (PSFlight + CoCiP outcomes)
+├── results/                 # Output simulated Parquet files (PSFlight + CoCiP outcomes)
+└── analysis/                # Generated visualization plots and statistical reports
+    ├── plots/               # PNG, PDF, or HTML figure exports
+    └── reports/             # Aggregated stats, CSV tables, or summary logs
 ```
 
 ### 2.1 Source Code Directory Structure
@@ -73,6 +76,12 @@ src/
 ├── physics/                 # PSFlight performance and CoCiP contrail simulations
 │   ├── clone_simulation.py
 │   ├── simulation.py
+│   └── README.md
+├── analysis/                # Flight trajectory statistics and visualization analysis
+│   ├── flight_analysis.py
+│   ├── route_popularity_analysis.py
+│   ├── route_class_analysis.py
+│   ├── flight_level_analysis.py
 │   └── README.md
 ├── Architecture Blueprint.md # This architecture overview
 └── conventions.md           # Project-wide programming and coding standards
@@ -161,3 +170,13 @@ The pipeline converts raw aviation inputs into SI units during EKF smoothing and
 *   **Key Files**:
     *   [simulation.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/physics/simulation.py): PSFlight + CoCiP executor. Skips unsupported aircraft types, appending details to `skipped_aircraft.log` under the output directory.
     *   [clone_simulation.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/physics/clone_simulation.py): Re-simulates flight cohorts using synthesized route paths under temporal offsets. Appends skipped flights to the centralized `skipped_aircraft.log` in the root output folder.
+
+### 4.8 Analysis Module (`src/analysis/`)
+*   **Objectives**: Visualizes flight metrics, aggregates statistical characteristics of flight trajectories (e.g. airport-to-airport geodesic distances vs. maximum cruise/baroaltitudes), and exports plots/reports.
+*   **Key Files**:
+    *   [flight_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/flight_analysis.py): Aggregates trajectory logs, merges with route summaries, and produces distance vs height scatter plots.
+    *   [route_popularity_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/route_popularity_analysis.py): Aggregates total flights and unique route counts into distance bins, exporting a dual Y-axis plot.
+    *   [route_class_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/route_class_analysis.py): Aggregates unique routes and total path counts across the 4 route classes, exporting a percentage distribution chart.
+    *   [flight_level_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/flight_level_analysis.py): Extracts stable cruise altitudes per flight, converts to Flight Levels, groups by route or distance bins, and generates candlestick boxplots.
+    *   [README.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/README.md): Conforms to project documentation standards with FAST tree and workflow diagram.
+

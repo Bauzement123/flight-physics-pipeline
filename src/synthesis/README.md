@@ -148,10 +148,10 @@ python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --o
 #### PowerShell
 ```powershell
 # 1. Generate synthesized trajectories for a list of ranks (skips existing by default)
-python -m src.synthesis.synthesis_orchestrator --ranks "1,76,177"
+python -m src.synthesis.synthesis_orchestrator --ranks "1,76,177,205,209,278,288,321,411,508,509,592,633,710,712,727,761,792,848,888,926"
 
 # 2. Generate synthesized trajectories for a range of ranks, forcing overwrite
-python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 5 --overwrite
+python -m src.synthesis.synthesis_orchestrator --lower-rank 1 --upper-rank 100 --overwrite
 ```
 
 **Parameters**:

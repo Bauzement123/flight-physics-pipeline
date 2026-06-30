@@ -150,14 +150,14 @@ python -m src.fetching.fetcher_orchestrator `
 # 3. Batch fetch with rank range and percentage quota
 python -m src.fetching.fetcher_orchestrator `
     --lower-rank 1 `
-    --upper-rank 50 `
+    --upper-rank 200 `
     --format oneway `
-    --strategy percent `
+    --strategy fixed `
     --value 10.0 `
-    --seed 99 `
+    --seed 42 `
     --start-date "2025-01-01" `
-    --end-date "2025-01-10" `
-    --min-distance 500.0
+    --end-date "2025-12-31" `
+    --min-distance 0
 ```
 
 **Parameters (`opensky_fetcher.py`)**:

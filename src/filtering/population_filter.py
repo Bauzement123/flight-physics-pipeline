@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 from pathlib import Path
 
-from src.common.config import FLIGHT_LISTS_DIR, ROUTE_SUMMARY_PKL, MASTER_FLIGHTS_FILE
+from src.common.config import FLIGHT_LISTS_DIR, ROUTE_SUMMARY_PARQUET, MASTER_FLIGHTS_FILE
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--ranks", type=str, help="Comma-separated list of specific ranks (e.g., '1,76,205')")
     parser.add_argument("--lower-rank", type=int, help="Lower bound of rank corridor")
     parser.add_argument("--upper-rank", type=int, help="Upper bound of rank corridor")
-    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PKL), help="Path to RouteSummary pickle file")
+    parser.add_argument("--route-summary", default=str(ROUTE_SUMMARY_PARQUET), help="Path to RouteSummary parquet file")
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
 
     args = parser.parse_args()

@@ -7,29 +7,43 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-from src.common.config import ROUTE_SUMMARY_PKL, TRAJECTORIES_DIR
+from src.common.config import ROUTE_SUMMARY_PARQUET, TRAJECTORIES_DIR
 
 logger = logging.getLogger(__name__)
 
 def load_route_summary(summary_path=None) -> pd.DataFrame:
     """
-    Safely loads the RouteSummary pickle file and returns a DataFrame.
+    Safely loads the RouteSummary file (supports parquet, pickle, csv) and returns a DataFrame.
     """
     if summary_path is None:
-        summary_path = ROUTE_SUMMARY_PKL
+        summary_path = ROUTE_SUMMARY_PARQUET
         logger.info(f"Loading RouteSummary from default: {summary_path}")
     
     path = Path(summary_path)
     if not path.exists():
-        logger.error(f"RouteSummary pickle file not found at: {path}")
+        logger.error(f"RouteSummary file not found at: {path}")
         return pd.DataFrame()
 
+    suffix = path.suffix.lower()
     try:
-        with open(path, 'rb') as f:
-            df = pickle.load(f)
+        if suffix == '.parquet':
+            df = pd.read_parquet(path)
+        elif suffix in ('.pkl', '.pickle'):
+            df = pd.read_pickle(path)
+        elif suffix == '.csv':
+            df = pd.read_csv(path)
+        else:
+            logger.warning(f"Unknown extension '{suffix}' for route summary path '{path}'. Trying multiple loaders...")
+            try:
+                df = pd.read_parquet(path)
+            except Exception:
+                try:
+                    df = pd.read_pickle(path)
+                except Exception:
+                    df = pd.read_csv(path)
         return df
     except Exception as e:
-        logger.error(f"Error loading RouteSummary pickle: {e}")
+        logger.error(f"Error loading RouteSummary file ({suffix}): {e}")
         return pd.DataFrame()
 
 def split_route_string(route_str: str) -> tuple:

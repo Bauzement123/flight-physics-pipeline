@@ -31,6 +31,7 @@ GLOBAL_SYNTH_SIM_REGISTRY = REGISTRIES_DIR / "global_synthesized_simulation_regi
 GLOBAL_FLIGHT_CLUSTER_MAP = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
 
 ROUTE_SUMMARY_PKL = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
+ROUTE_SUMMARY_PARQUET = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.parquet"
 ROUTE_SUMMARY_CSV = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.csv"
 MASTER_FLIGHTS_FILE = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
 
@@ -56,9 +57,11 @@ ERA5_REQUIRED_PRESSURE_LEVELS = [
 
 ERA5_GRID = 0.5
 
-# Bounding box for weather downselection: [West, South, East, North]
-# Covers North America, Transatlantic corridor, and European airspace
-WEATHER_BOUNDS_BBOX = [-125.0, 20.0, 45.0, 70.0]
+# --- Geographic Filtering Constants (European Bounding Box) ---
+# Encompasses edges: Greenland, Svalbard, Canary Islands, Turkey, Israel
+# Built from base bounds Lat [27.0, 80.0], Lon [-55.0, 48.0] Padding aplied in code 
+# west, south, east, north = [-55.0, 27.0, 48.0, 80.0]
+WEATHER_BOUNDS_BBOX = [-55.0, 27.0, 48.0, 80.0]
 
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = DATA_DIR / "trajectories"

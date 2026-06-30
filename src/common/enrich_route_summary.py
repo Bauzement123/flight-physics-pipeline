@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from traffic.data import airports
 
-from src.common.config import ROUTE_SUMMARY_PKL, ROUTE_SUMMARY_CSV
+from src.common.config import ROUTE_SUMMARY_PARQUET, ROUTE_SUMMARY_CSV, ROUTE_SUMMARY_PKL
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ def calculate_haversine_numpy(
 
 def enrich_route_summary(
     summary_pkl_path: Path,
+    summary_parquet_path: Path,
     summary_csv_path: Path
 ):
     logger.info(f"Loading RouteSummary from: {summary_pkl_path}")
@@ -119,6 +120,14 @@ def enrich_route_summary(
         logger.error(f"Failed to write RouteSummary pickle: {e}")
         return False
 
+    logger.info(f"Saving enriched RouteSummary Parquet to: {summary_parquet_path}")
+    try:
+        df.to_parquet(summary_parquet_path, index=False)
+        logger.info("Parquet saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to write RouteSummary Parquet: {e}")
+        return False
+
     logger.info(f"Saving enriched RouteSummary CSV to: {summary_csv_path}")
     try:
         df.to_csv(summary_csv_path, index=False)
@@ -134,4 +143,5 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - [DISTANCE ENRICHMENT] - %(message)s")
     pkl_file = ROUTE_SUMMARY_PKL
     csv_file = ROUTE_SUMMARY_CSV
-    enrich_route_summary(pkl_file, csv_file)
+    parquet_file = ROUTE_SUMMARY_PARQUET
+    enrich_route_summary(pkl_file, parquet_file, csv_file)
