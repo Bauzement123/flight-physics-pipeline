@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP
+from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP, ORACLE_COHORT_CACHE_DIR
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.corridor_modeling.pca_compressor import (
@@ -121,8 +121,63 @@ def _save_oracle_corridor(
     return out_path
 
 
+class _CachedFlightProxy:
+    """Lightweight proxy object representing a historical flight for downstream metadata mapping."""
+    def __init__(self, flight_id: str):
+        self.flight_id = flight_id
+        self.callsign = flight_id
+
+
+def _save_oracle_npz(route_id: str, res: dict) -> None:
+    """Saves preprocessed cohort tensors and metadata to atomic .npz cache."""
+    try:
+        ORACLE_COHORT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        flight_ids = []
+        for idx, fl in enumerate(res["norm_flights"]):
+            fid = getattr(fl, "flight_id", None) or getattr(fl, "callsign", None) or str(idx)
+            flight_ids.append(str(fid))
+            
+        np.savez_compressed(
+            ORACLE_COHORT_CACHE_DIR / f"{route_id}.npz",
+            X_raw=res["X_raw"],
+            X_scaled=res["X_scaled"],
+            is_clean=np.array(res["is_clean"], dtype=bool),
+            flight_ids=np.array(flight_ids),
+            oracle_medoid_vecs=res["oracle_medoid_vecs"],
+            k_oracle=res["k_oracle"],
+            route_class=res["route_class"],
+            n_flights=res["n_flights"],
+        )
+        logger.info(f"  [{route_id}] Saved precomputed Oracle cohort tensor to .npz cache.")
+    except Exception as e:
+        logger.warning(f"  [{route_id}] Could not save .npz cache: {e}")
+
+
 def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
     """Loads all flights for route_id and computes Oracle ground truth corridors."""
+    # 1. Tier 1 Fast Path: Check .npz tensor cache
+    cache_path = ORACLE_COHORT_CACHE_DIR / f"{route_id}.npz"
+    if cache_path.exists():
+        try:
+            logger.info(f"  [{route_id}] Loading precomputed Oracle cohort tensor from .npz cache: {cache_path}")
+            with np.load(cache_path, allow_pickle=True) as cached:
+                flight_ids = [str(fid) for fid in cached["flight_ids"]]
+                norm_flights = [_CachedFlightProxy(fid) for fid in flight_ids]
+                return {
+                    "route_id": route_id,
+                    "n_flights": int(cached["n_flights"]),
+                    "norm_flights": norm_flights,
+                    "is_clean": list(cached["is_clean"]),
+                    "X_raw": cached["X_raw"],
+                    "X_scaled": cached["X_scaled"],
+                    "k_oracle": int(cached["k_oracle"]),
+                    "route_class": int(cached["route_class"]),
+                    "oracle_medoid_vecs": cached["oracle_medoid_vecs"],
+                }
+        except Exception as e:
+            logger.warning(f"  [{route_id}] Failed to load .npz cache ({e}). Proceeding to tier 2 lookup...")
+
+    # 2. Tier 2: Check GLOBAL_MODEL_REGISTRY and parquet corridor files
     oracle_route_id = f"ORACLE_{route_id}"
     from src.common.registry_utils import load_model_registry
     
@@ -172,7 +227,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         X_raw = vectorize_cohort(norm_flights)
         X_scaled, mean_vec, std_vec = normalize_vectors(X_raw)
         
-        return {
+        res = {
             "route_id": route_id,
             "n_flights": n_flights,
             "norm_flights": norm_flights,
@@ -183,7 +238,10 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
             "route_class": r_class,
             "oracle_medoid_vecs": oracle_medoid_vecs,
         }
+        _save_oracle_npz(route_id, res)
+        return res
 
+    # 3. Tier 3: Compute from scratch
     logger.info(f"  [{route_id}] computing Oracle Ground Truth from scratch...")
     flights = _load_route_flights(route_id, n_target=9999, registry_df=registry_df)
     if not flights:
@@ -266,7 +324,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         "flight_mappings": oracle_flight_mappings
     }])
 
-    return {
+    res = {
         "route_id": route_id,
         "n_flights": n_avail,
         "norm_flights": norm_flights,
@@ -277,6 +335,8 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         "route_class": r_class,
         "oracle_medoid_vecs": oracle_medoid_vecs,
     }
+    _save_oracle_npz(route_id, res)
+    return res
 
 
 def run_gt_sweep(route_cache: dict, n_values: list, k_replicates: int) -> tuple[pd.DataFrame, pd.DataFrame]:
