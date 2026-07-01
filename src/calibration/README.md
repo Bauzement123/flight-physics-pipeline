@@ -40,10 +40,11 @@ Module Objectives
       │         ├── Inputs: trajectory registry, N values, bootstrap replicates (k-replicates)
       │         └── Outputs: raw/summary error CSV files, error-vs-N line plots, scatter plots
       │
-      ├── Sub-objective 3: Orchestrate multi-dimensional grid sweeps (N_0 x tau x K_max)
-      │    └── Solution: run_route_variational_sweep() in variational_orchestrator.py
+      ├── Sub-objective 3: Orchestrate multi-dimensional grid sweeps (N_0 x tau x K_max) in parallel
+      │    └── Solution: main() in variational_orchestrator.py
       │         ├── Inputs: route data, parameter grids (N0, tau, Kmax), bootstrap replicates
-      │         └── Outputs: raw/summary variational grid CSVs, combined all-route summary
+      │         ├── Outputs: raw/summary variational grid CSVs, combined all-route summary
+      │         └── Concurrency: Oracle baselines prepared sequentially; route sweeps dispatched concurrently via ProcessPoolExecutor (max_workers = min(n_routes, cpu_count))
       │
       ├── Sub-objective 4: Compile visual report dashboards
       │    └── Solution: generate_route_pdf_report() in variational_plots.py
@@ -91,8 +92,8 @@ graph TD
 4. **GT Sweep Ingestion & Oracle Baseline**: Using the active configuration parameters, `gt_stability_sweep.py` loads the full flight cohorts to establish the "Oracle Ground Truth" medoids and optimal clusters for the calibration routes.
 5. **GT Bootstrap Sweep**: For different sample sizes ($N$), the script draws random subsets and compares their medoid centroids to the Oracle medoids, computing the 3D geometric deviation in kilometers. It also computes split-half stability metrics ($X_{scaled}$ vs. $X_{pca}$ split-half).
 6. **GT Outcomes Generation**: The script writes raw and aggregated CSV files and outputs line graphs of error-vs-$N$ and metric scatter plots to `data/calibration/`.
-7. **Variational Sweep Orchestration**: The `variational_orchestrator.py` script executes a 3D grid sweep across combinations of $N_0 \times \tau \times K_{max}$ using bootstrap replicates.
-8. **Iterative Pipeline Simulation**: For each parameter cell, the script simulates the Stage 2 stability loop (doubling $N$ if $\Delta$CV $\ge \tau$ up to a maximum of 2 rerun rounds) followed by Stage 3 clustering.
+7. **Variational Sweep Orchestration**: The `variational_orchestrator.py` script first prepares Oracle baselines for all routes sequentially (to avoid concurrent parquet I/O contention), then dispatches one `run_route_variational_sweep` task per route concurrently using a `ProcessPoolExecutor` with `max_workers = min(n_routes, cpu_count)`. Results are collected via `as_completed` and saved as individual route CSVs as they finish.
+8. **Iterative Pipeline Simulation**: For each parameter cell, the script simulates the Stage 2 stability loop (doubling $N$ if $\Delta$CV $\ge \tau$ up to a maximum of 2 rerun rounds) followed by Stage 3 clustering. The silhouette threshold (`SILHOUETTE_THRESHOLD`) is applied during `_evaluate_custom_k`, allowing $k=1$ to be returned for unimodal routes.
 9. **Visual Report Compiling**: The orchestrator invokes `generate_route_pdf_report` in `variational_plots.py` to compile a multi-page PDF report for each route containing:
    * **Page 1**: Executive table listing the top 15 parameter configurations.
    * **Page 2**: Scatter plot displaying the Pareto frontier (expected query cost vs. median geometric error).

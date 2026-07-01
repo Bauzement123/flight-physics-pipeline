@@ -5,11 +5,13 @@ Sweeps across N_0, tau, and K_max iteratively for each calibration route,
 producing individual summary CSVs and multi-page PDF reports per route.
 """
 
+import os
 import argparse
 import logging
 import sys
 import time
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -181,51 +183,71 @@ def main() -> None:
     all_raw = []
     all_summary = []
 
+    # 1. Prepare Oracles sequentially to avoid DB concurrent read overhead
+    route_data_cache = {}
     print("\n" + "="*95)
-    print(f"STARTING ITERATIVE VARIATIONAL SWEEP ACROSS {len(routes_to_run)} ROUTES")
+    print("PREPARING ORACLE BASELINES")
     print("="*95)
-
-    for idx, route_id in enumerate(routes_to_run, 1):
-        t0 = time.perf_counter()
-        print(f"\n[{idx}/{len(routes_to_run)}] Preparing Oracle and sweeping route: {route_id} ...")
+    for route_id in routes_to_run:
         try:
-            route_data = _prepare_oracle(route_id, registry_df)
+            print(f"  Preparing Oracle for {route_id}...")
+            route_data_cache[route_id] = _prepare_oracle(route_id, registry_df)
         except Exception as exc:
             logger.error(f"Failed to prepare Oracle for {route_id}: {exc}")
-            continue
 
-        df_raw, df_summary = run_route_variational_sweep(
-            route_id,
-            route_data,
-            DEFAULT_N0_VALUES,
-            DEFAULT_TAU_VALUES,
-            DEFAULT_KMAX_VALUES,
-            reps,
-        )
-        elapsed = time.perf_counter() - t0
-        logger.info(f"[{route_id}] Sweep completed in {elapsed:.2f}s.")
+    # 2. Run sweeps in parallel across routes
+    max_workers = min(len(route_data_cache), os.cpu_count() or 1)
+    print("\n" + "="*95)
+    print(f"STARTING VARIATIONAL SWEEP ACROSS {len(route_data_cache)} ROUTES (max_workers={max_workers})")
+    print("="*95)
 
-        # Save individual route CSVs
-        raw_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_raw.csv"
-        sum_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_summary.csv"
-        df_raw.to_csv(raw_path, index=False)
-        df_summary.to_csv(sum_path, index=False)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                run_route_variational_sweep,
+                route_id,
+                route_data,
+                DEFAULT_N0_VALUES,
+                DEFAULT_TAU_VALUES,
+                DEFAULT_KMAX_VALUES,
+                reps,
+            ): route_id
+            for route_id, route_data in route_data_cache.items()
+        }
 
-        # Generate individual route PDF
-        if not args.dry_run:
-            pdf_path = generate_route_pdf_report(route_id, df_summary, route_data, CALIBRATION_OUT_DIR)
-            if pdf_path:
-                print(f"  -> Generated PDF Report: {pdf_path.name}")
+        for future in as_completed(futures):
+            route_id = futures[future]
+            t0 = time.perf_counter()
+            try:
+                df_raw, df_summary = future.result()
+                elapsed = time.perf_counter() - t0
+                logger.info(f"[{route_id}] Sweep completed in {elapsed:.2f}s.")
 
-        all_raw.append(df_raw)
-        all_summary.append(df_summary)
+                # Save individual route CSVs
+                raw_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_raw.csv"
+                sum_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_summary.csv"
+                df_raw.to_csv(raw_path, index=False)
+                df_summary.to_csv(sum_path, index=False)
 
-        # Print top 3 configs for this route
-        best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
-        print(f"  Top Sub-15km Configs for {route_id}:")
-        for _, r in best_rows.iterrows():
-            print(f"    (N0={int(r['N_0'])}, tau={r['tau']:.2f}, Kmax={int(r['K_max'])}) -> "
-                  f"AvgQueries={r['avg_queries']:.1f}, MedErr={r['median_geom_err_km']:.2f} km")
+                # Generate individual route PDF
+                if not args.dry_run:
+                    pdf_path = generate_route_pdf_report(
+                        route_id, df_summary, route_data_cache[route_id], CALIBRATION_OUT_DIR
+                    )
+                    if pdf_path:
+                        print(f"  -> Generated PDF Report: {pdf_path.name}")
+
+                all_raw.append(df_raw)
+                all_summary.append(df_summary)
+
+                # Print top 3 configs for this route
+                best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
+                print(f"  Top Sub-15km Configs for {route_id}:")
+                for _, r in best_rows.iterrows():
+                    print(f"    (N0={int(r['N_0'])}, tau={r['tau']:.2f}, Kmax={int(r['K_max'])}) -> "
+                          f"AvgQueries={r['avg_queries']:.1f}, MedErr={r['median_geom_err_km']:.2f} km")
+            except Exception as exc:
+                logger.error(f"[{route_id}] Sweep task failed: {exc}")
 
     if all_raw and not args.dry_run:
         df_all_raw = pd.concat(all_raw, ignore_index=True)

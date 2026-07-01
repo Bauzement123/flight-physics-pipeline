@@ -163,7 +163,7 @@ def classify_and_normalize_cohort(
         )
         clean_metrics = sorted_by_descent[:threshold_count]
         logger.info(
-            f"ROCD fallback: < 30% clean flights detected. "
+            f"ROCD fallback: < 30% clean flights detected.\n"
             f"Selected top {len(clean_metrics)} flights by descent ROCD as clean baseline."
         )
 

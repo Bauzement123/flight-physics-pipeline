@@ -34,8 +34,9 @@ Module Objectives
       │    └── Solution: adapters.py
       │         ├── dataframe_to_pycontrails(): Maps DataFrame columns to pycontrails.Flight schema
       │         ├── write_flights_to_parquet(): Serializes pycontrails.Flight list to flat Parquet
-      │         ├── parquet_to_pycontrails(): Reads Parquet and constructs pycontrails.Flight instances
-      │         └── pycontrails_to_traffic(): Translates pycontrails.Flight to traffic.core.Flight (converting SI units to aviation units)
+      │         ├── parquet_to_pycontrails(): Reads Parquet, normalizes raw OpenSky columns, and constructs pycontrails.Flight instances grouped by flight_id
+      │         ├── pycontrails_to_traffic(): Translates pycontrails.Flight to traffic.core.Flight (converting SI units → aviation units: m→ft, m/s→kt, m/s→ft/min)
+      │         └── traffic_to_pycontrails(): Translates traffic.core.Flight or DataFrame back to pycontrails.Flight (converting aviation units → SI units), with optional drop_kinematics flag to strip kinematic columns for corridor templates
       │
       ├── Sub-objective 3: Index trajectory files to accelerate local caching
       │    └── Solution: build_global_manifest.py & utils.py (update_global_registry)

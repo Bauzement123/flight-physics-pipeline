@@ -22,7 +22,7 @@ from traffic.core import Traffic, Flight as TrafficFlight
 from openap.phase import FlightPhase
 
 from src.common.config import (
-    BASE_DIR, CORRIDOR_PATHS_DIR, M_TO_FT,
+    BASE_DIR, CORRIDOR_PATHS_DIR,
     GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
 )
 from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort
@@ -30,7 +30,8 @@ from src.common.utils import load_route_summary, split_route_string, setup_file_
 from src.common.adapters import (
     parquet_to_pycontrails,
     pycontrails_to_traffic,
-    pycontrails_to_parquet
+    pycontrails_to_parquet,
+    traffic_to_pycontrails
 )
 
 # Clustering Config
@@ -379,29 +380,6 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
         logger.info(f"Computing spatial track centroid for cluster {cluster_id} using DTW...")
         centroid_flight = sub_collection.centroid(nb_samples=nb_samples, projection=projection)
         
-        centroid_df = centroid_flight.data.copy()
-        
-        # Snap Centroid to PyContrails grid & convert to SI
-        rename_si = {
-            'timestamp': 'time',
-            'track': 'heading',
-            'groundspeed': 'gs',
-            'vertical_rate': 'rocd'
-        }
-        centroid_df = centroid_df.rename(columns=rename_si)
-        
-        centroid_df['altitude'] = centroid_df['altitude'] / M_TO_FT
-        
-        # Drop outdated columns before instantiating the Flight object to force PyContrails to recalculate kinematics
-        cols_to_drop = ['gs', 'track', 'vertical_rate', 'groundspeed', 'heading', 'rocd']
-        centroid_df = centroid_df.drop(columns=[c for c in cols_to_drop if c in centroid_df.columns], errors='ignore')
-            
-
-            
-        # Inject metadata columns
-        centroid_df['route_class'] = route_class
-        centroid_df['cluster_id'] = cluster_id
-        
         # Build Flight attributes
         attrs = {
             "flight_id": f"{dep}-{arr}_synthesized_c{cluster_id}",
@@ -412,7 +390,8 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
             "cluster_id": cluster_id
         }
         
-        pyc_centroid = Flight(data=centroid_df, crs="EPSG:4326", drop_duplicated_times=True, **attrs)
+        # Snap Centroid to PyContrails grid & convert to SI using the unified adapter
+        pyc_centroid = traffic_to_pycontrails(centroid_flight, typecode=representative_typecode, drop_kinematics=True, **attrs)
         
         # Uniform temporal interpolation
         logger.info(f"Resampling synthesized trajectory to uniform {time_grid_seconds}s grid...")

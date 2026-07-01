@@ -24,8 +24,8 @@ src/processing/
 Module Objectives
  └── Apply Extended Kalman Filter (EKF) smoothing and resample raw ADSB waypoints
       │
-      ├── Sub-objective 1: Ingest raw coordinates and align columns/units
-      │    └── Solution: Reset DataFrame index, rename columns, drop NaNs, and convert metric/SI columns to aviation units in kalman_filter.py
+      ├── Sub-objective 1: Ingest raw coordinates, normalize schema, and scale to aviation units
+       │    └── Solution: parquet_to_pycontrails() in adapters.py normalizes raw OpenSky column names (lat→latitude, baroaltitude→altitude, etc.) and groups by flight_id; pycontrails_to_traffic() then scales SI units to aviation units (ft, kt, ft/min) for EKF input
       │
       ├── Sub-objective 2: Group trajectories and filter to valid airborne tracks
       │    └── Solution: Ingest DataFrame into traffic collection, run airborne() segmentation, and bypass flights with unknown/missing typecodes or < 10 points
@@ -53,26 +53,25 @@ Module Objectives
 ```mermaid
 graph TD
     A[Raw Parquet Input] --> B[1. File-Level Cache Check]
-    B -->|Miss| C[2. Rename Columns to Traffic Schema]
+    B -->|Miss| C[2. parquet_to_pycontrails: Normalize Schema & Load per flight_id]
     B -->|Hit| O[Skip Entire Batch]
-    C --> D[3. Drop Raw Rows with NaNs]
-    D --> E[4. Convert Values to Traffic Units]
-    E --> F[5. Group & Filter Airborne Tracks]
-    F --> G[6. Flight-Level Cache Check]
-    G -->|Miss| H[7. Project to 2D Cartesian plane]
-    H --> I[8. Apply Extended Kalman Filter]
-    I --> J[9. Reconstruct Flight & Resample to 1-min]
-    J --> K[10. Revert Values to SI Units]
-    G -->|Hit| K
-    K --> L[11. Re-inject Metadata Columns]
-    L --> M[12. Convert via PyContrails Adapter]
-    M --> N[13. Save Clean Parquet Output & Register]
+    C --> D[3. Flight-Level Cache Check]
+    D -->|Miss| E[4. pycontrails_to_traffic: Scale to Aviation Units]
+    E --> F[5. Drop NaNs & Filter Airborne Tracks]
+    F --> G[6. Project to 2D Cartesian plane]
+    G --> H[7. Apply Extended Kalman Filter]
+    H --> I[8. Reconstruct Flight & Resample to 1-min]
+    I --> J[9. Re-inject Metadata Columns]
+    D -->|Hit| J
+    J --> K[10. traffic_to_pycontrails: Revert to SI Units]
+    K --> L[11. Save Clean Parquet Output & Register]
 ```
 
 1. **Pre-Execution Cache Checks**: Bypasses processing if the target output file already exists on disk (file-level check) or skips individual flight coordinates if their IDs are already indexed in `global_clean_registry.parquet` (flight-level check).
-2. **Schema & Unit Conversion**: Ingests raw coordinate DataFrames, renames columns to match the `traffic` schema, drops missing `NaN` values, and converts SI metrics to standard aviation units (feet, knots, ft/min) required by the EKF formulas. Flights with unknown or missing typecodes (e.g., `UNKNOWN` or `None`) are bypassed.
-3. **EKF Mathematical Smoothing**: Projects flight tracks onto a flat 2D Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the flight's average coordinates. Applies the Extended Kalman Filter (RTS backward pass) to smooth coordinate noise.
-4. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Reverts units to SI standards (meters, m/s, UTC timestamps), converts variables via Pycontrails adapters, writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry. Logs and run statistics are written to `extraction.log` (previously `cleaning.log`).
+2. **Schema Normalization & Loading**: `parquet_to_pycontrails()` (from `src/common/adapters.py`) reads the raw Parquet file, renames raw OpenSky columns to the PyContrails standard schema (`lat`→`latitude`, `baroaltitude`→`altitude`, `vertrate`→`vertical_rate`, etc.), parses timestamps, drops NaN rows, and groups the result into one `pycontrails.Flight` object per `flight_id`. Flights with unknown or missing typecodes are bypassed.
+3. **Forward Unit Conversion (SI → Aviation)**: `pycontrails_to_traffic()` scales each PyContrails Flight from SI units to standard aviation units required by the `traffic` EKF engine (meters→feet, m/s→knots, m/s→ft/min) and renames columns to the Traffic schema (`time`→`timestamp`, `gs`→`groundspeed`, `rocd`→`vertical_rate`). The resulting `traffic.core.Flight` is filtered to airborne phases and NaN rows are dropped.
+4. **EKF Mathematical Smoothing**: Projects flight tracks onto a flat 2D Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the flight's average coordinates. Applies the Extended Kalman Filter (RTS backward pass) to smooth coordinate noise.
+5. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Re-injects metadata columns (callsign, typecode, etc.). `traffic_to_pycontrails()` then reverts aviation units back to SI (feet→meters, knots→m/s, ft/min→m/s), writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry.
 
 ---
 

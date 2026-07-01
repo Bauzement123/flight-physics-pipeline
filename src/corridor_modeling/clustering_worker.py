@@ -43,7 +43,7 @@ from src.common.config import (
     CHAOS_VARIANCE_THRESHOLD,
     MIN_FLIGHTS_FOR_CLUSTERING,
 )
-from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet
+from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet, traffic_to_pycontrails
 from src.corridor_modeling.pca_compressor import (
     classify_and_normalize_cohort,
     vectorize_cohort,
@@ -232,38 +232,18 @@ def _save_corridor(
     out_path = CORRIDOR_PATHS_DIR / f"{dep}-{arr}_corridor_c{cluster_id}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a minimal pycontrails Flight from the TrafficFlight data
-    df = flight.data.copy()
-
-    # Rename traffic → pycontrails column names where they differ
-    rename_map = {
-        "timestamp": "time",
-        "track": "heading",
-        "groundspeed": "gs",
-        "vertical_rate": "rocd",
-    }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-
-    # Drop derived columns that pycontrails will recalculate
-    cols_to_drop = ["gs", "track", "vertical_rate", "groundspeed", "heading", "rocd"]
-    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
-
-    # Inject metadata
-    df["route_class"] = route_class
-    df["cluster_id"] = cluster_id
-    df["optimal_k"] = optimal_k
-
+    # Build a minimal pycontrails Flight from the TrafficFlight data using the unified adapter
     attrs = {
         "flight_id": corridor_flight_id,
-        "aircraft_type": "B738",   # placeholder — overwritten by simulation engine
         "icao24": "MEDOID",
         "callsign": "MEDOID",
         "route_class": route_class,
         "cluster_id": cluster_id,
+        "optimal_k": optimal_k,
     }
 
     try:
-        pyc_flight = Flight(data=df, crs="EPSG:4326", drop_duplicated_times=True, **attrs)
+        pyc_flight = traffic_to_pycontrails(flight, typecode="B738", drop_kinematics=True, **attrs)
         resampled = pyc_flight.resample_and_fill(freq=f"{time_grid_seconds}s")
 
         # Timeline normalisation: shift start to 2025-01-01 00:00:00 UTC

@@ -9,12 +9,18 @@ import pandas as pd
 import logging
 from pathlib import Path
 import warnings
-from traffic.core import Traffic, Flight
+from traffic.core import Flight
 from traffic.algorithms.filters.ekf import EKF
-from src.common.adapters import dataframe_to_pycontrails, write_flights_to_parquet
-from src.common.utils import setup_file_logger
+from src.common.adapters import (
+    dataframe_to_pycontrails,
+    write_flights_to_parquet,
+    traffic_to_pycontrails,
+    parquet_to_pycontrails,
+    pycontrails_to_traffic
+)
+from src.common.utils import setup_file_logger, update_global_registry
 from pyproj import CRS, Transformer, Geod
-from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR, MPS_TO_KT, M_TO_FT, MPS_TO_FPM
+from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR
 from src.common.registry_utils import load_trajectory_registry
 
 
@@ -37,28 +43,6 @@ def clean_trajectories(input_file: str, out_dir: str):
     out_dir_path = Path(out_dir).resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Rename columns to match the 'traffic' library's expected schema
-    df = df.rename(columns={
-        'time': 'timestamp',
-        'lat': 'latitude',
-        'lon': 'longitude',
-        'heading': 'track',
-        'velocity': 'groundspeed',
-        'vertrate': 'vertical_rate',
-        'baroaltitude': 'altitude'
-    })
-
-    # Drop rows with NA values in the essential time series columns required by EKF
-    df = df.dropna(subset=['timestamp', 'latitude', 'longitude', 'track', 'groundspeed', 'vertical_rate', 'altitude', 'onground'])
-
-    # Prepare timestamp: keep it as a column for traffic's filter
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
-    
-    # 2. Units (Crucial for EKF)
-    df['groundspeed'] = df['groundspeed'] * MPS_TO_KT      # m/s to knots
-    df['altitude'] = df['altitude'] * M_TO_FT             # meters to feet
-    df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM  # m/s to ft/min
-    
     # Load clean EKF registry to support flight-level cache hits
     cached_clean_flights = {}
     try:
@@ -69,20 +53,23 @@ def clean_trajectories(input_file: str, out_dir: str):
     except Exception as e:
         logging.warning(f"Could not load clean registry index: {e}")
 
-    t = Traffic(df)
+    try:
+        flights_dict = parquet_to_pycontrails(input_file)
+    except Exception as exc:
+        logging.error(f"Failed to read raw trajectories: {exc}")
+        return
+
     pc_flights = []
     
-    logging.info(f"Processing {len(t)} flights...")
+    logging.info(f"Processing {len(flights_dict)} flights...")
     
     # Initialize the EKF object once
     ekf = EKF(smooth=True)
     logging.info(f"EKF initialized with smooth=True (RTS backward pass enabled)")
     
-    for flight in t:
+    for flight_id, pyc_flight in flights_dict.items():
         # Check if flight has already been cleaned and is in the cache
-        flight_id = flight.data['flight_id'].iloc[0] if 'flight_id' in flight.data.columns else None
-        
-        if flight_id and flight_id in cached_clean_flights:
+        if flight_id in cached_clean_flights:
             cached_file_path = BASE_DIR / cached_clean_flights[flight_id]
             if cached_file_path.exists():
                 try:
@@ -92,19 +79,30 @@ def clean_trajectories(input_file: str, out_dir: str):
                         pc_flight = dataframe_to_pycontrails(df_flight_cached)
                         if pc_flight:
                             pc_flights.append(pc_flight)
-                            msg = f"Flight {flight.callsign}: Cache Hit (loaded from EKF clean cache)"
+                            msg = f"Flight {flight_id}: Cache Hit (loaded from EKF clean cache)"
                             logging.info(msg)
                             continue
                 except Exception as e:
-                    logging.warning(f"Failed to load cached flight {flight.callsign} from {cached_clean_flights[flight_id]}: {e}. Falling back to EKF smoothing.")
+                    logging.warning(f"Failed to load cached flight {flight_id} from {cached_clean_flights[flight_id]}: {e}. Falling back to EKF smoothing.")
 
         # Check typecode before cleaning
-        typecode = flight.data['typecode'].iloc[0] if 'typecode' in flight.data.columns else None
+        typecode = pyc_flight.attrs.get('aircraft_type', 'B738')
         if not typecode or typecode == "UNKNOWN" or pd.isna(typecode):
-            warn_msg = f"Flight {flight.callsign} has missing or unknown typecode ('{typecode}'). Skipping EKF cleaning."
+            warn_msg = f"Flight {flight_id} has missing or unknown typecode. Skipping EKF cleaning."
             logging.warning(warn_msg)
             continue
+
+        # Convert to traffic.core.Flight (this handles renaming and scaling to aviation units)
+        flight = pycontrails_to_traffic(pyc_flight)
+        
+        # Drop rows with NA values in the essential columns required by EKF
+        flight_data = flight.data.dropna(subset=['timestamp', 'latitude', 'longitude', 'track', 'groundspeed', 'vertical_rate', 'altitude', 'onground'])
+        if len(flight_data) < 10:
+            continue
             
+        # Re-wrap in Traffic Flight object
+        flight = Flight(flight_data)
+        
         f = flight.airborne()
         if f is None or len(f) < 10:
             continue
@@ -192,11 +190,6 @@ def clean_trajectories(input_file: str, out_dir: str):
             df_smoothed['latitude'] = lat_vals
             df_smoothed['longitude'] = lon_vals
             
-            # Revert units back to SI (meters, m/s, m/s)
-            df_smoothed['groundspeed'] = df_smoothed['groundspeed'] / MPS_TO_KT
-            df_smoothed['altitude'] = df_smoothed['altitude'] / M_TO_FT
-            df_smoothed['vertical_rate'] = df_smoothed['vertical_rate'] / MPS_TO_FPM
-            
             # Slice/sample the DataFrame at the 1-minute grid times
             df_resampled = df_smoothed[df_smoothed['timestamp'].isin(grid_times)].copy()
             
@@ -208,8 +201,8 @@ def clean_trajectories(input_file: str, out_dir: str):
             # Ensure onground is explicitly False for all resampled airborne waypoints
             df_resampled['onground'] = False
             
-            # Convert to PyContrails
-            pc_flight = dataframe_to_pycontrails(df_resampled.reset_index(drop=True))
+            # Convert to PyContrails using the unified adapter (which reverts units to SI)
+            pc_flight = traffic_to_pycontrails(df_resampled.reset_index(drop=True), typecode=typecode)
             if pc_flight:
                 pc_flights.append(pc_flight)
                 logging.info(f"Flight {flight.callsign}: EKF complete - {waypoints_before} -> {len(df_resampled)} waypoints")
@@ -219,13 +212,14 @@ def clean_trajectories(input_file: str, out_dir: str):
             logging.warning(warn_msg)
 
     # Write cleaning statistics and logs to standard loggers
+    n_total = len(flights_dict)
     logging.info(
         f"\n==================================================\n"
         f"CLEANING RUN SUMMARY - {pd.Timestamp.now()}\n"
         f"Source raw file: {input_file}\n"
-        f"Total flights: {len(t)}\n"
+        f"Total flights: {n_total}\n"
         f"Success (Cleaned): {len(pc_flights)}\n"
-        f"Failure/Skipped: {len(t) - len(pc_flights)}\n"
+        f"Failure/Skipped: {n_total - len(pc_flights)}\n"
         f"=================================================="
     )
 
@@ -235,9 +229,6 @@ def clean_trajectories(input_file: str, out_dir: str):
         write_flights_to_parquet(pc_flights, out_path)
         
         # Update Clean EKF Registry Cache Index
-        from src.common.config import GLOBAL_CLEAN_REGISTRY, BASE_DIR
-        from src.common.utils import update_global_registry
-        
         clean_registry_file = GLOBAL_CLEAN_REGISTRY
         rel_clean_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
         new_entries = [{"flight_id": fid, "file_path": rel_clean_path} for fid in [f.attrs['flight_id'] for f in pc_flights]]

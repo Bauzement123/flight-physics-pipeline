@@ -260,3 +260,64 @@ def pycontrails_to_parquet(flight: Flight, out_path: Path):
     """
     write_flights_to_parquet([flight], out_path)
 
+def traffic_to_pycontrails(flight_or_df, typecode: str = "B738", drop_kinematics: bool = False, **attrs) -> Flight:
+    """
+    Transforms a traffic.core.Flight object or standard aviation DataFrame 
+    back into a pycontrails.Flight object, re-scaling standard aviation units 
+    (feet, knots, ft/min) back to SI units.
+    """
+    if hasattr(flight_or_df, 'data'):
+        # It is a traffic.core.Flight or similar object
+        df = flight_or_df.data.copy()
+        flight_attrs = getattr(flight_or_df, 'attrs', {})
+    else:
+        # It is a pandas DataFrame
+        df = flight_or_df.copy()
+        flight_attrs = {}
+
+    # 1. Convert aviation units back to SI units
+    if 'altitude' in df.columns:
+        df['altitude'] = df['altitude'] / M_TO_FT
+        
+    if not drop_kinematics:
+        if 'groundspeed' in df.columns:
+            df['groundspeed'] = df['groundspeed'] / MPS_TO_KT
+        if 'vertical_rate' in df.columns:
+            df['vertical_rate'] = df['vertical_rate'] / MPS_TO_FPM
+        
+    # 2. Map columns back to PyContrails
+    rename_map = {
+        'timestamp': 'time',
+        'groundspeed': 'gs',
+        'track': 'heading',
+        'vertical_rate': 'rocd',
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    
+    # 3. Drop derived/outdated columns
+    cols_to_drop = ['x', 'y', 'track_unwrapped']
+    if drop_kinematics:
+        cols_to_drop.extend(['gs', 'track', 'vertical_rate', 'groundspeed', 'heading', 'rocd'])
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+    
+    # 4. Extract and inject metadata
+    flight_id = flight_attrs.get('flight_id', df['flight_id'].iloc[0] if 'flight_id' in df.columns else 'UNK')
+    icao24 = flight_attrs.get('icao24', df['icao24'].iloc[0] if 'icao24' in df.columns else 'UNK')
+    callsign = flight_attrs.get('callsign', df['callsign'].iloc[0] if 'callsign' in df.columns else 'UNK')
+    
+    final_attrs = {
+        "flight_id": flight_id,
+        "aircraft_type": typecode,
+        "icao24": icao24,
+        "callsign": callsign,
+    }
+    # Merge additional attributes
+    for k, v in flight_attrs.items():
+        if k not in ['flight_id', 'aircraft_type', 'icao24', 'callsign']:
+            final_attrs[k] = v
+    for k, v in attrs.items():
+        final_attrs[k] = v
+        
+    return Flight(data=df, crs="EPSG:4326", drop_duplicated_times=True, **final_attrs)
+
+
