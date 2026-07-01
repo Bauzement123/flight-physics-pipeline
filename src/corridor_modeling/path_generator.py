@@ -24,7 +24,6 @@ from openap.phase import FlightPhase
 from src.common.config import (
     BASE_DIR, CORRIDOR_PATHS_DIR, M_TO_FT,
     GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
-    ROCD_MIN_CLIMB_RATE, ROCD_MIN_DESCENT_RATE,
 )
 from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger

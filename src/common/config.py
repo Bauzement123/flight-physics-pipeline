@@ -36,8 +36,8 @@ GLOBAL_STABILITY_REGISTRY = REGISTRIES_DIR / "global_stability_registry.parquet"
 # D_PCA and N_STANDARD are sentinel placeholders (-1). Run the Phase A/B
 # calibration script (Step 5) on 3 oversampled routes to derive these values
 # and update them here. No model file is saved -- PCA is fit fresh per-route.
-D_PCA                 = -1     # Populated by Phase A: number of PCA components (95% variance)
-N_STANDARD            = -1     # Populated by Phase A: per-route query budget = 5 × D_PCA
+D_PCA                 = 13     # Populated by Phase A: number of PCA components (95% variance)
+N_STANDARD            = 65     # Populated by Phase A: per-route query budget = 5 × D_PCA
 DELTA_CV_THRESHOLD    = 0.01   # Populated by Phase B: ΔCV convergence threshold
 DELTA_CV_EPSILON      = 1e-8   # Guard for near-zero std in relative ΔCV formula
 

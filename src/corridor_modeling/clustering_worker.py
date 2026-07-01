@@ -42,7 +42,6 @@ from src.common.config import (
     SILHOUETTE_THRESHOLD,
     CHAOS_VARIANCE_THRESHOLD,
     MIN_FLIGHTS_FOR_CLUSTERING,
-    D_PCA,
 )
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet
 from src.corridor_modeling.pca_compressor import (

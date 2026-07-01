@@ -22,7 +22,7 @@ from pycontrails.datalib.ecmwf import ERA5
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.common.config import (
     BASE_DIR, WEATHER_DIR, RESULTS_DIR, MASTER_FLIGHTS_FILE,
-    GLOBAL_MODEL_REGISTRY, GLOBAL_CORRIDOR_SIM_REGISTRY,
+    GLOBAL_CORRIDOR_SIM_REGISTRY,
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, WEATHER_BOUNDS_BBOX
 )
@@ -405,7 +405,6 @@ def run_batch_clone_simulation(
     max_workers: int = 4
 ):
     master_flights_file = MASTER_FLIGHTS_FILE
-    synthesized_registry_file = GLOBAL_MODEL_REGISTRY
     cloned_registry_file = GLOBAL_CORRIDOR_SIM_REGISTRY
     
     setup_file_logger(log_filename="clone_simulation.log")
