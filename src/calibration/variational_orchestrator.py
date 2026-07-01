@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.calibration.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
 from src.calibration.variational_plots import generate_route_pdf_report
-from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD
+from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_FLIGHT_CLUSTER_MAP
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.corridor_modeling.clustering_worker import _select_medoid
@@ -73,21 +73,61 @@ def run_route_variational_sweep(
     tau_vals: list[float],
     kmax_vals: list[int],
     replicates: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    out_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[dict]]:
     """Runs the 3D grid sweep simulation for a single route."""
     raw_records = []
+    flight_mappings = []
     total_cells = len(n0_vals) * len(tau_vals) * len(kmax_vals)
     logger.info(f"[{route_id}] Sweeping {total_cells} parameter cells across {replicates} replicates...")
 
     X_raw = route_data["X_raw"]
     X_scaled = route_data["X_scaled"]
     is_clean = route_data["is_clean"]
+    norm_flights = route_data["norm_flights"]
     oracle_vecs = route_data["oracle_medoid_vecs"]
     n_avail = route_data["n_flights"]
+
+    raw_path = out_dir / f"{route_id}_variational_raw.csv"
+    df_existing_raw = None
+    if raw_path.exists():
+        try:
+            df_existing_raw = pd.read_csv(raw_path)
+            logger.info(f"[{route_id}] Found existing raw sweep records. Scanning for cache hits...")
+        except Exception:
+            pass
 
     for n0 in n0_vals:
         for tau in tau_vals:
             for kmax in kmax_vals:
+                # Check cache first
+                cell_cached = False
+                if df_existing_raw is not None:
+                    match = df_existing_raw[
+                        (df_existing_raw["N_0"] == n0) &
+                        (df_existing_raw["tau"] == tau) &
+                        (df_existing_raw["K_max"] == kmax)
+                    ]
+                    if len(match) >= replicates:
+                        cell_cached = True
+                        logger.debug(f"  [{route_id}] Cell (N0={n0}, tau={tau:.2f}, Kmax={kmax}) cache hit.")
+                        for _, row in match.head(replicates).iterrows():
+                            raw_records.append({
+                                "N_0": int(row["N_0"]),
+                                "tau": float(row["tau"]),
+                                "K_max": int(row["K_max"]),
+                                "route": str(row["route"]),
+                                "seed": int(row["seed"]),
+                                "final_N": int(row["final_N"]),
+                                "converged_round": int(row["converged_round"]),
+                                "dcv_pca": float(row["dcv_pca"]),
+                                "k_sample": int(row["k_sample"]),
+                                "geom_err_km": float(row["geom_err_km"]),
+                            })
+
+                if cell_cached:
+                    continue
+
                 for seed in range(replicates):
                     current_n = n0
                     converged_round = MAX_RERUNS
@@ -135,6 +175,22 @@ def run_route_variational_sweep(
                                 "k_sample": k_sample,
                                 "geom_err_km": geom_err,
                             })
+
+                            # Capture flight cluster mappings for this sweep configuration cell
+                            sample_medoid_indices_set = set(sample_medoid_indices)
+                            for j, global_idx in enumerate(idx):
+                                flight_obj = norm_flights[global_idx]
+                                flight_id = getattr(flight_obj, "flight_id", None) or str(global_idx)
+                                flight_mappings.append({
+                                    "route_id": route_id,
+                                    "N_0": n0,
+                                    "tau": tau,
+                                    "K_max": kmax,
+                                    "replicate": seed,
+                                    "flight_id": flight_id,
+                                    "cluster_id": int(labels_sample[j]),
+                                    "is_medoid": j in sample_medoid_indices_set
+                                })
                             break
 
                         current_n *= 2
@@ -156,7 +212,7 @@ def run_route_variational_sweep(
         })
 
     df_summary = pd.DataFrame(summary_rows)
-    return df_raw, df_summary
+    return df_raw, df_summary, flight_mappings
 
 
 def _is_oom_error(exc: Exception) -> bool:
@@ -169,6 +225,7 @@ def _save_route_results(
     route_id: str,
     df_raw: pd.DataFrame,
     df_summary: pd.DataFrame,
+    flight_mappings: list,
     out_dir: Path,
     route_data_cache: dict,
     dry_run: bool,
@@ -183,6 +240,24 @@ def _save_route_results(
         )
         if pdf_path:
             print(f"  -> Generated PDF Report: {pdf_path.name}")
+
+    # Save flight mappings to CALIBRATION_FLIGHT_CLUSTER_MAP
+    if flight_mappings:
+        df_new = pd.DataFrame(flight_mappings)
+        if CALIBRATION_FLIGHT_CLUSTER_MAP.exists():
+            try:
+                df_existing = pd.read_parquet(CALIBRATION_FLIGHT_CLUSTER_MAP)
+                keys = ["route_id", "N_0", "tau", "K_max", "replicate", "flight_id"]
+                df_updated = pd.concat([df_existing, df_new]).drop_duplicates(subset=keys, keep="last")
+            except Exception as e:
+                logger.warning(f"Could not read existing calibration cluster map, overwriting: {e}")
+                df_updated = df_new
+        else:
+            df_updated = df_new
+
+        CALIBRATION_FLIGHT_CLUSTER_MAP.parent.mkdir(parents=True, exist_ok=True)
+        df_updated.to_parquet(CALIBRATION_FLIGHT_CLUSTER_MAP, index=False)
+        logger.info(f"Saved {len(df_new)} flight mappings to calibration cluster map.")
 
     best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
     print(f"  Top Sub-15km Configs for {route_id}:")
@@ -211,20 +286,64 @@ def main() -> None:
     routes_to_run = CALIBRATION_ROUTES[:1] if args.dry_run else CALIBRATION_ROUTES
     reps = 2 if args.dry_run else args.replicates
 
+    # Check which routes are fully cached
+    routes_needing_run = []
+    completed_raw = []
+    completed_summary = []
+
+    for route_id in routes_to_run:
+        raw_path = out_dir / f"{route_id}_variational_raw.csv"
+        summary_path = out_dir / f"{route_id}_variational_summary.csv"
+        cache_hit = False
+        if raw_path.exists() and summary_path.exists():
+            try:
+                df_raw = pd.read_csv(raw_path)
+                df_summary = pd.read_csv(summary_path)
+
+                # Check if all cells exist with reps rows
+                all_cells_exist = True
+                for n0 in DEFAULT_N0_VALUES:
+                    for tau in DEFAULT_TAU_VALUES:
+                        for kmax in DEFAULT_KMAX_VALUES:
+                            match = df_raw[
+                                (df_raw["N_0"] == n0) &
+                                (df_raw["tau"] == tau) &
+                                (df_raw["K_max"] == kmax)
+                            ]
+                            if len(match) < reps:
+                                all_cells_exist = False
+                                break
+                        if not all_cells_exist:
+                            break
+                    if not all_cells_exist:
+                        break
+
+                if all_cells_exist:
+                    cache_hit = True
+                    completed_raw.append(df_raw)
+                    completed_summary.append(df_summary)
+                    logger.info(f"[{route_id}] Sweep is 100% cached. Skipping simulation.")
+            except Exception as e:
+                logger.warning(f"Could not read existing sweep files for {route_id} cache check: {e}")
+
+        if not cache_hit:
+            routes_needing_run.append(route_id)
+
     # 1. Prepare Oracle baselines sequentially (avoids concurrent parquet I/O contention)
     route_data_cache = {}
-    print("\n" + "="*95)
-    print("PREPARING ORACLE BASELINES")
-    print("="*95)
-    for route_id in routes_to_run:
-        try:
-            print(f"  Preparing Oracle for {route_id}...")
-            route_data_cache[route_id] = _prepare_oracle(route_id, registry_df)
-        except Exception as exc:
-            logger.error(f"Failed to prepare Oracle for {route_id}: {exc}")
+    if routes_needing_run:
+        print("\n" + "="*95)
+        print("PREPARING ORACLE BASELINES")
+        print("="*95)
+        for route_id in routes_needing_run:
+            try:
+                print(f"  Preparing Oracle for {route_id}...")
+                route_data_cache[route_id] = _prepare_oracle(route_id, registry_df)
+            except Exception as exc:
+                logger.error(f"Failed to prepare Oracle for {route_id}: {exc}")
 
-    if not route_data_cache:
-        logger.error("No routes prepared successfully. Aborting.")
+    if not route_data_cache and not completed_raw:
+        logger.error("No routes prepared successfully and no cached runs found. Aborting.")
         return
 
     # 2. Determine starting worker count from available memory and CPU count
@@ -249,8 +368,6 @@ def main() -> None:
     # down by 1 and re-queues the failed route. Continues until all routes
     # finish or worker count reaches 1 and still OOMs (gives up on that route).
     pending_routes = list(route_data_cache.keys())
-    completed_raw: list[pd.DataFrame] = []
-    completed_summary: list[pd.DataFrame] = []
     start_times = {r: time.perf_counter() for r in pending_routes}
     
     limit_reached = False
@@ -275,6 +392,7 @@ def main() -> None:
                     DEFAULT_TAU_VALUES,
                     DEFAULT_KMAX_VALUES,
                     reps,
+                    out_dir,
                 ): route_id
                 for route_id in batch
             }
@@ -282,12 +400,12 @@ def main() -> None:
             for future in as_completed(futures):
                 route_id = futures[future]
                 try:
-                    df_raw, df_summary = future.result()
+                    df_raw, df_summary, flight_mappings = future.result()
                     elapsed = time.perf_counter() - start_times[route_id]
                     logger.info(f"[{route_id}] Sweep completed in {elapsed:.2f}s.")
 
                     _save_route_results(
-                        route_id, df_raw, df_summary, out_dir, route_data_cache, args.dry_run
+                        route_id, df_raw, df_summary, flight_mappings, out_dir, route_data_cache, args.dry_run
                     )
                     completed_raw.append(df_raw)
                     completed_summary.append(df_summary)

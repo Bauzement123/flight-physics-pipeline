@@ -11,7 +11,8 @@ from src.common.config import (
     BASE_DIR,
     GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_STABILITY_REGISTRY,
-    GLOBAL_MODEL_REGISTRY
+    GLOBAL_MODEL_REGISTRY,
+    GLOBAL_FLIGHT_CLUSTER_MAP
 )
 
 logger = logging.getLogger(__name__)
@@ -346,6 +347,47 @@ def batch_register_corridors(route_results: list) -> None:
     df_updated = pd.concat([df, df_new], ignore_index=True) if not df.empty else df_new
     save_model_registry(df_updated)
     logger.info(f"Batch-registered corridors: {len(new_entries)} records across {len(route_results)} routes.")
+
+    # Write flight-to-cluster mappings to GLOBAL_FLIGHT_CLUSTER_MAP
+    batch_register_flight_cluster_map(route_results)
+
+
+def batch_register_flight_cluster_map(route_results: list) -> None:
+    """
+    Appends flight_id to cluster_id mappings from multiple route results to the global flight cluster map.
+    """
+    all_mappings = []
+    for res in route_results:
+        mappings = res.get("flight_mappings")
+        if mappings:
+            all_mappings.extend(mappings)
+
+    if not all_mappings:
+        return
+
+    df_new = pd.DataFrame(all_mappings)
+
+    # Rename 'route' to 'route_id' if present, to keep columns standard
+    if "route" in df_new.columns and "route_id" not in df_new.columns:
+        df_new = df_new.rename(columns={"route": "route_id"})
+
+    path = GLOBAL_FLIGHT_CLUSTER_MAP
+    if path.exists():
+        try:
+            df_reg = pd.read_parquet(path)
+            # Standardize columns for concatenation
+            if "route" in df_reg.columns and "route_id" not in df_reg.columns:
+                df_reg = df_reg.rename(columns={"route": "route_id"})
+            df_updated = pd.concat([df_reg, df_new]).drop_duplicates(subset=['flight_id'], keep='last')
+        except Exception as e:
+            logger.warning(f"Could not read flight cluster map, overwriting: {e}")
+            df_updated = df_new
+    else:
+        df_updated = df_new
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df_updated.to_parquet(path, index=False)
+    logger.info(f"Batch-updated flight cluster map with {len(all_mappings)} entries.")
 
 
 def load_synthesized_paths_map() -> dict[tuple[str, int], Path]:

@@ -401,6 +401,7 @@ def cluster_from_prepared(
     # Step 5: Per-cluster medoid selection + corridor save
     cluster_sizes = np.bincount(labels, minlength=optimal_k)
     corridors = []
+    medoid_flight_ids = set()
 
     for cluster_id in range(optimal_k):
         cluster_mask = labels == cluster_id
@@ -414,6 +415,7 @@ def cluster_from_prepared(
             medoid_idx = _select_medoid(X_pca, cluster_mask, is_clean_flags)
             medoid_flight = normalized_flights[medoid_idx]
             medoid_flight_id = getattr(medoid_flight, "flight_id", None) or str(medoid_idx)
+            medoid_flight_ids.add(medoid_flight_id)
         except Exception as exc:
             logger.error(f"Route {route_id} cluster {cluster_id}: medoid selection failed: {exc}")
             continue
@@ -455,6 +457,19 @@ def cluster_from_prepared(
         logger.error(f"Route {route_id}: {r['error_msg']}")
         return r
 
+    # Build flight-to-cluster mappings with is_medoid flag
+    flight_mappings = []
+    for idx, flight in enumerate(normalized_flights):
+        flight_id = getattr(flight, "flight_id", None) or str(idx)
+        cluster_id = int(labels[idx])
+        flight_mappings.append({
+            "flight_id": flight_id,
+            "route_id": route_id,
+            "cluster_id": cluster_id,
+            "route_class": route_class,
+            "is_medoid": flight_id in medoid_flight_ids
+        })
+
     timing = time.perf_counter() - t_start
     logger.info(f"Route {route_id}: clustering complete in {timing:.2f}s ({len(corridors)} corridors)")
     return dict(
@@ -464,6 +479,7 @@ def cluster_from_prepared(
         silhouette_score=float(best_silhouette) if not np.isnan(best_silhouette) else None,
         route_class=route_class,
         corridors=corridors,
+        flight_mappings=flight_mappings,
         error_msg=None,
         timing_seconds=round(timing, 3),
     )

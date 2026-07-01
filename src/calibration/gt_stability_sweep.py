@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES
+from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.corridor_modeling.pca_compressor import (
@@ -81,9 +81,110 @@ def _compute_geometric_error(sample_medoid_vecs: np.ndarray, oracle_medoid_vecs:
     return 0.5 * (float(np.mean(err_s_to_o)) + float(np.mean(err_o_to_s)))
 
 
+def _save_oracle_corridor(
+    flight,
+    dep: str,
+    arr: str,
+    cluster_id: int,
+    route_class: int,
+    optimal_k: int,
+    time_grid_seconds: int = 60,
+) -> Path:
+    from src.common.config import CORRIDOR_PATHS_DIR
+    from src.common.adapters import traffic_to_pycontrails, pycontrails_to_parquet
+    from pycontrails import Flight
+
+    corridor_flight_id = f"oracle_{dep}-{arr}_corridor_c{cluster_id}"
+    out_path = CORRIDOR_PATHS_DIR / f"oracle_{dep}-{arr}_corridor_c{cluster_id}.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    attrs = {
+        "flight_id": corridor_flight_id,
+        "icao24": "ORACLE",
+        "callsign": "ORACLE",
+        "route_class": route_class,
+        "cluster_id": cluster_id,
+        "optimal_k": optimal_k,
+    }
+
+    pyc_flight = traffic_to_pycontrails(flight, typecode="B738", drop_kinematics=True, **attrs)
+    resampled = pyc_flight.resample_and_fill(freq=f"{time_grid_seconds}s")
+
+    df_final = resampled.to_dataframe()
+    delta = df_final["time"] - df_final["time"].min()
+    df_final["time"] = pd.Timestamp("2025-01-01 00:00:00") + delta
+    df_final["route_class"] = route_class
+    df_final["cluster_id"] = cluster_id
+
+    final_flight = Flight(data=df_final, crs="EPSG:4326", **attrs)
+    pycontrails_to_parquet(final_flight, out_path)
+    return out_path
+
+
 def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
     """Loads all flights for route_id and computes Oracle ground truth corridors."""
-    logger.info(f"  [{route_id}] computing Oracle Ground Truth...")
+    oracle_route_id = f"ORACLE_{route_id}"
+    from src.common.registry_utils import load_model_registry
+    
+    cached_model = None
+    if GLOBAL_MODEL_REGISTRY.exists():
+        try:
+            df_model = load_model_registry()
+            df_route = df_model[df_model["route_id"] == oracle_route_id]
+            if not df_route.empty:
+                cached_model = df_route
+        except Exception as e:
+            logger.warning(f"Could not read model registry for Oracle cache check: {e}")
+            
+    cache_hit = False
+    if cached_model is not None:
+        cache_hit = True
+        for _, row in cached_model.iterrows():
+            fp = BASE_DIR / row["file_path"]
+            if not fp.exists():
+                cache_hit = False
+                break
+                
+    if cache_hit:
+        logger.info(f"  [{route_id}] Oracle loaded from cache (Registry & Corridor Parquet files exist).")
+        k_oracle = int(cached_model["optimal_k"].iloc[0])
+        r_class = int(cached_model["route_class"].iloc[0])
+        n_flights = int(cached_model["cluster_size"].sum())
+        
+        oracle_medoid_flights = []
+        for _, row in cached_model.iterrows():
+            fp = BASE_DIR / row["file_path"]
+            from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic
+            flights_dict = parquet_to_pycontrails(str(fp))
+            for fl in flights_dict.values():
+                oracle_medoid_flights.append(pycontrails_to_traffic(fl))
+        
+        oracle_medoid_vecs = vectorize_cohort(oracle_medoid_flights)
+        
+        # Load raw cohort details anyway, as they are needed for parameter sweep subsampling
+        logger.info(f"  [{route_id}] Loading cohort for variational sweep...")
+        flights = _load_route_flights(route_id, n_target=9999, registry_df=registry_df)
+        if not flights:
+            raise RuntimeError(f"No flights found for route {route_id}")
+        norm_flights, is_clean = classify_and_normalize_cohort(flights)
+        if not norm_flights:
+            raise RuntimeError(f"No flights survived normalization for {route_id}")
+        X_raw = vectorize_cohort(norm_flights)
+        X_scaled, mean_vec, std_vec = normalize_vectors(X_raw)
+        
+        return {
+            "route_id": route_id,
+            "n_flights": n_flights,
+            "norm_flights": norm_flights,
+            "is_clean": is_clean,
+            "X_raw": X_raw,
+            "X_scaled": X_scaled,
+            "k_oracle": k_oracle,
+            "route_class": r_class,
+            "oracle_medoid_vecs": oracle_medoid_vecs,
+        }
+
+    logger.info(f"  [{route_id}] computing Oracle Ground Truth from scratch...")
     flights = _load_route_flights(route_id, n_target=9999, registry_df=registry_df)
     if not flights:
         raise RuntimeError(f"No flights found for route {route_id}")
@@ -110,6 +211,61 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
     oracle_medoid_vecs = X_raw[oracle_medoid_indices]
 
     logger.info(f"  [{route_id}] Oracle established: N={n_avail}, k={k_oracle}, class={r_class}")
+
+    # Save Oracle corridors and build corridors data for registration
+    dep, arr = route_id.split("-", 1)
+    corridor_records = []
+    for c_id in range(k_oracle):
+        m_idx = oracle_medoid_indices[c_id]
+        medoid_flight = norm_flights[m_idx]
+        medoid_flight_id = getattr(medoid_flight, "flight_id", None) or str(m_idx)
+        
+        out_path = _save_oracle_corridor(medoid_flight, dep, arr, c_id, r_class, k_oracle)
+        
+        try:
+            rel_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
+        except ValueError:
+            rel_path = out_path.resolve().as_posix()
+            
+        corridor_records.append({
+            "cluster_id": c_id,
+            "cluster_size": int(np.sum(labels_oracle == c_id)),
+            "medoid_historical_flight_id": medoid_flight_id,
+            "corridor_flight_id": f"oracle_{route_id}_corridor_c{c_id}",
+            "file_path": rel_path
+        })
+
+    # Register in GLOBAL_MODEL_REGISTRY using batch_register_corridors
+    from src.common.registry_utils import batch_register_corridors
+    oracle_res = {
+        "route_id": f"ORACLE_{route_id}",
+        "optimal_k": k_oracle,
+        "silhouette_score": float(sil_oracle) if not np.isnan(sil_oracle) else None,
+        "route_class": r_class,
+        "corridors": corridor_records,
+        "status": "ok"
+    }
+    batch_register_corridors([oracle_res])
+
+    # Register flight assignments in GLOBAL_FLIGHT_CLUSTER_MAP
+    from src.common.registry_utils import batch_register_flight_cluster_map
+    oracle_flight_mappings = []
+    medoid_flight_ids = {corr["medoid_historical_flight_id"] for corr in corridor_records}
+    for idx_fl, flight in enumerate(norm_flights):
+        flight_id = getattr(flight, "flight_id", None) or str(idx_fl)
+        cluster_id = int(labels_oracle[idx_fl])
+        oracle_flight_mappings.append({
+            "flight_id": flight_id,
+            "route_id": f"ORACLE_{route_id}",
+            "cluster_id": cluster_id,
+            "route_class": r_class,
+            "is_medoid": flight_id in medoid_flight_ids
+        })
+    
+    batch_register_flight_cluster_map([{
+        "flight_mappings": oracle_flight_mappings
+    }])
+
     return {
         "route_id": route_id,
         "n_flights": n_avail,

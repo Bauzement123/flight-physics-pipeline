@@ -24,6 +24,7 @@ from openap.phase import FlightPhase
 from src.common.config import (
     BASE_DIR, CORRIDOR_PATHS_DIR,
     GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
+    GLOBAL_FLIGHT_CLUSTER_MAP
 )
 from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger
@@ -433,15 +434,14 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
                 "flight_id": fl_item.flight_id,
                 "route": f"{dep}-{arr}",
                 "cluster_id": cluster_id,
-                "route_class": route_class
+                "route_class": route_class,
+                "is_medoid": False
             })
             
         final_output_paths.append(str(out_path))
         logger.info(f"✓ Synthesized flight saved and registered: {out_path.name}")
         
-    # Flight-to-cluster mapping removed: GLOBAL_FLIGHT_CLUSTER_MAP was write-only
-    # and has been removed from the pipeline. Medoid flight_id is stored directly
-    # in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+    update_flight_cluster_map(GLOBAL_FLIGHT_CLUSTER_MAP, flight_mappings)
 
     return final_output_paths
 

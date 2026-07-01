@@ -29,8 +29,9 @@ GLOBAL_SIMULATION_REGISTRY = REGISTRIES_DIR / "global_simulation_registry.parque
 GLOBAL_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
 GLOBAL_CORRIDOR_SIM_REGISTRY = REGISTRIES_DIR / "global_corridor_simulation_registry.parquet"
 GLOBAL_STABILITY_REGISTRY = REGISTRIES_DIR / "global_stability_registry.parquet"
-# Note: GLOBAL_FLIGHT_CLUSTER_MAP removed. Medoid flight_id is stored per-cluster
-# directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+GLOBAL_FLIGHT_CLUSTER_MAP = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+CALIBRATION_FLIGHT_CLUSTER_MAP = DATA_DIR / "calibration" / "calibration_flight_cluster_map.parquet"
+# Note: Medoid flight_id is also stored per-cluster directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
 
 # PCA Calibration Constants
 # D_PCA and N_STANDARD are sentinel placeholders (-1). Run the Phase A/B
