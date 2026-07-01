@@ -64,12 +64,21 @@ def _trajectory_distance_km(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
 
 
 def _compute_geometric_error(sample_medoid_vecs: np.ndarray, oracle_medoid_vecs: np.ndarray) -> float:
-    """Computes mean distance from each sample medoid to the closest Oracle medoid."""
-    errs = []
+    """Computes symmetric Chamfer distance between sample and oracle medoids."""
+    if len(sample_medoid_vecs) == 0 or len(oracle_medoid_vecs) == 0:
+        return 0.0
+
+    err_s_to_o = []
     for s_vec in sample_medoid_vecs:
         min_d = min(_trajectory_distance_km(s_vec, o_vec) for o_vec in oracle_medoid_vecs)
-        errs.append(min_d)
-    return float(np.mean(errs)) if errs else 0.0
+        err_s_to_o.append(min_d)
+
+    err_o_to_s = []
+    for o_vec in oracle_medoid_vecs:
+        min_d = min(_trajectory_distance_km(o_vec, s_vec) for s_vec in sample_medoid_vecs)
+        err_o_to_s.append(min_d)
+
+    return 0.5 * (float(np.mean(err_s_to_o)) + float(np.mean(err_o_to_s)))
 
 
 def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
@@ -109,6 +118,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         "X_raw": X_raw,
         "X_scaled": X_scaled,
         "k_oracle": k_oracle,
+        "route_class": r_class,
         "oracle_medoid_vecs": oracle_medoid_vecs,
     }
 

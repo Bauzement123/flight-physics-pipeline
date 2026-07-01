@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_N0_VALUES = [16, 24, 32, 48, 64]
 DEFAULT_TAU_VALUES = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
-DEFAULT_KMAX_VALUES = [1, 2, 4, 6, 8]  # Includes K=1 for unimodal routes like EGLL-BIKF
+DEFAULT_KMAX_VALUES = [1, 2, 3, 4]  # Reduced for faster evaluation
 DEFAULT_REPLICATES = 30
 MAX_RERUNS = 2
 CALIBRATION_OUT_DIR = BASE_DIR / "data" / "calibration"
@@ -252,10 +252,12 @@ def main() -> None:
     completed_raw: list[pd.DataFrame] = []
     completed_summary: list[pd.DataFrame] = []
     start_times = {r: time.perf_counter() for r in pending_routes}
+    
+    limit_reached = False
 
     while pending_routes:
-        batch = list(pending_routes)
-        pending_routes.clear()
+        batch = pending_routes[:current_workers]
+        pending_routes = pending_routes[current_workers:]
 
         print("\n" + "="*95)
         print(f"DISPATCHING {len(batch)} ROUTE(S) (max_workers={current_workers})")
@@ -302,6 +304,7 @@ def main() -> None:
                         logger.error(f"[{route_id}] Fatal sweep error (not OOM, not retrying): {exc}")
 
         if oom_occurred:
+            limit_reached = True
             new_workers = max(1, current_workers - 1)
             if new_workers < current_workers:
                 logger.warning(
@@ -316,6 +319,12 @@ def main() -> None:
                     f"Aborting {len(pending_routes)} route(s): {pending_routes}"
                 )
                 break
+        elif not limit_reached:
+            new_workers = min(current_workers + 1, os.cpu_count() or 1, len(route_data_cache))
+            if new_workers > current_workers:
+                logger.info(f"No OOM detected. Aggressively scaling workers {current_workers} -> {new_workers}.")
+                current_workers = new_workers
+
 
     # 4. Write combined summary
     if completed_raw and not args.dry_run:

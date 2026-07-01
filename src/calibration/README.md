@@ -4,9 +4,9 @@ This module handles the calibration of key hyperparameters ($D_{PCA}$, $N_{stand
 
 The calibration workflow consists of two main campaigns:
 1. **Phase A Calibration (`phase_a_d_pca.py`)**: Evaluates fully-fetched cohorts across calibration routes to determine the minimum number of PCA components ($D_{PCA}$) required to capture at least 95% of spatial coordinate variance.
-2. **Phase B / 3D Variational Calibration (`variational_orchestrator.py`)**: Runs grid sweeps across initial query size ($N_0$), stability threshold ($\tau$), and maximum clusters ($K_{max}$) to locate the Pareto frontier of minimum Trino database query costs versus minimum geometric error.
+2. **Phase B / 3D Variational Calibration (`variational_orchestrator.py`)**: Runs grid sweeps across initial query size ($N_0$), stability threshold ($\tau$), and maximum clusters ($K_{max}$) to locate the Pareto frontier of expected query costs versus geometric error.
 
-All outcomes, including summary tables, scatter plots, Pareto frontiers, and multi-page PDF reports, are written to the centralized `data/calibration/` folder.
+All outcomes, including summary tables, scatter plots, Pareto frontiers, heatmaps, and multi-page PDF reports, are written to the centralized `data/calibration/` folder (or a custom directory specified via the CLI).
 
 ---
 
@@ -15,10 +15,10 @@ All outcomes, including summary tables, scatter plots, Pareto frontiers, and mul
 ```text
 src/calibration/
 ├── __init__.py                # Standard python package initialization
-├── README.md                  # This documentation file
+├── README.md                  # This documentation file (highly precise technical guide)
 ├── phase_a_d_pca.py           # Phase A: PCA dimension determination (D_PCA)
 ├── gt_stability_sweep.py      # Ground Truth geometric error vs. stability metric sweep
-├── variational_orchestrator.py # 3D Variational parameter sweep orchestrator (grid search)
+├── variational_orchestrator.py # 3D Variational parameter sweep orchestrator (grid search & concurrency)
 └── variational_plots.py       # Visualization & PDF report compiler for parameter sweeps
 ```
 
@@ -44,17 +44,19 @@ Module Objectives
       │    └── Solution: main() in variational_orchestrator.py
       │         ├── Inputs: route data, parameter grids (N0, tau, Kmax), bootstrap replicates
       │         ├── Outputs: raw/summary variational grid CSVs, combined all-route summary
-      │         └── Concurrency: Oracle baselines prepared sequentially; route sweeps dispatched concurrently via ProcessPoolExecutor (max_workers = min(n_routes, cpu_count))
+      │         └── Concurrency: Oracle baselines prepared sequentially; route sweeps dispatched 
+      │                          concurrently via an OOM-resilient, dynamically scaling ProcessPoolExecutor
       │
-      ├── Sub-objective 4: Compile visual report dashboards
+      ├── Sub-objective 4: Compile visual report dashboards with Oracle Class and Pareto Frontiers
       │    └── Solution: generate_route_pdf_report() in variational_plots.py
-      │         ├── Inputs: route variational summary, Oracle configuration parameters
+      │         ├── Inputs: route variational summary, Oracle configuration parameters (including route_class)
       │         └── Outputs: multi-page PDF reports containing Pareto plots, summary tables, and heatmaps
       │
       └── Sub-objective 5: Compute physical 3D deviation metrics
-           └── Solution: _trajectory_distance_km() in gt_stability_sweep.py
-                ├── Inputs: two 300-dimensional resampled waypoint vectors (lat, lon, alt)
-                └── Outputs: mean 3D spatial waypoint deviation in kilometers
+           └── Solution: _compute_geometric_error() in gt_stability_sweep.py
+                ├── Inputs: sample_medoid_vecs, oracle_medoid_vecs
+                ├── Formula: Bidirectional Chamfer Distance (0.5 * (Mean(Sample->Oracle) + Mean(Oracle->Sample)))
+                └── Outputs: symmetric mean 3D spatial waypoint deviation in kilometers
 ```
 
 ---
@@ -86,19 +88,59 @@ graph TD
 ```
 
 #### Step-by-Step Description: Calibration Workflow
-1. **Phase A Ingestion & Preprocessing**: The `phase_a_d_pca.py` script queries the trajectory registry and loads the complete cohort of flights for 6 oversampled calibration routes. The flights are filtered to airborne phases and holding-pattern normalized.
+1. **Phase A Ingestion & Preprocessing**: The `phase_a_d_pca.py` script queries the trajectory registry and loads the complete cohort of flights for the centralized calibration routes. The flights are filtered to airborne phases and holding-pattern normalized.
 2. **Variance Evaluation**: The script vectorizes coordinates, runs PCA, and computes the minimum number of PCA components needed to capture at least 95% variance for each route. The median of these values is printed as the recommended `D_PCA`.
 3. **Config Constants Update**: The recommended `D_PCA` and its companion query cost `N_STANDARD = 5 * D_PCA` are manually updated in `src/common/config.py`.
-4. **GT Sweep Ingestion & Oracle Baseline**: Using the active configuration parameters, `gt_stability_sweep.py` loads the full flight cohorts to establish the "Oracle Ground Truth" medoids and optimal clusters for the calibration routes.
+4. **GT Sweep Ingestion & Oracle Baseline**: Using the active configuration parameters, `gt_stability_sweep.py` loads the full flight cohorts to establish the "Oracle Ground Truth" medoids and optimal clusters for the calibration routes. The oracle return dict contains `route_class` (derived from stability evaluation).
 5. **GT Bootstrap Sweep**: For different sample sizes ($N$), the script draws random subsets and compares their medoid centroids to the Oracle medoids, computing the 3D geometric deviation in kilometers. It also computes split-half stability metrics ($X_{scaled}$ vs. $X_{pca}$ split-half).
 6. **GT Outcomes Generation**: The script writes raw and aggregated CSV files and outputs line graphs of error-vs-$N$ and metric scatter plots to `data/calibration/`.
-7. **Variational Sweep Orchestration**: The `variational_orchestrator.py` script first prepares Oracle baselines for all routes sequentially (to avoid concurrent parquet I/O contention), then dispatches one `run_route_variational_sweep` task per route concurrently using a `ProcessPoolExecutor` with `max_workers = min(n_routes, cpu_count)`. Results are collected via `as_completed` and saved as individual route CSVs as they finish.
-8. **Iterative Pipeline Simulation**: For each parameter cell, the script simulates the Stage 2 stability loop (doubling $N$ if $\Delta$CV $\ge \tau$ up to a maximum of 2 rerun rounds) followed by Stage 3 clustering. The silhouette threshold (`SILHOUETTE_THRESHOLD`) is applied during `_evaluate_custom_k`, allowing $k=1$ to be returned for unimodal routes.
-9. **Visual Report Compiling**: The orchestrator invokes `generate_route_pdf_report` in `variational_plots.py` to compile a multi-page PDF report for each route containing:
-   * **Page 1**: Executive table listing the top 15 parameter configurations.
-   * **Page 2**: Scatter plot displaying the Pareto frontier (expected query cost vs. median geometric error).
-   * **Page 3+**: Error heatmaps for each $K_{max}$ value, with overlaid contour lines showing database query costs.
-10. **Combined Summary Flush**: Variational files are saved for each route, and combined files are flushed to `all_routes_variational_raw.csv` and `all_routes_variational_summary.csv`.
+7. **Variational Sweep Orchestration**: The `variational_orchestrator.py` script first prepares Oracle baselines for all routes sequentially (to avoid concurrent parquet I/O contention), then dispatches `run_route_variational_sweep` tasks in dynamic batches concurrently using a `ProcessPoolExecutor`.
+8. **Iterative Pipeline Simulation**: For each parameter cell, the script simulates the Stage 2 stability loop (doubling $N$ if $\Delta$CV $\ge \tau$ up to a maximum of 2 rerun rounds) followed by Stage 3 clustering.
+9. **Bidirectional Geometric Error Calculation**: Instead of a simple one-way minimum distance, error calculations are done using a symmetric Chamfer distance formula:
+   $$\text{Error} = \frac{1}{2} \left( \frac{1}{|S|} \sum_{s \in S} \min_{o \in O} d(s, o) + \frac{1}{|O|} \sum_{o \in O} \min_{s \in S} d(s, o) \right)$$
+   This ensures that $K=1$ configurations are appropriately penalized for failing to capture secondary or tertiary corridors (Recall penalty), correcting the historical bias towards over-simplifying multi-modal routes.
+10. **Visual Report Compiling**: The orchestrator invokes `generate_route_pdf_report` in `variational_plots.py` to compile a multi-page PDF report for each route containing:
+    * **Page 1**: Executive table listing the top 15 parameter configurations, including the ground-truth Oracle Class.
+    * **Page 2**: Scatter plot displaying the Pareto frontier (expected query cost vs. median geometric error).
+    * **Page 3+**: Error heatmaps for each $K_{max}$ value, with overlaid contour lines showing database query costs.
+11. **Combined Summary Flush**: Variational files are saved for each route, and combined files are flushed to `all_routes_variational_raw.csv` and `all_routes_variational_summary.csv`.
+
+---
+
+### 3.1. Performance Profile: Optimization & Memory Modes
+
+#### Standard vs. Low-Memory Concurrency Control
+Because each worker process loads ~500-700 MB of scientific libraries (`numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`) into memory, executing multiple routes concurrently can lead to Out-Of-Memory (OOM) situations on low-RAM environments. 
+
+To address this, `variational_orchestrator.py` uses an **Aggressive, OOM-Resilient Concurrency Scheduler**:
+* **Initial Allocation**: At startup, the scheduler reads total and available memory via `psutil`. It estimates the safe worker capacity:
+  $$\text{estimated\_workers} = \min\left(N_{\text{routes}}, \text{CPU Count}, \lfloor\text{Free RAM (GB)} / 0.6\rfloor\right)$$
+* **Aggressive Escalation**: The routes are chunked and dispatched in batches of size `current_workers`. If a batch finishes successfully with no MemoryErrors, the scheduler **increases** the worker count by 1 for the next batch to maximize hardware utilization, capped by the total remaining routes and CPU cores.
+* **OOM Pullback & Lock**: If any process encounters a `MemoryError` or `ProcessExpired` due to memory limits:
+  1. The failed route is immediately re-queued.
+  2. The worker count is scaled down: `current_workers = max(1, current_workers - 1)`.
+  3. A `limit_reached` flag is set to `True`, locking the worker count from scaling up again for the remainder of the run.
+
+---
+
+### 3.2. Metric & Progress Logging Formats
+
+The orchestrator logs detailed metrics to both stdout and a rolling `variational_orchestrator.log` file:
+
+* **Startup Memory Assessment**:
+  ```text
+  2026-07-01 13:46:57,817 - [3D-VARIATIONAL] - INFO - System: 7.3 GB total RAM, 2.1 GB free. Starting with max_workers=2.
+  ```
+* **Success and Concurrency Scaling**:
+  ```text
+  2026-07-01 13:54:10,853 - [3D-VARIATIONAL] - INFO - [EDDF-LIRF] Sweep completed in 83.93s.
+  2026-07-01 13:54:14,081 - [3D-VARIATIONAL] - INFO - No OOM detected. Aggressively scaling workers 2 -> 3.
+  ```
+* **OOM Event & Pullback Action**:
+  ```text
+  2026-07-01 13:55:12,104 - [3D-VARIATIONAL] - WARNING - [ESSA-LEMD] OOM/MemoryError at max_workers=4: [MemoryLimitExceeded]
+  2026-07-01 13:55:12,108 - [3D-VARIATIONAL] - WARNING - OOM detected. Scaling workers 4 -> 3. Re-queuing 2 route(s): ['ESSA-LEMD', 'LFRS-LFMN']
+  ```
 
 ---
 
@@ -119,11 +161,17 @@ python -m src.calibration.gt_stability_sweep \
     --k-replicates 30 \
     --table-only
 
-# 4. Run 3D Variational sweep orchestrator over all calibration routes
+# 4. Run 3D Variational sweep orchestrator over all calibration routes (default 30 replicates)
 python -m src.calibration.variational_orchestrator \
     --replicates 30
 
-# 5. Run dry-run variational sweep (1 route, 2 replicates) for verification
+# 5. Run variational sweep with custom replicates, output directory, and worker limit
+python -m src.calibration.variational_orchestrator \
+    --replicates 5 \
+    --out-dir "data/calibration/run_v2" \
+    --max-workers 4
+
+# 6. Run dry-run variational sweep (1 route, 2 replicates) for verification
 python -m src.calibration.variational_orchestrator \
     --replicates 2 \
     --dry-run
@@ -139,9 +187,10 @@ python -m src.calibration.phase_a_d_pca
 python -m src.calibration.gt_stability_sweep `
     --k-replicates 30
 
-# Run variational sweep orchestrator (30 replicates)
+# Run variational sweep orchestrator with custom output folder
 python -m src.calibration.variational_orchestrator `
-    --replicates 30
+    --replicates 5 `
+    --out-dir "data/calibration/run_v2"
 ```
 
 ---
@@ -161,6 +210,8 @@ python -m src.calibration.variational_orchestrator `
 | :--- | :--- | :--- | :--- |
 | `--replicates` | `int` | `30` | Number of bootstrap replicate simulations to run per parameter grid cell. |
 | `--dry-run` | `flag` | *False* | Enables dry-run mode: limits the sweep to 1 route, 2 replicates, and disables PDF report rendering. |
+| `--max-workers` | `int` | *None* | Sets an upper bound on starting process concurrency. If omitted, scales dynamically based on RAM/CPU. |
+| `--out-dir` | `str` | *None* | Custom destination directory for CSV logs and compiled PDF dashboards. Defaults to `data/calibration/`. |
 
 ---
 
@@ -171,9 +222,15 @@ python -m src.calibration.variational_orchestrator `
 * `numpy` (for matrix math, distance calculations, and scaling)
 * `scikit-learn` (for PCA and K-Means clustering)
 * `matplotlib` (for heatmaps, scatter plots, and multi-page PDF generation)
+* `psutil` (for CPU and RAM monitoring)
 
 ### Input Files
 * `data/flight_registry/registries/global_trajectory_registry.parquet` (provides trajectory paths)
-* Python modules `src.corridor_modeling.pca_compressor`, `src.corridor_modeling.clustering_worker`, and `src.corridor_modeling.stability_worker`.
+* Python modules:
+  * `src.common.config`
+  * `src.common.registry_io`
+  * `src.corridor_modeling.pca_compressor`
+  * `src.corridor_modeling.clustering_worker`
+  * `src.corridor_modeling.stability_worker`
 
 For physical units, coordinate transformations, and directory structure conventions, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
