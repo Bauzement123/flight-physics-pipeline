@@ -216,9 +216,18 @@ def run_route_variational_sweep(
 
 
 def _is_oom_error(exc: Exception) -> bool:
-    """Returns True if the exception looks like an out-of-memory failure."""
+    """Returns True if the exception looks like an out-of-memory or broken worker pool failure."""
+    import concurrent.futures
+    if isinstance(exc, (MemoryError, concurrent.futures.process.BrokenProcessPool)):
+        return True
     msg = str(exc).lower()
-    return isinstance(exc, MemoryError) or "memoryerror" in msg or "unable to allocate" in msg
+    return any(k in msg for k in [
+        "memoryerror",
+        "unable to allocate",
+        "terminated abruptly",
+        "brokenprocesspool",
+        "memory limit exceeded",
+    ])
 
 
 def _save_route_results(
@@ -315,6 +324,8 @@ def main() -> None:
                         help="Run 1 route, 2 replicates for sanity testing (no PDF output)")
     parser.add_argument("--max-workers", type=int, default=None,
                         help="Override the starting number of parallel process workers")
+    parser.add_argument("--disable-scale-up", action="store_true",
+                        help="Disable dynamic worker count-up scaling after successful batches")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Output directory for CSVs and PDFs (default: data/calibration/)")
     args = parser.parse_args()
@@ -478,7 +489,7 @@ def main() -> None:
                     f"Aborting {len(pending_routes)} route(s): {pending_routes}"
                 )
                 break
-        elif not limit_reached:
+        elif not limit_reached and not args.disable_scale_up:
             new_workers = min(current_workers + 1, os.cpu_count() or 1, len(route_data_cache))
             if new_workers > current_workers:
                 logger.info(f"No OOM detected. Aggressively scaling workers {current_workers} -> {new_workers}.")
