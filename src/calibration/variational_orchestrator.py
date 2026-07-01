@@ -21,22 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.calibration.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
 from src.calibration.variational_plots import generate_route_pdf_report
-from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD
+from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.corridor_modeling.clustering_worker import _select_medoid
 from src.corridor_modeling.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
-
-CALIBRATION_ROUTES = [
-    "EDDF-LIRF",
-    "EGLL-BIKF",
-    "ESSA-LEMD",
-    "ESSA-EHAM",
-    "LFRS-LFMN",
-    "LGSA-LGAV",
-]
 
 DEFAULT_N0_VALUES = [16, 24, 32, 48, 64]
 DEFAULT_TAU_VALUES = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
@@ -168,22 +159,59 @@ def run_route_variational_sweep(
     return df_raw, df_summary
 
 
+def _is_oom_error(exc: Exception) -> bool:
+    """Returns True if the exception looks like an out-of-memory failure."""
+    msg = str(exc).lower()
+    return isinstance(exc, MemoryError) or "memoryerror" in msg or "unable to allocate" in msg
+
+
+def _save_route_results(
+    route_id: str,
+    df_raw: pd.DataFrame,
+    df_summary: pd.DataFrame,
+    out_dir: Path,
+    route_data_cache: dict,
+    dry_run: bool,
+) -> None:
+    """Saves CSVs and the PDF report for a completed route sweep."""
+    df_raw.to_csv(out_dir / f"{route_id}_variational_raw.csv", index=False)
+    df_summary.to_csv(out_dir / f"{route_id}_variational_summary.csv", index=False)
+
+    if not dry_run:
+        pdf_path = generate_route_pdf_report(
+            route_id, df_summary, route_data_cache[route_id], out_dir
+        )
+        if pdf_path:
+            print(f"  -> Generated PDF Report: {pdf_path.name}")
+
+    best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
+    print(f"  Top Sub-15km Configs for {route_id}:")
+    for _, r in best_rows.iterrows():
+        print(f"    (N0={int(r['N_0'])}, tau={r['tau']:.2f}, Kmax={int(r['K_max'])}) -> "
+              f"AvgQueries={r['avg_queries']:.1f}, MedErr={r['median_geom_err_km']:.2f} km")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="3D Variational Parameter Orchestrator (Iterative Mode)")
-    parser.add_argument("--replicates", type=int, default=DEFAULT_REPLICATES)
-    parser.add_argument("--dry-run", action="store_true", help="Run 1 seed across 1 route for sanity testing")
+    parser.add_argument("--replicates", type=int, default=DEFAULT_REPLICATES,
+                        help="Bootstrap replicates per parameter cell (default: 30)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run 1 route, 2 replicates for sanity testing (no PDF output)")
+    parser.add_argument("--max-workers", type=int, default=None,
+                        help="Override the starting number of parallel process workers")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Output directory for CSVs and PDFs (default: data/calibration/)")
     args = parser.parse_args()
 
-    CALIBRATION_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir) if args.out_dir else CALIBRATION_OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     registry_df = load_trajectory_registry()
 
     routes_to_run = CALIBRATION_ROUTES[:1] if args.dry_run else CALIBRATION_ROUTES
     reps = 2 if args.dry_run else args.replicates
 
-    all_raw = []
-    all_summary = []
-
-    # 1. Prepare Oracles sequentially to avoid DB concurrent read overhead
+    # 1. Prepare Oracle baselines sequentially (avoids concurrent parquet I/O contention)
     route_data_cache = {}
     print("\n" + "="*95)
     print("PREPARING ORACLE BASELINES")
@@ -195,67 +223,108 @@ def main() -> None:
         except Exception as exc:
             logger.error(f"Failed to prepare Oracle for {route_id}: {exc}")
 
-    # 2. Run sweeps in parallel across routes
-    max_workers = min(len(route_data_cache), os.cpu_count() or 1)
-    print("\n" + "="*95)
-    print(f"STARTING VARIATIONAL SWEEP ACROSS {len(route_data_cache)} ROUTES (max_workers={max_workers})")
-    print("="*95)
+    if not route_data_cache:
+        logger.error("No routes prepared successfully. Aborting.")
+        return
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                run_route_variational_sweep,
-                route_id,
-                route_data,
-                DEFAULT_N0_VALUES,
-                DEFAULT_TAU_VALUES,
-                DEFAULT_KMAX_VALUES,
-                reps,
-            ): route_id
-            for route_id, route_data in route_data_cache.items()
-        }
+    # 2. Determine starting worker count from available memory and CPU count
+    if args.max_workers is not None:
+        current_workers = min(len(route_data_cache), args.max_workers)
+    else:
+        import psutil
+        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        free_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        # Each worker loads ~500-700 MB of scientific libraries into a fresh process.
+        # Estimate safe concurrency from available memory, bounded by CPU count and route count.
+        ram_based = max(1, int(free_ram_gb / 0.6))
+        cpu_based = os.cpu_count() or 1
+        current_workers = min(len(route_data_cache), ram_based, cpu_based)
+        logger.info(
+            f"System: {total_ram_gb:.1f} GB total RAM, {free_ram_gb:.1f} GB free. "
+            f"Starting with max_workers={current_workers}."
+        )
 
-        for future in as_completed(futures):
-            route_id = futures[future]
-            t0 = time.perf_counter()
-            try:
-                df_raw, df_summary = future.result()
-                elapsed = time.perf_counter() - t0
-                logger.info(f"[{route_id}] Sweep completed in {elapsed:.2f}s.")
+    # 3. OOM-resilient dispatch loop
+    # Maintains a queue of pending route IDs. On MemoryError, scales workers
+    # down by 1 and re-queues the failed route. Continues until all routes
+    # finish or worker count reaches 1 and still OOMs (gives up on that route).
+    pending_routes = list(route_data_cache.keys())
+    completed_raw: list[pd.DataFrame] = []
+    completed_summary: list[pd.DataFrame] = []
+    start_times = {r: time.perf_counter() for r in pending_routes}
 
-                # Save individual route CSVs
-                raw_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_raw.csv"
-                sum_path = CALIBRATION_OUT_DIR / f"{route_id}_variational_summary.csv"
-                df_raw.to_csv(raw_path, index=False)
-                df_summary.to_csv(sum_path, index=False)
+    while pending_routes:
+        batch = list(pending_routes)
+        pending_routes.clear()
 
-                # Generate individual route PDF
-                if not args.dry_run:
-                    pdf_path = generate_route_pdf_report(
-                        route_id, df_summary, route_data_cache[route_id], CALIBRATION_OUT_DIR
-                    )
-                    if pdf_path:
-                        print(f"  -> Generated PDF Report: {pdf_path.name}")
-
-                all_raw.append(df_raw)
-                all_summary.append(df_summary)
-
-                # Print top 3 configs for this route
-                best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
-                print(f"  Top Sub-15km Configs for {route_id}:")
-                for _, r in best_rows.iterrows():
-                    print(f"    (N0={int(r['N_0'])}, tau={r['tau']:.2f}, Kmax={int(r['K_max'])}) -> "
-                          f"AvgQueries={r['avg_queries']:.1f}, MedErr={r['median_geom_err_km']:.2f} km")
-            except Exception as exc:
-                logger.error(f"[{route_id}] Sweep task failed: {exc}")
-
-    if all_raw and not args.dry_run:
-        df_all_raw = pd.concat(all_raw, ignore_index=True)
-        df_all_summary = pd.concat(all_summary, ignore_index=True)
-        df_all_raw.to_csv(CALIBRATION_OUT_DIR / "all_routes_variational_raw.csv", index=False)
-        df_all_summary.to_csv(CALIBRATION_OUT_DIR / "all_routes_variational_summary.csv", index=False)
         print("\n" + "="*95)
-        print("ALL ROUTES COMPLETED. Combined summary saved to data/calibration/")
+        print(f"DISPATCHING {len(batch)} ROUTE(S) (max_workers={current_workers})")
+        print("="*95)
+
+        oom_occurred = False
+
+        with ProcessPoolExecutor(max_workers=current_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_route_variational_sweep,
+                    route_id,
+                    route_data_cache[route_id],
+                    DEFAULT_N0_VALUES,
+                    DEFAULT_TAU_VALUES,
+                    DEFAULT_KMAX_VALUES,
+                    reps,
+                ): route_id
+                for route_id in batch
+            }
+
+            for future in as_completed(futures):
+                route_id = futures[future]
+                try:
+                    df_raw, df_summary = future.result()
+                    elapsed = time.perf_counter() - start_times[route_id]
+                    logger.info(f"[{route_id}] Sweep completed in {elapsed:.2f}s.")
+
+                    _save_route_results(
+                        route_id, df_raw, df_summary, out_dir, route_data_cache, args.dry_run
+                    )
+                    completed_raw.append(df_raw)
+                    completed_summary.append(df_summary)
+
+                except Exception as exc:
+                    if _is_oom_error(exc):
+                        logger.warning(
+                            f"[{route_id}] OOM/MemoryError at max_workers={current_workers}: {exc}"
+                        )
+                        pending_routes.append(route_id)
+                        start_times[route_id] = time.perf_counter()  # reset timer for retry
+                        oom_occurred = True
+                    else:
+                        logger.error(f"[{route_id}] Fatal sweep error (not OOM, not retrying): {exc}")
+
+        if oom_occurred:
+            new_workers = max(1, current_workers - 1)
+            if new_workers < current_workers:
+                logger.warning(
+                    f"OOM detected. Scaling workers {current_workers} -> {new_workers}. "
+                    f"Re-queuing {len(pending_routes)} route(s): {pending_routes}"
+                )
+                current_workers = new_workers
+            else:
+                # Already at 1 worker and still OOM
+                logger.error(
+                    f"OOM persists at max_workers=1. Cannot scale further. "
+                    f"Aborting {len(pending_routes)} route(s): {pending_routes}"
+                )
+                break
+
+    # 4. Write combined summary
+    if completed_raw and not args.dry_run:
+        df_all_raw = pd.concat(completed_raw, ignore_index=True)
+        df_all_summary = pd.concat(completed_summary, ignore_index=True)
+        df_all_raw.to_csv(out_dir / "all_routes_variational_raw.csv", index=False)
+        df_all_summary.to_csv(out_dir / "all_routes_variational_summary.csv", index=False)
+        print("\n" + "="*95)
+        print(f"ALL ROUTES COMPLETED. Combined summary saved to {out_dir}/")
         print("="*95)
 
 

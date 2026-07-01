@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.common.config import BASE_DIR, D_PCA
+from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.corridor_modeling.pca_compressor import (
@@ -36,14 +36,6 @@ from src.corridor_modeling.stability_worker import _load_route_flights
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_ROUTES = [
-    "EDDF-LIRF",
-    "EGLL-BIKF",
-    "ESSA-LEMD",
-    "ESSA-EHAM",
-    "LFRS-LFMN",
-    "LGSA-LGAV",
-]
 
 DEFAULT_N_VALUES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 400]
 DEFAULT_K_REPLICATES = 30

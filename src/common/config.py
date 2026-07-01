@@ -53,6 +53,18 @@ CHAOS_VARIANCE_THRESHOLD  = 200.0  # Total coordinate variance above which k=1 i
 MIN_FLIGHTS_FOR_CLUSTERING = 3     # Minimum cohort size; below this k=1 is forced
 CORRIDOR_TIME_GRID_SECONDS = 60    # Temporal resolution of saved corridor parquets
 
+# Calibration Routes
+# Edit this list to control which routes are evaluated by phase_a_d_pca.py,
+# gt_stability_sweep.py, and variational_orchestrator.py.
+CALIBRATION_ROUTES: list[str] = [
+    "EDDF-LIRF",
+    "EGLL-BIKF",
+    "ESSA-LEMD",
+    "ESSA-EHAM",
+    "LFRS-LFMN",
+    "LGSA-LGAV",
+]
+
 # ROCD Classification Thresholds (ft/min)
 # Promoted from hardcoded literals in path_generator.py.
 ROCD_MIN_CLIMB_RATE   = 1800.0  # Minimum acceptable clean-flight climb rate
