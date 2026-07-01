@@ -2,7 +2,7 @@
 Visualization & PDF Report Helpers for Variational Parameter Sweeps.
 ====================================================================
 Generates per-route multi-page PDF reports containing Pareto frontiers,
-summary tables, and cost-contour error heatmaps.
+summary tables, cost-contour error heatmaps, and stacked cohort visualizations.
 """
 
 import logging
@@ -10,9 +10,10 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-
 import numpy as np
 import pandas as pd
+
+from src.calibration.plot_helpers import get_or_create_config_plot
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,8 @@ def generate_route_pdf_report(
     df_summary: pd.DataFrame,
     oracle_info: dict,
     out_dir: Path,
+    plots_per_page: int = 3,
+    pareto_df: pd.DataFrame = None,
 ) -> Path:
     """
     Compiles a comprehensive multi-page PDF report for a single route.
@@ -36,9 +39,23 @@ def generate_route_pdf_report(
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / f"{route_id}_variational_summary.pdf"
 
+    # 1. Compute or use provided non-dominated Pareto frontier points
+    if pareto_df is not None:
+        p_df = pareto_df
+    else:
+        pts = df_summary[["avg_queries", "median_geom_err_km", "N_0", "tau", "K_max", "p90_geom_err_km", "pct_conv_round0", "pct_maxed_out"]].sort_values("avg_queries")
+        pareto_pts = []
+        min_err_so_far = float("inf")
+        for _, row in pts.iterrows():
+            if row["median_geom_err_km"] < min_err_so_far:
+                pareto_pts.append(row)
+                min_err_so_far = row["median_geom_err_km"]
+
+        p_df = pd.DataFrame(pareto_pts) if pareto_pts else pd.DataFrame()
+
     with PdfPages(pdf_path) as pdf:
         # ---------------------------------------------------------
-        # PAGE 1: Title & Executive Summary Table (Top 15 Pareto)
+        # PAGE 1: Title & Executive Summary Table (Pareto Front Only)
         # ---------------------------------------------------------
         fig, ax = plt.subplots(figsize=(11, 8.5))
         ax.axis("off")
@@ -53,26 +70,26 @@ def generate_route_pdf_report(
         ax.text(0.5, 0.95, title_text, ha="center", va="top", fontsize=18, fontweight="bold")
         ax.text(0.5, 0.90, oracle_text, ha="center", va="top", fontsize=12, style="italic", color="#333333")
 
-        # Top 15 sorted by lowest geometric error under query budget, or overall Pareto
-        top_df = df_summary.sort_values(by=["median_geom_err_km", "avg_queries"]).head(15)
-
-        # Prepare table data
+        # Prepare table data from Pareto front points
         col_labels = [
             "N_0", "Tau", "K_max", "Avg Queries", 
             "Med Error (km)", "P90 Error (km)", "Conv R0 (%)", "Max Out (%)"
         ]
         table_vals = []
-        for _, row in top_df.iterrows():
-            table_vals.append([
-                int(row["N_0"]),
-                f"{row['tau']:.2f}",
-                int(row["K_max"]),
-                f"{row['avg_queries']:.1f}",
-                f"{row['median_geom_err_km']:.2f}",
-                f"{row['p90_geom_err_km']:.2f}",
-                f"{row['pct_conv_round0']:.1f}%",
-                f"{row['pct_maxed_out']:.1f}%",
-            ])
+        if not p_df.empty:
+            for _, row in p_df.iterrows():
+                table_vals.append([
+                    int(row["N_0"]),
+                    f"{row['tau']:.2f}",
+                    int(row["K_max"]),
+                    f"{row['avg_queries']:.1f}",
+                    f"{row['median_geom_err_km']:.2f}",
+                    f"{row['p90_geom_err_km']:.2f}",
+                    f"{row['pct_conv_round0']:.1f}%",
+                    f"{row['pct_maxed_out']:.1f}%",
+                ])
+        else:
+            table_vals.append(["N/A"] * len(col_labels))
 
         table = ax.table(
             cellText=table_vals,
@@ -93,7 +110,7 @@ def generate_route_pdf_report(
 
         ax.text(
             0.5, 0.08,
-            "Top 15 Parameter Configurations ranked by Median 3D Geometric Error (km) against Oracle Ground Truth.",
+            "Non-Dominated Pareto-Optimal Parameter Configurations (Query Cost vs. Physical 3D Error).",
             ha="center", va="center", fontsize=10, style="italic"
         )
         pdf.savefig(fig)
@@ -118,17 +135,7 @@ def generate_route_pdf_report(
                 edgecolors="k",
             )
 
-        # Compute non-dominated Pareto frontier
-        pts = df_summary[["avg_queries", "median_geom_err_km", "N_0", "tau", "K_max"]].sort_values("avg_queries")
-        pareto_pts = []
-        min_err_so_far = float("inf")
-        for _, row in pts.iterrows():
-            if row["median_geom_err_km"] < min_err_so_far:
-                pareto_pts.append(row)
-                min_err_so_far = row["median_geom_err_km"]
-
-        if pareto_pts:
-            p_df = pd.DataFrame(pareto_pts)
+        if not p_df.empty:
             ax.plot(p_df["avg_queries"], p_df["median_geom_err_km"], "r--", linewidth=2, label="Pareto Frontier")
             for _, r in p_df.iterrows():
                 ax.annotate(
@@ -140,7 +147,7 @@ def generate_route_pdf_report(
                     bbox=dict(boxstyle="round,pad=0.2", fc="yellow", alpha=0.3)
                 )
 
-        ax.axhline(5.0, color="gray", linestyle=":", label="5 km Target Target")
+        ax.axhline(5.0, color="gray", linestyle=":", label="5 km Target")
         ax.set_xlabel("Expected Trino Query Cost (Average Flights Queried)", fontsize=12)
         ax.set_ylabel("Median 3D Geometric Error (km)", fontsize=12)
         ax.set_title(f"Pareto Frontier: Query Cost vs Physical Error ({route_id})", fontsize=15, fontweight="bold")
@@ -151,7 +158,83 @@ def generate_route_pdf_report(
         plt.close(fig)
 
         # ---------------------------------------------------------
-        # PAGES 3+: Cost-Contour Heatmaps per K_max
+        # PAGES 3+: Stacked Cohort Visualizations
+        # ---------------------------------------------------------
+        # 3.1. Build list of items to visualize: Oracle first, then Pareto configs
+        vis_items = []
+        
+        # Load Oracle
+        try:
+            oracle_path = get_or_create_config_plot(
+                route_id=route_id,
+                config_type="ORACLE",
+                n0=-1,
+                tau=-1.0,
+                kmax=-1,
+                replicate=-1
+            )
+            if oracle_path.exists():
+                vis_items.append({
+                    "title": f"Oracle Ground Truth Baseline (N = {oracle_info.get('n_flights', 400)}, K = {oracle_info.get('k_oracle', 'N/A')}, Class = {oracle_info.get('route_class', 'N/A')})",
+                    "path": oracle_path
+                })
+        except Exception as e:
+            logger.error(f"Could not load/create Oracle plot for PDF report: {e}")
+
+        # Load Pareto points
+        if not p_df.empty:
+            for _, row in p_df.iterrows():
+                n0_val = int(row["N_0"])
+                tau_val = float(row["tau"])
+                kmax_val = int(row["K_max"])
+                try:
+                    p_path = get_or_create_config_plot(
+                        route_id=route_id,
+                        config_type="PARETO",
+                        n0=n0_val,
+                        tau=tau_val,
+                        kmax=kmax_val,
+                        replicate=0
+                    )
+                    if p_path.exists():
+                        vis_items.append({
+                            "title": f"Pareto Config: N0 = {n0_val}, tau = {tau_val:.2f}, Kmax = {kmax_val} | Avg Queries: {row['avg_queries']:.1f} | Med Error: {row['median_geom_err_km']:.2f} km",
+                            "path": p_path
+                        })
+                except Exception as e:
+                    logger.error(f"Could not load/create Pareto plot ({n0_val}, {tau_val:.2f}, {kmax_val}) for PDF report: {e}")
+
+        # 3.2. Chunk items and render them stacked vertically
+        num_items = len(vis_items)
+        if num_items > 0:
+            for idx_start in range(0, num_items, plots_per_page):
+                fig, axes = plt.subplots(plots_per_page, 1, figsize=(8.5, 11))
+                if plots_per_page == 1:
+                    axes = [axes]
+                
+                # Page Header
+                fig.suptitle(f"Cohort Clustering Visualizations: {route_id}", fontsize=14, fontweight="bold", y=0.98)
+
+                for box_idx in range(plots_per_page):
+                    ax = axes[box_idx]
+                    item_idx = idx_start + box_idx
+                    if item_idx < num_items:
+                        item = vis_items[item_idx]
+                        try:
+                            img = plt.imread(str(item["path"]))
+                            ax.imshow(img)
+                            ax.set_title(item["title"], fontsize=10, fontweight="bold", pad=5)
+                        except Exception as e:
+                            logger.error(f"Failed to display image in PDF sub-box: {e}")
+                            ax.text(0.5, 0.5, f"Error loading plot image:\n{item['path'].name}", ha="center", va="center")
+                    ax.axis("off")
+                
+                fig.tight_layout(rect=[0, 0, 1, 0.95])
+                pdf.savefig(fig, dpi=150)
+                plt.close(fig)
+
+        # ---------------------------------------------------------
+        # PAGES X+: Cost-Contour Heatmaps per K_max
         # ---------------------------------------------------------
         for k in k_vals:
             sub = df_summary[df_summary["K_max"] == k]

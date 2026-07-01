@@ -230,18 +230,11 @@ def _save_route_results(
     route_data_cache: dict,
     dry_run: bool,
 ) -> None:
-    """Saves CSVs and the PDF report for a completed route sweep."""
+    """Saves CSVs, generates cohort plots, and compiles the PDF report."""
     df_raw.to_csv(out_dir / f"{route_id}_variational_raw.csv", index=False)
     df_summary.to_csv(out_dir / f"{route_id}_variational_summary.csv", index=False)
 
-    if not dry_run:
-        pdf_path = generate_route_pdf_report(
-            route_id, df_summary, route_data_cache[route_id], out_dir
-        )
-        if pdf_path:
-            print(f"  -> Generated PDF Report: {pdf_path.name}")
-
-    # Save flight mappings to CALIBRATION_FLIGHT_CLUSTER_MAP
+    # 1. Save flight mappings to CALIBRATION_FLIGHT_CLUSTER_MAP first
     if flight_mappings:
         df_new = pd.DataFrame(flight_mappings)
         if CALIBRATION_FLIGHT_CLUSTER_MAP.exists():
@@ -258,6 +251,54 @@ def _save_route_results(
         CALIBRATION_FLIGHT_CLUSTER_MAP.parent.mkdir(parents=True, exist_ok=True)
         df_updated.to_parquet(CALIBRATION_FLIGHT_CLUSTER_MAP, index=False)
         logger.info(f"Saved {len(df_new)} flight mappings to calibration cluster map.")
+
+    # 2. Identify Pareto frontier points and batch generate plots post-simulation
+    if not dry_run:
+        pts = df_summary.sort_values("avg_queries")
+        pareto_pts = []
+        min_err_so_far = float("inf")
+        for _, row in pts.iterrows():
+            if row["median_geom_err_km"] < min_err_so_far:
+                pareto_pts.append(row)
+                min_err_so_far = row["median_geom_err_km"]
+
+        pareto_df = pd.DataFrame(pareto_pts) if pareto_pts else pd.DataFrame()
+
+        # Build task list
+        plot_tasks = []
+        # Add Oracle task
+        plot_tasks.append({
+            "route_id": route_id,
+            "config_type": "ORACLE",
+            "n0": -1,
+            "tau": -1.0,
+            "kmax": -1,
+            "replicate": -1
+        })
+        # Add Pareto tasks (replicate 0)
+        for _, p_row in pareto_df.iterrows():
+            plot_tasks.append({
+                "route_id": route_id,
+                "config_type": "PARETO",
+                "n0": int(p_row["N_0"]),
+                "tau": float(p_row["tau"]),
+                "kmax": int(p_row["K_max"]),
+                "replicate": 0
+            })
+
+        # Run batch plot generation
+        from src.calibration.plot_helpers import batch_generate_plots
+        try:
+            batch_generate_plots(plot_tasks)
+        except Exception as e:
+            logger.error(f"Error during batch plot generation for {route_id}: {e}", exc_info=True)
+
+        # 3. Generate PDF Report
+        pdf_path = generate_route_pdf_report(
+            route_id, df_summary, route_data_cache[route_id], out_dir, pareto_df=pareto_df
+        )
+        if pdf_path:
+            print(f"  -> Generated PDF Report: {pdf_path.name}")
 
     best_rows = df_summary[df_summary["median_geom_err_km"] <= 15.0].sort_values("avg_queries").head(3)
     print(f"  Top Sub-15km Configs for {route_id}:")
