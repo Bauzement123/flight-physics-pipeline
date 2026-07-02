@@ -256,6 +256,21 @@ def build_master_population(
             
     logging.info(f"SUCCESS: Saved unified master population ({len(df_all):,} flights) to: {output_path}")
 
+    # 4. Resolve coordinates for all unique airports in this master population
+    try:
+        logging.info("Building deduplicated list of airports from master population...")
+        dep_airports = df_all['estdepartureairport'].dropna().unique()
+        arr_airports = df_all['estarrivalairport'].dropna().unique()
+        unique_airports = list(set(dep_airports) | set(arr_airports))
+        # Filter to valid 4-letter ICAOs
+        unique_airports = [a for a in unique_airports if isinstance(a, str) and len(a.strip()) == 4]
+        
+        logging.info(f"Found {len(unique_airports)} unique airports. Auto-enriching coordinates cache...")
+        from src.analysis.verification.summarize_population import resolve_airport_coordinates
+        resolve_airport_coordinates(unique_airports)
+    except Exception as e:
+        logging.error(f"Failed to auto-resolve airport coordinates: {e}")
+
 if __name__ == "__main__":
     setup_file_logger(log_filename="acquisition.log")
     parser = argparse.ArgumentParser(description="Build Flight Master Population from Trino")
