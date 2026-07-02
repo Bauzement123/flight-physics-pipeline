@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 # Import Central Configurations
 from src.common.config import BASE_DIR, GLOBAL_MODEL_REGISTRY
 from src.common.registry_utils import load_model_registry
+from src.common.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 

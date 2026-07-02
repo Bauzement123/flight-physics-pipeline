@@ -101,21 +101,33 @@ def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     
-    # Ensure velocity, baroaltitude and vertrate columns exist and are numeric
-    for col in ['baroaltitude', 'velocity', 'vertrate']:
+    # Ensure velocity, baroaltitude, vertrate and time columns exist
+    for col in ['baroaltitude', 'velocity', 'vertrate', 'time']:
         if col not in df.columns:
             df['flight_phase'] = None
             return df
             
     try:
         from openap.phase import FlightPhase
+        from src.common.adapters import df_si_to_df_nautic
+        
+        # Sort chronologically to compute correct elapsed time sequence
+        df_sorted = df.sort_values('time')
+        
+        # Convert SI to standard aviation units using the shared adapter
+        df_nautic = df_si_to_df_nautic(df_sorted)
+        
+        # Elapsed time sequence starting at 0
+        ts = (df_sorted['time'] - df_sorted['time'].iloc[0]).values
+        alt = df_nautic['altitude'].values
+        spd = df_nautic['groundspeed'].values
+        roc = df_nautic['vertical_rate'].values
+        
         fp = FlightPhase()
-        phases = fp.phase(
-            df['baroaltitude'].values,   # altitude in feet
-            df['velocity'].values,        # ground speed m/s
-            df['vertrate'].values         # vertical rate m/s
-        )
-        df['flight_phase'] = phases       # 'GND', 'CL', 'CR', 'DE', 'LVL', 'NA'
+        fp.set_trajectory(ts, alt, spd, roc)
+        phases = fp.phaselabel()
+        
+        df.loc[df_sorted.index, 'flight_phase'] = phases
     except ImportError:
         df['flight_phase'] = None
     except Exception as e:

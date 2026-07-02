@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.common.config import FLIGHT_LISTS_DIR, ROUTE_SUMMARY_PARQUET, MASTER_FLIGHTS_FILE
-from src.common.utils import load_route_summary, split_route_string
+from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 
 # Configure logger
 logger = logging.getLogger(__name__)

@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 # Import configurations
 from src.common.config import BASE_DIR, ROUTE_SUMMARY_PARQUET
-from src.common.utils import load_route_summary
+from src.common.utils import load_route_summary, setup_file_logger
 
 logger = logging.getLogger(__name__)
 

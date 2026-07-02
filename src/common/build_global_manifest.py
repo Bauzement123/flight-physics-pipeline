@@ -10,6 +10,7 @@ from src.common.config import (
     GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY
 )
 from src.common.registry_utils import save_model_registry
+from src.common.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 

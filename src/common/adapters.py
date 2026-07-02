@@ -212,27 +212,43 @@ def parquet_to_pycontrails(path: str) -> dict:
             
     return flights
 
-def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
+def df_si_to_df_nautic(df_si: pd.DataFrame) -> pd.DataFrame:
     """
-    Transforms a pyc_flight object into an optimized traffic.core.Flight object
-    and converts SI units (meters, m/s, m/s) to standard aviation units (feet, knots, ft/min).
+    Converts a DataFrame containing state vectors in SI units
+    to a DataFrame containing state vectors in aviation/nautical units.
     """
-    from traffic.core import Flight as TrafficFlight
+    df = df_si.copy()
     
-    df = pyc_flight.to_dataframe().copy()
-    
-    # Map PyContrails columns back to Traffic expectations
-    if 'time' in df.columns:
-        df = df.rename(columns={'time': 'timestamp'})
-        
-    rename_back = {
+    # 1. Normalize column spelling variants to standard traffic/OpenAP names
+    rename_map = {
+        'time': 'timestamp',
+        'lat': 'latitude',
+        'lon': 'longitude',
+        'baroaltitude': 'altitude',
+        'geoaltitude': 'geoaltitude_nautic',
+        'velocity': 'groundspeed',
         'gs': 'groundspeed',
         'heading': 'track',
-        'rocd': 'vertical_rate',
+        'vertrate': 'vertical_rate',
+        'rocd': 'vertical_rate'
     }
-    df = df.rename(columns={k: v for k, v in rename_back.items() if k in df.columns})
     
-    # Scale SI units to standard aviation units for traffic & OpenAP
+    # Filter mapping to only rename columns that actually exist
+    rename_cols = {k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns}
+    if rename_cols:
+        df = df.rename(columns=rename_cols)
+        
+    # 2. Parse time to timezone-naive datetime if needed
+    for time_col in ['timestamp', 'time']:
+        if time_col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[time_col]):
+                df[time_col] = pd.to_datetime(df[time_col], unit='s', utc=True).dt.tz_localize(None)
+            else:
+                df[time_col] = pd.to_datetime(df[time_col])
+                if df[time_col].dt.tz is not None:
+                    df[time_col] = df[time_col].dt.tz_localize(None)
+                    
+    # 3. Scale physical parameters from SI to standard aviation units
     if 'altitude' in df.columns:
         df['altitude'] = df['altitude'] * M_TO_FT
     if 'groundspeed' in df.columns:
@@ -240,19 +256,119 @@ def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
     if 'vertical_rate' in df.columns:
         df['vertical_rate'] = df['vertical_rate'] * MPS_TO_FPM
         
-    # Re-inject static metadata from Flight attributes as repeated columns
-    df['flight_id'] = pyc_flight.attrs.get('flight_id', 'UNK')
-    df['icao24'] = pyc_flight.attrs.get('icao24', 'UNK')
-    df['callsign'] = pyc_flight.attrs.get('callsign', 'UNK')
-    df['typecode'] = pyc_flight.attrs.get('aircraft_type', 'UNK')
+    return df
+
+def df_nautic_to_df_si(df_nautic: pd.DataFrame) -> pd.DataFrame:
+    """
+    Converts a DataFrame containing state vectors in aviation/nautical units
+    to a DataFrame containing state vectors in SI units.
+    """
+    df = df_nautic.copy()
     
-    # Ensure timestamp is datetime timezone-naive UTC
-    if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        if df['timestamp'].dt.tz is not None:
-            df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+    # 1. Normalize spelling variants back to standard SI names
+    rename_map = {
+        'timestamp': 'time',
+        'latitude': 'lat',
+        'longitude': 'lon',
+        'altitude': 'baroaltitude',
+        'groundspeed': 'velocity',
+        'track': 'heading',
+        'vertical_rate': 'vertrate',
+    }
+    
+    # Filter mapping to only rename columns that actually exist
+    rename_cols = {k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns}
+    if rename_cols:
+        df = df.rename(columns=rename_cols)
         
-    return TrafficFlight(df)
+    # 2. Scale physical parameters from standard aviation units back to SI units
+    if 'baroaltitude' in df.columns:
+        df['baroaltitude'] = df['baroaltitude'] / M_TO_FT
+    if 'velocity' in df.columns:
+        df['velocity'] = df['velocity'] / MPS_TO_KT
+    if 'vertrate' in df.columns:
+        df['vertrate'] = df['vertrate'] / MPS_TO_FPM
+        
+    return df
+
+def df_to_traffic(df: pd.DataFrame, is_si: bool = True) -> "traffic.core.Flight":
+    """
+    Transforms a trajectory DataFrame into an optimized traffic.core.Flight object.
+    
+    Args:
+        df (pd.DataFrame): Trajectory DataFrame.
+        is_si (bool): If True, performs SI-to-aviation unit conversion first.
+        
+    Returns:
+        traffic.core.Flight: A traffic Flight object.
+    """
+    from traffic.core import Flight as TrafficFlight
+    df_copy = df.copy()
+    if is_si:
+        df_copy = df_si_to_df_nautic(df_copy)
+    else:
+        # Just rename timestamp column if needed for traffic
+        if 'time' in df_copy.columns and 'timestamp' not in df_copy.columns:
+            df_copy = df_copy.rename(columns={'time': 'timestamp'})
+            
+    # Ensure timestamp is datetime and timezone-naive
+    if 'timestamp' in df_copy.columns:
+        df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'])
+        if df_copy['timestamp'].dt.tz is not None:
+            df_copy['timestamp'] = df_copy['timestamp'].dt.tz_localize(None)
+            
+    return TrafficFlight(df_copy)
+
+def traffic_to_df(flight: "traffic.core.Flight", to_si: bool = True) -> pd.DataFrame:
+    """
+    Transforms a traffic.core.Flight object into a DataFrame.
+    
+    Args:
+        flight (traffic.core.Flight): Traffic Flight object.
+        to_si (bool): If True, performs aviation-to-SI unit conversion.
+        
+    Returns:
+        pd.DataFrame: Trajectory DataFrame.
+    """
+    df = flight.data.copy()
+    
+    # Re-inject static metadata from traffic Flight attributes if present
+    for attr in ['flight_id', 'icao24', 'callsign', 'typecode']:
+        if hasattr(flight, attr) and getattr(flight, attr) is not None:
+            df[attr] = getattr(flight, attr)
+            
+    if to_si:
+        df = df_nautic_to_df_si(df)
+        
+    return df
+
+def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
+    """
+    Transforms a pyc_flight object into an optimized traffic.core.Flight object
+    and converts SI units (meters, m/s, m/s) to standard aviation units (feet, knots, ft/min).
+    """
+    df_si = pyc_flight.to_dataframe().copy()
+    
+    # Map pyc column names to standard SI names
+    rename_pyc = {
+        'gs': 'velocity',
+        'heading': 'heading',
+        'rocd': 'vertrate',
+        'time': 'time'
+    }
+    df_si = df_si.rename(columns=rename_pyc)
+    
+    # Re-inject attributes from pyc_flight
+    df_si['flight_id'] = pyc_flight.attrs.get('flight_id', 'UNK')
+    df_si['icao24'] = pyc_flight.attrs.get('icao24', 'UNK')
+    df_si['callsign'] = pyc_flight.attrs.get('callsign', 'UNK')
+    df_si['typecode'] = pyc_flight.attrs.get('aircraft_type', 'UNK')
+    
+    for attr in ['firstseen', 'lastseen', 'estdepartureairport', 'estarrivalairport', 'route_class', 'cluster_id']:
+        if attr in pyc_flight.attrs:
+            df_si[attr] = pyc_flight.attrs[attr]
+            
+    return df_to_traffic(df_si, is_si=True)
 
 def pycontrails_to_parquet(flight: Flight, out_path: Path):
     """
@@ -268,42 +384,35 @@ def traffic_to_pycontrails(flight_or_df, typecode: str = "B738", drop_kinematics
     """
     if hasattr(flight_or_df, 'data'):
         # It is a traffic.core.Flight or similar object
-        df = flight_or_df.data.copy()
+        df_nautic = flight_or_df.data.copy()
         flight_attrs = getattr(flight_or_df, 'attrs', {})
     else:
         # It is a pandas DataFrame
-        df = flight_or_df.copy()
+        df_nautic = flight_or_df.copy()
         flight_attrs = {}
 
-    # 1. Convert aviation units back to SI units
-    if 'altitude' in df.columns:
-        df['altitude'] = df['altitude'] / M_TO_FT
-        
-    if not drop_kinematics:
-        if 'groundspeed' in df.columns:
-            df['groundspeed'] = df['groundspeed'] / MPS_TO_KT
-        if 'vertical_rate' in df.columns:
-            df['vertical_rate'] = df['vertical_rate'] / MPS_TO_FPM
-        
-    # 2. Map columns back to PyContrails
-    rename_map = {
-        'timestamp': 'time',
-        'groundspeed': 'gs',
-        'track': 'heading',
-        'vertical_rate': 'rocd',
+    df_si = df_nautic_to_df_si(df_nautic)
+
+    # Map back to Pycontrails standard columns (time, latitude, longitude, altitude, gs, heading, rocd)
+    rename_to_pyc = {
+        'lat': 'latitude',
+        'lon': 'longitude',
+        'baroaltitude': 'altitude',
+        'velocity': 'gs',
+        'vertrate': 'rocd',
     }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    df_pc = df_si.rename(columns=rename_to_pyc).copy()
     
-    # 3. Drop derived/outdated columns
+    # Drop derived/outdated columns
     cols_to_drop = ['x', 'y', 'track_unwrapped']
     if drop_kinematics:
-        cols_to_drop.extend(['gs', 'track', 'vertical_rate', 'groundspeed', 'heading', 'rocd'])
-    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        cols_to_drop.extend(['gs', 'heading', 'rocd', 'velocity', 'vertrate'])
+    df_pc = df_pc.drop(columns=[c for c in cols_to_drop if c in df_pc.columns], errors='ignore')
     
-    # 4. Extract and inject metadata
-    flight_id = flight_attrs.get('flight_id', df['flight_id'].iloc[0] if 'flight_id' in df.columns else 'UNK')
-    icao24 = flight_attrs.get('icao24', df['icao24'].iloc[0] if 'icao24' in df.columns else 'UNK')
-    callsign = flight_attrs.get('callsign', df['callsign'].iloc[0] if 'callsign' in df.columns else 'UNK')
+    # Extract and inject metadata
+    flight_id = flight_attrs.get('flight_id', df_pc['flight_id'].iloc[0] if 'flight_id' in df_pc.columns else 'UNK')
+    icao24 = flight_attrs.get('icao24', df_pc['icao24'].iloc[0] if 'icao24' in df_pc.columns else 'UNK')
+    callsign = flight_attrs.get('callsign', df_pc['callsign'].iloc[0] if 'callsign' in df_pc.columns else 'UNK')
     
     final_attrs = {
         "flight_id": flight_id,
@@ -318,6 +427,6 @@ def traffic_to_pycontrails(flight_or_df, typecode: str = "B738", drop_kinematics
     for k, v in attrs.items():
         final_attrs[k] = v
         
-    return Flight(data=df, crs="EPSG:4326", drop_duplicated_times=True, **final_attrs)
+    return Flight(data=df_pc, crs="EPSG:4326", drop_duplicated_times=True, **final_attrs)
 
 

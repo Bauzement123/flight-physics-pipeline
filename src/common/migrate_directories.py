@@ -11,6 +11,7 @@ from pathlib import Path
 import logging
 
 from src.common.config import BASE_DIR, TRAJECTORIES_DIR
+from src.common.utils import setup_file_logger
 from src.common.build_global_manifest import build_global_manifest
 
 # Setup logging

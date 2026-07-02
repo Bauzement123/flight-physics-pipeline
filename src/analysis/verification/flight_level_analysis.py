@@ -17,7 +17,7 @@ import matplotlib.ticker as ticker
 
 # Central configurations and loaders
 from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET
-from src.common.utils import load_route_summary
+from src.common.utils import load_route_summary, setup_file_logger
 from src.common.registry_utils import load_trajectory_registry, load_registered_trajectories
 
 logger = logging.getLogger(__name__)

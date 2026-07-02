@@ -14,6 +14,7 @@ import numpy as np
 from traffic.data import airports
 
 from src.common.config import ROUTE_SUMMARY_PARQUET, ROUTE_SUMMARY_CSV, ROUTE_SUMMARY_PKL
+from src.common.utils import setup_file_logger
 
 # Configure logging
 logger = logging.getLogger(__name__)

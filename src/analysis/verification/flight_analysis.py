@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 # Import central configurations and utilities
 from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET, GLOBAL_MODEL_REGISTRY
-from src.common.utils import load_route_summary, split_route_string
+from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.common.registry_utils import (
     load_trajectory_registry,
     load_registered_trajectories,
