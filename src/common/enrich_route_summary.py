@@ -140,7 +140,7 @@ def enrich_route_summary(
     return True
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [DISTANCE ENRICHMENT] - %(message)s")
+    setup_file_logger(log_filename="enrichment.log")
     pkl_file = ROUTE_SUMMARY_PKL
     csv_file = ROUTE_SUMMARY_CSV
     parquet_file = ROUTE_SUMMARY_PARQUET

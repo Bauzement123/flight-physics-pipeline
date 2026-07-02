@@ -210,5 +210,5 @@ def build_global_manifest():
     )
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MANIFEST BUILDER] - %(message)s')
+    setup_file_logger(log_filename="manifest.log")
     build_global_manifest()

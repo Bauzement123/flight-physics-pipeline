@@ -64,5 +64,5 @@ def migrate():
     logger.info("Migration complete!")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MIGRATOR] - %(message)s')
+    setup_file_logger(log_filename="migration.log")
     migrate()

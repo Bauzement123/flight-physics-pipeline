@@ -16,11 +16,13 @@ DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = DATA_DIR / "logs"
 
 # Static registries and global data directories
-FLIGHT_REGISTRY_DIR = DATA_DIR / "flight_registry"
-REGISTRIES_DIR = FLIGHT_REGISTRY_DIR / "registries"
+MASTER_FLIGHTS_DB_DIR = DATA_DIR / "databases" / "master_flights"
+AIRCRAFT_DB_DIR = DATA_DIR / "databases" / "aircraft_db"
+REGISTRIES_DIR = DATA_DIR / "registries"
 FLIGHT_LISTS_DIR = DATA_DIR / "flight_lists"
 WEATHER_DIR = DATA_DIR / "weather"
 MASTER_FLIGHT_PATHS_DIR = DATA_DIR / "master_flight_paths"
+REPORTS_DIR = DATA_DIR / "analysis" / "reports"
 
 # Centralized Registry and Summary Files
 GLOBAL_TRAJECTORY_REGISTRY = REGISTRIES_DIR / "global_trajectory_registry.parquet"
@@ -35,6 +37,35 @@ CALIBRATION_PLOT_REGISTRY = REGISTRIES_DIR / "calibration_plot_registry.parquet"
 CALIBRATION_PLOTS_DIR = DATA_DIR / "calibration" / "plots"
 ORACLE_COHORT_CACHE_DIR = DATA_DIR / "calibration" / "cache" / "oracle_cohorts"
 # Note: Medoid flight_id is also stored per-cluster directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+
+# --- Aircraft Database Paths ---
+DEFAULT_AIRCRAFT_DB_PATH = AIRCRAFT_DB_DIR / "aircraft-database-complete-2025-08.csv"
+DEFAULT_OPENAIRFRAMES_PATH = AIRCRAFT_DB_DIR / "openairframes_adsb_2024-01-01_2026-02-23.csv.gz"
+AIRCRAFT_DB_DOWNLOAD_URL = "https://opensky-network.org/datasets/metadata/aircraftDatabase.csv"
+AIRPORT_REGISTRIES_DIR = REGISTRIES_DIR
+AIRPORTS_CACHE_PATH = REGISTRIES_DIR / "airport_coordinates.json"
+
+# --- Default Pipeline Parameters ---
+DEFAULT_AIRPORT_PREFIXES = ["B", "E", "L"]
+
+# Target aircraft typecode families
+A320_NEO_FAMILY = ["A19N", "A20N", "A21N"]
+A320_CEO_FAMILY = ["A318", "A319", "A320", "A321"]
+B737_NG_FAMILY = ["B733", "B734", "B735", "B736", "B737", "B738", "B739"]
+B737_MAX_FAMILY = ["B37M", "B38M", "B39M"]
+
+ALL_TARGET_FAMILIES = A320_NEO_FAMILY + A320_CEO_FAMILY + B737_NG_FAMILY + B737_MAX_FAMILY
+
+# Geographic filtering limits (Padded European Bounding Box)
+# TODO: Recompute both boxes from actual data extent after re-ingestion (Stage 3.5).
+EUR_LAT_MIN = 22.0
+EUR_LAT_MAX = 85.0
+EUR_LON_MIN = -60.0
+EUR_LON_MAX = 53.0
+
+# Ensure directories exist upon import
+for directory in [DATA_DIR, MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, REGISTRIES_DIR, LOGS_DIR, REPORTS_DIR, DATA_DIR / "analysis" / "plots"]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 # PCA Calibration Constants
 # D_PCA and N_STANDARD are sentinel placeholders (-1). Run the Phase A/B
@@ -74,10 +105,10 @@ CALIBRATION_ROUTES: list[str] = [
 ROCD_MIN_CLIMB_RATE   = 1800.0  # Minimum acceptable clean-flight climb rate
 ROCD_MIN_DESCENT_RATE = 1200.0  # Minimum acceptable clean-flight descent rate
 
-ROUTE_SUMMARY_PKL = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.pkl"
-ROUTE_SUMMARY_PARQUET = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.parquet"
-ROUTE_SUMMARY_CSV = FLIGHT_REGISTRY_DIR / "master_flights_route_summary.csv"
-MASTER_FLIGHTS_FILE = FLIGHT_REGISTRY_DIR / "master_flights.parquet"
+ROUTE_SUMMARY_PKL = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.pkl"
+ROUTE_SUMMARY_PARQUET = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.parquet"
+ROUTE_SUMMARY_CSV = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.csv"
+MASTER_FLIGHTS_FILE = MASTER_FLIGHTS_DB_DIR / "master_flights.parquet"
 
 # ERA5 Weather Parameters
 ERA5_PRESSURE_LEVEL_VARIABLES = [
