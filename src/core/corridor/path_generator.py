@@ -26,7 +26,7 @@ from src.common.config import (
     GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_FLIGHT_CLUSTER_MAP
 )
-from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort
+from src.core.corridor.pca_compressor import classify_and_normalize_cohort
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.common.adapters import (
     parquet_to_pycontrails,
@@ -447,7 +447,7 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="corridor.log")
     setup_file_logger(log_filename="synthesis.log")
     parser = argparse.ArgumentParser(description="Create a Synthesized Trajectory from raw OpenSky cohorts.")
     parser.add_argument("--rank", type=int, required=True, help="Route rank from RouteSummary to process.")

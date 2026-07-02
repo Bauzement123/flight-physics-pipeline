@@ -32,7 +32,7 @@ import pandas as pd
 
 from src.common.config import BASE_DIR
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic
-from src.corridor_modeling.pca_compressor import (
+from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
     vectorize_cohort,
     normalize_vectors,

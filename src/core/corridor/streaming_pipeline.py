@@ -66,12 +66,12 @@ from src.common.registry_utils import (
     load_model_registry,
     batch_register_corridors,
 )
-from src.fetching import opensky_fetcher
-from src.corridor_modeling.clustering_worker import (
+from src.core.fetching import opensky_fetcher
+from src.core.corridor.clustering_worker import (
     load_and_classify_cohort,
     cluster_from_prepared,
 )
-from src.corridor_modeling.pca_compressor import calculate_delta_cv
+from src.core.corridor.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
 
@@ -581,9 +581,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [STREAM] - %(levelname)s - %(message)s",
-    )
+    setup_file_logger(log_filename="corridor.log")
     setup_file_logger(log_filename="streaming_pipeline.log")
     main()

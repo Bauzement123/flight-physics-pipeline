@@ -28,7 +28,7 @@ from src.common.config import (
 )
 from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
-from src.physics.engine import crop_met_dataset, simulate_flights_parallel, create_simulation_models
+from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel, create_simulation_models
 
 logger = logging.getLogger(__name__)
 
@@ -766,7 +766,7 @@ def run_batch_clone_simulation(
         logger.info(f"Successfully updated global cloned simulation registry at {cloned_registry_file.name}")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="simulation.log")
     parser = argparse.ArgumentParser(description="Batch Cloned Trajectory Simulation Engine")
     
     group = parser.add_mutually_exclusive_group(required=True)

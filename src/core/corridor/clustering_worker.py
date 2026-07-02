@@ -44,7 +44,7 @@ from src.common.config import (
     MIN_FLIGHTS_FOR_CLUSTERING,
 )
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet, traffic_to_pycontrails
-from src.corridor_modeling.pca_compressor import (
+from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
     vectorize_cohort,
     normalize_vectors,

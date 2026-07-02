@@ -11,7 +11,7 @@ project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.calibration.plot_helpers import get_or_create_config_plot
+from src.analysis.campaigns.plot_helpers import get_or_create_config_plot
 
 
 def main():

@@ -19,13 +19,13 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.calibration.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
-from src.calibration.variational_plots import generate_route_pdf_report
+from src.analysis.campaigns.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
+from src.analysis.campaigns.variational_plots import generate_route_pdf_report
 from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_FLIGHT_CLUSTER_MAP
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
-from src.corridor_modeling.clustering_worker import _select_medoid
-from src.corridor_modeling.pca_compressor import calculate_delta_cv
+from src.core.corridor.clustering_worker import _select_medoid
+from src.core.corridor.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,7 @@ def _save_route_results(
             })
 
         # Run batch plot generation
-        from src.calibration.plot_helpers import batch_generate_plots
+        from src.analysis.campaigns.plot_helpers import batch_generate_plots
         try:
             batch_generate_plots(plot_tasks)
         except Exception as e:
@@ -508,6 +508,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [3D-VARIATIONAL] - %(levelname)s - %(message)s")
+    setup_file_logger(log_filename="calibration.log")
     setup_file_logger("variational_orchestrator.log")
     main()

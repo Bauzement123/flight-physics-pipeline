@@ -254,7 +254,7 @@ def filter_population(
 
 if __name__ == "__main__":
     # Configure logging at application entry point
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="filtering.log")
 
     parser = argparse.ArgumentParser(description="Filter Master Flight Population Registry")
     parser.add_argument("--csv", "--file", "--master-file", dest="file_path", default=str(MASTER_FLIGHTS_FILE), help="Path to the master CSV or Parquet registry")

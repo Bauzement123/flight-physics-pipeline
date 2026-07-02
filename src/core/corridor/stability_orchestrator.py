@@ -60,7 +60,7 @@ from src.common.registry_utils import (
     load_stability_registry,
     batch_update_stability_registry,
 )
-from src.corridor_modeling.stability_worker import process_route
+from src.core.corridor.stability_worker import process_route
 
 logger = logging.getLogger(__name__)
 
@@ -383,9 +383,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [STABILITY] - %(levelname)s - %(message)s",
-    )
+    setup_file_logger(log_filename="corridor.log")
     setup_file_logger(log_filename="stability_orchestrator.log")
     main()

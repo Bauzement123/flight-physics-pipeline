@@ -29,7 +29,7 @@ from src.common.config import (
     WEATHER_BOUNDS_BBOX
 )
 from src.common.utils import setup_file_logger
-from src.physics.engine import crop_met_dataset, simulate_flights_parallel
+from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def run_physics_pipeline(
         logger.warning("No flights were successfully simulated.")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    setup_file_logger(log_filename="simulation.log")
     parser = argparse.ArgumentParser(description="Run PSFlight and Cocip Physics Simulation")
     parser.add_argument("--input-file", required=True, help="Path to cleaned SI trajectory Parquet file or directory containing cleaned Parquet files")
     parser.add_argument("--out-dir", required=True, help="Output directory for simulation results")

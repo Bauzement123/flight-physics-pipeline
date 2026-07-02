@@ -241,7 +241,7 @@ if __name__ == "__main__":
     from pathlib import Path
     
     # Configure logging for better observability during batch processing
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    setup_file_logger(log_filename="processing.log")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-file", required=True, help="Path to raw Parquet file or directory containing raw Parquet files")

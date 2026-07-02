@@ -395,5 +395,5 @@ def main():
     )
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [FL_DIST] - %(levelname)s - %(message)s")
+    setup_file_logger(log_filename="analysis.log")
     main()

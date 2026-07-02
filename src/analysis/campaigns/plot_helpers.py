@@ -18,8 +18,8 @@ from src.common.config import (
     GLOBAL_FLIGHT_CLUSTER_MAP,
     CALIBRATION_FLIGHT_CLUSTER_MAP
 )
-from src.corridor_modeling.stability_worker import _load_route_flights
-from src.corridor_modeling.pca_compressor import classify_and_normalize_cohort, vectorize_flight
+from src.core.corridor.stability_worker import _load_route_flights
+from src.core.corridor.pca_compressor import classify_and_normalize_cohort, vectorize_flight
 
 logger = logging.getLogger(__name__)
 

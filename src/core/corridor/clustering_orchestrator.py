@@ -54,7 +54,7 @@ from src.common.registry_utils import (
     load_model_registry,
     batch_register_corridors,
 )
-from src.corridor_modeling.clustering_worker import cluster_route
+from src.core.corridor.clustering_worker import cluster_route
 
 logger = logging.getLogger(__name__)
 
@@ -355,9 +355,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [CLUSTERING] - %(levelname)s - %(message)s",
-    )
+    setup_file_logger(log_filename="corridor.log")
     setup_file_logger(log_filename="clustering_orchestrator.log")
     main()

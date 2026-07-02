@@ -222,7 +222,7 @@ def merge_and_enrich_fleets(df_openairframes: pd.DataFrame, df_opensky: pd.DataF
     return df_combined
 
 def main():
-    setup_file_logger()
+    setup_file_logger(log_filename="acquisition.log")
     
     parser = argparse.ArgumentParser(description="Slice & Combine OpenAirframes and OpenSky Databases")
     parser.add_argument("--openairframes", default=str(DEFAULT_OPENAIRFRAMES_PATH), help="Path to openairframes_adsb_*.csv.gz file")

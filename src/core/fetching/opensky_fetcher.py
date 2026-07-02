@@ -94,6 +94,35 @@ def filter_flight_list(df: pd.DataFrame, start_date=None, end_date=None, **kwarg
                 
     return filtered_df
 
+def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Labels flight records in df with a flight_phase column using openap.
+    """
+    if df.empty:
+        return df
+    
+    # Ensure velocity, baroaltitude and vertrate columns exist and are numeric
+    for col in ['baroaltitude', 'velocity', 'vertrate']:
+        if col not in df.columns:
+            df['flight_phase'] = None
+            return df
+            
+    try:
+        from openap.phase import FlightPhase
+        fp = FlightPhase()
+        phases = fp.phase(
+            df['baroaltitude'].values,   # altitude in feet
+            df['velocity'].values,        # ground speed m/s
+            df['vertrate'].values         # vertical rate m/s
+        )
+        df['flight_phase'] = phases       # 'GND', 'CL', 'CR', 'DE', 'LVL', 'NA'
+    except ImportError:
+        df['flight_phase'] = None
+    except Exception as e:
+        logging.warning(f"OpenAP phase identification failed: {e}")
+        df['flight_phase'] = None
+    return df
+
 def fetch_trajectories(
     input_list_path: str,
     out_dir: str,
@@ -102,16 +131,14 @@ def fetch_trajectories(
     start_date: str = None,
     end_date: str = None,
     typecode: str = None,
+    run_id: str = None,
 ) -> tuple:
     """
     Returns
     -------
     (success: bool, new_registry_entries: list[dict])
         new_registry_entries contains {flight_id, file_path} dicts for every
-        flight fetched from Trino in this call.  The caller is responsible for
-        flushing these to GLOBAL_TRAJECTORY_REGISTRY so that concurrent callers
-        (e.g. the streaming pipeline Pool 1) cannot race on the registry file.
-        Cache-hit calls that produce no new Trino data return (True, []).
+        flight fetched in this call, pointing to individual raw parquet files.
     """
     start_time = time.time()
     out_dir_path = Path(out_dir)
@@ -130,7 +157,7 @@ def fetch_trajectories(
             dep, arr = base_name.split('-', 1)
         else:
             logging.error(f"Cannot parse origin and destination from filename: {base_name}. Expected format: 'DEP-ARR.parquet'.")
-            return False
+            return False, []
             
         logging.info(f"Loading flights for corridor {dep} -> {arr} from master flights table...")
         try:
@@ -166,6 +193,16 @@ def fetch_trajectories(
         else:
             logging.info(f"Sample size ({sample_size}) is >= total flights. Fetching all {len(target_flights)}.")
 
+    # Define output files
+    base_name = Path(input_list_path).stem
+    raw_dir = out_dir_path / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    
+    concat_filename = f"{out_dir_path.name}_all_raw.parquet"
+    concat_path = out_dir_path / concat_filename
+    manifest_filename = f"{out_dir_path.name}_manifest.json"
+    manifest_path = out_dir_path / manifest_filename
+    
     # Generate cohort hash based on input flight list (deterministic, before querying)
     input_flight_ids = []
     for _, row in target_flights.iterrows():
@@ -176,21 +213,11 @@ def fetch_trajectories(
         input_flight_ids.append(f"{row['icao24']}_{row.get('callsign', 'UNK')}_{dep}-{arr}_{fs_str}")
         
     cohort_hash = hashlib.md5("".join(sorted(input_flight_ids)).encode('utf-8')).hexdigest()[:6]
-    
-    # Define output files
-    base_name = Path(input_list_path).stem
-    raw_dir = out_dir_path / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    
-    out_filename = f"{base_name}_{cohort_hash}_raw.parquet"
-    out_path = raw_dir / out_filename
-    manifest_filename = f"{base_name}_{cohort_hash}_manifest.json"
-    manifest_path = out_dir_path / manifest_filename
-    
-    if out_path.exists() and manifest_path.exists():
-        logging.info(f"Output file already exists: {out_path}")
+
+    if concat_path.exists() and manifest_path.exists():
+        logging.info(f"Output file already exists: {concat_path}")
         logging.info(f"Skipping fetch and loading existing data.")
-        combined_df = pd.read_parquet(out_path)
+        combined_df = pd.read_parquet(concat_path)
         logging.info(f"Loaded {len(combined_df):,} waypoints from existing file.")
         duration = time.time() - start_time
         logging.info(f"Fetch process for {Path(input_list_path).name} completed (cached) in {duration:.2f} seconds.")
@@ -212,9 +239,6 @@ def fetch_trajectories(
     all_trajectories = []
     new_registry_entries = []
     successful_fetches = 0
-    
-    # Store relative path of final file for global manifest index
-    out_rel_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
 
     for i, (index, row) in enumerate(target_flights.iterrows(), 1):
         icao24 = row.get('icao24')
@@ -249,29 +273,53 @@ def fetch_trajectories(
         flight_id = f"{icao24}_{callsign}_{dep}-{arr}_{fs_str}"
         logging.info(f"[{i}/{len(target_flights)}] Processing {flight_id}...")
 
-        # 1. Local Cache Check
+        # Setup individual file name and path
+        clean_callsign = str(callsign).strip() if pd.notna(callsign) else "UNK"
+        indiv_filename = f"{icao24}_{clean_callsign}_{fs_str}_raw.parquet"
+        indiv_path = raw_dir / indiv_filename
+        indiv_rel_path = indiv_path.resolve().relative_to(BASE_DIR).as_posix()
+
+        # 1. Local Individual Cache Check
+        if indiv_path.exists():
+            try:
+                logging.info(f"   -> Cache Hit: Loading flight waypoints from individual file: {indiv_filename}")
+                flight_df = pd.read_parquet(indiv_path)
+                if 'flight_phase' not in flight_df.columns:
+                    flight_df = label_flight_phase(flight_df)
+                    flight_df.to_parquet(indiv_path, index=False)
+                all_trajectories.append(flight_df)
+                new_registry_entries.append({"flight_id": flight_id, "file_path": indiv_rel_path})
+                successful_fetches += 1
+                continue
+            except Exception as e:
+                logging.error(f"   -> Individual file read failure for {flight_id}: {e}. Retrying cache/Trino...")
+
+        # 2. Local Registry Cache Check (historical paths)
         if flight_id in cached_flights:
             cached_file_path = BASE_DIR / cached_flights[flight_id]
             if cached_file_path.exists():
                 try:
-                    logging.info(f"   -> Cache Hit: Loading flight waypoints from {cached_flights[flight_id]}")
+                    logging.info(f"   -> Cache Hit: Loading flight waypoints from registry file {cached_flights[flight_id]}")
                     df_cached = pd.read_parquet(cached_file_path)
                     flight_df = df_cached[df_cached['flight_id'] == flight_id].copy()
                     
                     if not flight_df.empty:
+                        flight_df = label_flight_phase(flight_df)
+                        # Save in new individual file format
+                        flight_df.to_parquet(indiv_path, index=False)
                         all_trajectories.append(flight_df)
-                        new_registry_entries.append({"flight_id": flight_id, "file_path": out_rel_path})
+                        new_registry_entries.append({"flight_id": flight_id, "file_path": indiv_rel_path})
                         successful_fetches += 1
-                        logging.info(f"   -> Success: Retrieved {len(flight_df)} waypoints locally.")
+                        logging.info(f"   -> Success: Retrieved {len(flight_df)} waypoints locally and migrated to new structure.")
                         continue
                     else:
-                        logging.warning(f"   -> Cached file exists, but flight_id '{flight_id}' not found inside it.")
+                        logging.warning(f"   -> Cached registry file exists, but flight_id '{flight_id}' not found inside it.")
                 except Exception as e:
                     logging.error(f"   -> Cache read failure for {flight_id}: {e}. Falling back to Trino...")
             else:
                 logging.warning(f"   -> Cache index pointed to {cached_flights[flight_id]}, but file does not exist. Querying Trino...")
 
-        # 2. Query Trino (Cache Miss)
+        # 3. Query Trino (Cache Miss)
         if trino is None:
             logging.info("Initializing pyopensky Trino client...")
             trino = Trino()
@@ -312,8 +360,13 @@ def fetch_trajectories(
             flight_df['lastseen'] = lastseen_dt
             flight_df['flight_id'] = flight_id
             
+            flight_df = label_flight_phase(flight_df)
+            
+            # Save individual Parquet file immediately
+            flight_df.to_parquet(indiv_path, index=False)
+            
             all_trajectories.append(flight_df)
-            new_registry_entries.append({"flight_id": flight_id, "file_path": out_rel_path})
+            new_registry_entries.append({"flight_id": flight_id, "file_path": indiv_rel_path})
             successful_fetches += 1
             logging.info(f"   -> Success: Retrieved {len(flight_df)} waypoints from Trino.")
         else:
@@ -324,9 +377,9 @@ def fetch_trajectories(
         logging.info(f"Concatenating {successful_fetches} trajectories...")
         combined_df = pd.concat(all_trajectories, ignore_index=True)
         
-        # Save Parquet
-        combined_df.to_parquet(out_path, index=False)
-        logging.info(f"COMPLETE: Saved {len(combined_df):,} total waypoints to {out_path}")
+        # Save Concat Parquet
+        combined_df.to_parquet(concat_path, index=False)
+        logging.info(f"COMPLETE: Saved {len(combined_df):,} total waypoints to {concat_path}")
         
         # Save JSON Manifest File
         fetched_flight_ids = sorted(combined_df['flight_id'].unique().tolist())
@@ -341,19 +394,67 @@ def fetch_trajectories(
         with open(manifest_path, 'w') as f:
             json.dump(manifest_data, f, indent=4)
         logging.info(f"Manifest file saved to {manifest_path}")
-        # Registry update is the caller's responsibility — returning new_registry_entries
-        # allows concurrent callers (e.g. the streaming pipeline) to flush via a
-        # single-writer pool and avoid race conditions on the parquet file.
+
+        # Checkpoint handling
+        if run_id:
+            from datetime import datetime
+            runs_dir = out_dir_path / "runs"
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = runs_dir / f"{run_id}.json"
+            
+            rank_val = None
+            dep_val = None
+            arr_val = None
+            dir_name = out_dir_path.name
+            if dir_name.startswith("rank_"):
+                parts = dir_name.split("_")
+                if len(parts) >= 3:
+                    try:
+                        rank_val = int(parts[1])
+                    except ValueError:
+                        pass
+                    route_part = parts[2]
+                    if "-" in route_part:
+                        dep_val, arr_val = route_part.split("-", 1)
+                        
+            checkpoint_data = {
+                "run_id": run_id,
+                "rank": rank_val,
+                "dep": dep_val,
+                "arr": arr_val,
+                "completed_at": datetime.now().isoformat(),
+                "trajectories_fetched": successful_fetches,
+                "trajectories_skipped": len(target_flights) - successful_fetches,
+                "status": "complete"
+            }
+            with open(checkpoint_path, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint_data, f, indent=4)
+            logging.info(f"Checkpoint file saved to {checkpoint_path}")
+
         duration = time.time() - start_time
         logging.info(f"Fetch process for {Path(input_list_path).name} completed in {duration:.2f} seconds ({duration/60:.2f} minutes).")
         return True, new_registry_entries
     else:
         logging.error("No trajectories were successfully retrieved. Nothing to save.")
+        if run_id:
+            from datetime import datetime
+            runs_dir = out_dir_path / "runs"
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = runs_dir / f"{run_id}.json"
+            checkpoint_data = {
+                "run_id": run_id,
+                "completed_at": datetime.now().isoformat(),
+                "trajectories_fetched": 0,
+                "trajectories_skipped": len(target_flights),
+                "status": "failed"
+            }
+            with open(checkpoint_path, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint_data, f, indent=4)
         return False, []
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="fetching.log")
     parser = argparse.ArgumentParser(description="Fetch Trajectories from OpenSky Trino")
     parser.add_argument("--input-list", required=True, help="Path to the filtered target list Parquet file")
     parser.add_argument("--out-dir", required=True, help="Output directory for raw trajectories")
@@ -362,6 +463,7 @@ if __name__ == "__main__":
     parser.add_argument("--start-date", default=None, help="Start bounds of flight departure window (ISO format)")
     parser.add_argument("--end-date", default=None, help="End bounds of flight departure window (ISO format)")
     parser.add_argument("--typecode", default=None, help="Aircraft model code (e.g. B738, A320)")
+    parser.add_argument("--run-id", default=None, help="Optional run identifier for checkpoints")
 
     args = parser.parse_args()
     
@@ -372,5 +474,6 @@ if __name__ == "__main__":
         seed=args.seed,
         start_date=args.start_date,
         end_date=args.end_date,
-        typecode=args.typecode
+        typecode=args.typecode,
+        run_id=args.run_id
     )

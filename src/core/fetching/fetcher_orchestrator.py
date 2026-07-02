@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.common.config import FLIGHT_LISTS_DIR, get_dataset_dir, ROUTE_SUMMARY_PARQUET, MASTER_FLIGHTS_FILE, GLOBAL_TRAJECTORY_REGISTRY
 from src.common.utils import load_route_summary, split_route_string, generate_dataset_name, setup_file_logger, update_global_registry
-from src.fetching import opensky_fetcher
+from src.core.fetching import opensky_fetcher
 
 # Setup Logging
 # logging.basicConfig is configured inside the __main__ block to prevent importing script pollution.
@@ -150,7 +150,7 @@ def compute_fetch_targets(
 
         # Filter in-memory to get actual capacity
         try:
-            from src.fetching.opensky_fetcher import filter_flight_list
+            from src.core.fetching.opensky_fetcher import filter_flight_list
             df_filtered = filter_flight_list(df_flights, start_date=start_date, end_date=end_date, typecode=typecode)
             capacity = len(df_filtered)
             logging.info(f"Corridor {dep} -> {arr}: filtered from {len(df_flights)} to {capacity} flights.")
@@ -187,16 +187,20 @@ def compute_fetch_targets(
 
 def execute_batch_fetch(
     execution_plan: list, 
-    out_dir: str, 
+    run_id: str, 
     seed: int,
     start_date: str = None,
     end_date: str = None,
-    typecode: str = None
+    typecode: str = None,
+    resume: bool = False
 ):
     """Executes the batch fetching loop sequentially."""
     if not execution_plan:
         logging.error("Execution plan is empty. Aborting batch fetch.")
         return
+
+    from src.common.config import TRAJECTORIES_DIR, GLOBAL_TRAJECTORY_REGISTRY
+    import json
 
     print("\n" + "="*70)
     print("BATCH FETCH PLAN")
@@ -211,15 +215,31 @@ def execute_batch_fetch(
     for i, item in enumerate(execution_plan, 1):
         logging.info(f"Processing [{i}/{total}] - Rank {item['rank']} | {item['dep']} -> {item['arr']}")
         
+        rank_dir_name = f"rank_{item['rank']:03d}_{item['dep']}-{item['arr']}"
+        item_out_dir = TRAJECTORIES_DIR / rank_dir_name
+        checkpoint_path = item_out_dir / "runs" / f"{run_id}.json"
+        
+        if resume and checkpoint_path.exists():
+            try:
+                with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                    cp_data = json.load(f)
+                if cp_data.get("status") == "complete":
+                    logging.info(f"Resuming: skipping completed rank {item['rank']} ({item['dep']}->{item['arr']}) based on checkpoint.")
+                    success_count += 1
+                    continue
+            except Exception as e:
+                logging.warning(f"Failed to read checkpoint at {checkpoint_path}: {e}. Will re-fetch.")
+
         try:
             success, new_entries = opensky_fetcher.fetch_trajectories(
                 input_list_path=item['file_path'],
-                out_dir=out_dir,
+                out_dir=str(item_out_dir),
                 sample_size=item['target'],
                 seed=seed,
                 start_date=start_date,
                 end_date=end_date,
-                typecode=typecode
+                typecode=typecode,
+                run_id=run_id
             )
             if success:
                 success_count += 1
@@ -235,7 +255,7 @@ def execute_batch_fetch(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="fetching.log")
     
     def check_seed_range(value):
         ivalue = int(value)
@@ -265,6 +285,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", default=None, help="End bounds of flight departure window (ISO format)")
     parser.add_argument("--typecode", default=None, help="Aircraft model code (e.g. B738, A320)")
     parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
+    parser.add_argument("--resume", action="store_true", help="Resume batch fetch from previous runs by skipping completed ranks")
 
     args = parser.parse_args()
 
@@ -296,9 +317,8 @@ if __name__ == "__main__":
         typecode=args.typecode,
         min_distance=args.min_distance
     )
-    out_dir_path = get_dataset_dir(dataset_name)
     setup_file_logger(log_filename="fetching.log")
-    logging.info(f"Generated dynamic dataset directory: data/trajectories/{dataset_name}/")
+    logging.info(f"Generated dynamic dataset run ID (dataset name): {dataset_name}")
 
     # 1. Resolve corridors to fetch
     routes = extract_target_routes(
@@ -328,11 +348,12 @@ if __name__ == "__main__":
             start_time = time.time()
             execute_batch_fetch(
                 execution_plan=plan, 
-                out_dir=str(out_dir_path),
+                run_id=dataset_name,
                 seed=args.seed,
                 start_date=args.start_date,
                 end_date=args.end_date,
-                typecode=args.typecode
+                typecode=args.typecode,
+                resume=args.resume
             )
             duration = time.time() - start_time
             logging.info(f"Batch fetch run completed in {duration:.2f} seconds ({duration/60:.2f} minutes).")

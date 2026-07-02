@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP, ORACLE_COHORT_CACHE_DIR
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
-from src.corridor_modeling.pca_compressor import (
+from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
     normalize_vectors,
     vectorize_cohort,
@@ -31,8 +31,8 @@ from src.corridor_modeling.pca_compressor import (
     fit_pca,
     apply_pca,
 )
-from src.corridor_modeling.clustering_worker import _evaluate_optimal_k, _select_medoid
-from src.corridor_modeling.stability_worker import _load_route_flights
+from src.core.corridor.clustering_worker import _evaluate_optimal_k, _select_medoid
+from src.core.corridor.stability_worker import _load_route_flights
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +522,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [GT-SWEEP] - %(levelname)s - %(message)s")
+    setup_file_logger(log_filename="calibration.log")
     setup_file_logger(log_filename="gt_stability_sweep.log")
     main()

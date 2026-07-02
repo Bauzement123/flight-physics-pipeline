@@ -64,7 +64,7 @@ def prepare_matlab_data(input_file: Path, output_file: Path):
     Applies quality and geographic filtering, calculates haversine distance,
     and formats timestamps for circular polar plotting.
     """
-    setup_file_logger()
+    setup_file_logger(log_filename="analysis.log")
     logging.info(f"Preparing MATLAB data from: {input_file}")
     
     if input_file.suffix.lower() == '.parquet':

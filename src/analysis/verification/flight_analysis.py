@@ -508,5 +508,5 @@ def main():
 
 if __name__ == "__main__":
     # Configure logging locally inside the script entry point to prevent pollution upon import
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [ANALYSIS] - %(levelname)s - %(message)s")
+    setup_file_logger(log_filename="analysis.log")
     main()

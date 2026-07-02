@@ -141,7 +141,7 @@ def orchestrate_filtered_list_creation(route_summary_path: str, master_file_path
 
 if __name__ == "__main__":
     # Configure logging at application entry point
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+    setup_file_logger(log_filename="filtering.log")
 
     parser = argparse.ArgumentParser(description="Master Filter Orchestrator - Corridor slicing.")
     

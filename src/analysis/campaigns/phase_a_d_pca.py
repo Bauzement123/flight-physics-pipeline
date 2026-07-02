@@ -17,13 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from src.common.config import CALIBRATION_ROUTES
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
-from src.corridor_modeling.pca_compressor import (
+from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
     find_d_pca,
     normalize_vectors,
     vectorize_cohort,
 )
-from src.corridor_modeling.stability_worker import _load_route_flights
+from src.core.corridor.stability_worker import _load_route_flights
 
 logger = logging.getLogger(__name__)
 
@@ -68,5 +68,5 @@ def main():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    setup_file_logger(log_filename="calibration.log")
     main()

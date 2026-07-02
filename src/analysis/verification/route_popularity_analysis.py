@@ -270,5 +270,5 @@ def main():
     plot_dual_axis(df_binned, args.bin_size, args.min_frequency, args.cumulative, output_path)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - [POPULARITY] - %(levelname)s - %(message)s")
+    setup_file_logger(log_filename="analysis.log")
     main()
