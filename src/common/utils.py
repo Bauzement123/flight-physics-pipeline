@@ -138,7 +138,7 @@ def generate_dataset_name(
 def setup_file_logger(out_dir: Path = None, log_filename: str = "extraction.log") -> logging.FileHandler:
     """
     Adds a FileHandler to the root logger to mirror console output to LOGS_DIR / log_filename.
-    If a handler for that file already exists, it does not add a duplicate.
+    Also ensures the root logger level is set to INFO and a StreamHandler is present for console logging.
     """
     from src.common.config import LOGS_DIR
     
@@ -150,7 +150,41 @@ def setup_file_logger(out_dir: Path = None, log_filename: str = "extraction.log"
     log_file = (LOGS_DIR / log_filename).resolve()
     
     root_logger = logging.getLogger()
-    # Check if already added
+    
+    # Ensure root logger level is at least INFO
+    if root_logger.level == logging.WARNING or root_logger.level == logging.NOTSET:
+        root_logger.setLevel(logging.INFO)
+        
+    # Check if handlers already exist
+    file_handler_exists = False
+    stream_handler_exists = False
+    
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                if Path(handler.baseFilename).resolve() == log_file:
+                    file_handler_exists = True
+            except Exception:
+                pass
+        elif isinstance(handler, logging.StreamHandler):
+            stream_handler_exists = True
+            
+    # Add StreamHandler for console output if missing
+    if not stream_handler_exists:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
+        console_handler.setLevel(logging.INFO)
+        root_logger.addHandler(console_handler)
+        
+    # Add FileHandler if missing
+    if not file_handler_exists:
+        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s'))
+        file_handler.setLevel(logging.INFO)
+        root_logger.addHandler(file_handler)
+        return file_handler
+        
+    # Find and return the existing file handler
     for handler in root_logger.handlers:
         if isinstance(handler, logging.FileHandler):
             try:
@@ -158,11 +192,6 @@ def setup_file_logger(out_dir: Path = None, log_filename: str = "extraction.log"
                     return handler
             except Exception:
                 pass
-                
-    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s'))
-    root_logger.addHandler(file_handler)
-    return file_handler
 
 
 def update_global_registry(registry_file: Path, new_entries: list):
