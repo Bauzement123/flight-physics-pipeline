@@ -1,5 +1,6 @@
 """
 Visualization and Caching Helpers for Clustered Flight Cohort Plots.
+Refactored to decouple worker-safe data generation from main-thread rendering.
 """
 
 import logging
@@ -7,6 +8,7 @@ import multiprocessing
 from pathlib import Path
 import numpy as np
 import pandas as pd
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -24,20 +26,18 @@ from src.core.corridor.pca_compressor import classify_and_normalize_cohort, vect
 logger = logging.getLogger(__name__)
 
 
-def generate_clustered_cohort_plot(
+def extract_cohort_plot_data(
     route_id: str,
     config_type: str,
     n0: int,
     tau: float,
     kmax: int,
     replicate: int,
-    out_path: Path,
     registry_df: pd.DataFrame = None,
-) -> None:
+) -> dict:
     """
-    Generates a 2-panel plot for a given route configuration and saves it to out_path.
-    Left: Ground track (Lon vs Lat) colored by cluster, medoids bold.
-    Right: Vertical profile (Normalized time/index vs Altitude) colored by cluster, medoids bold.
+    Worker-safe extraction function that retrieves flight mapping and normalizes trajectories.
+    Returns a picklable dictionary with lists of coordinates. No Matplotlib figure creation.
     """
     from src.common.registry_utils import load_trajectory_registry
 
@@ -82,15 +82,7 @@ def generate_clustered_cohort_plot(
         raise RuntimeError(f"No flights survived normalization for route {route_id}")
 
     # Match flights and vectorize
-    plotted_any = False
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
-
-    # Standard colors
-    colors = plt.cm.tab10.colors
-    
-    # Store medoid handles for legend
-    medoid_handles = {}
-
+    flights_data = []
     for fl in norm_flights:
         try:
             fid = fl.flight_id
@@ -100,15 +92,13 @@ def generate_clustered_cohort_plot(
             fid = getattr(fl, "callsign", None)
             if fid is not None:
                 logger.warning(
-                    f"flight_id not set on TrafficFlight object; falling back to callsign='{fid}'. "
-                    f"This may cause cluster map lookup mismatches if the map was built using flight_id."
+                    f"flight_id not set on TrafficFlight object; falling back to callsign='{fid}'."
                 )
 
         if fid is None or fid not in mapping:
             continue
 
         cluster_id, is_medoid = mapping[fid]
-        color = colors[cluster_id % len(colors)]
         
         # Resample to 100 points
         vec = vectorize_flight(fl)
@@ -116,24 +106,132 @@ def generate_clustered_cohort_plot(
         lons = vec[100:200]
         alts = vec[200:300]
 
-        if is_medoid:
-            line, = ax1.plot(lons, lats, color=color, linewidth=2.5, alpha=1.0, zorder=5)
-            ax2.plot(range(100), alts, color=color, linewidth=2.5, alpha=1.0, zorder=5)
-            medoid_handles[cluster_id] = line
-            plotted_any = True
-        else:
-            ax1.plot(lons, lats, color=color, linewidth=0.8, alpha=0.35, zorder=2)
-            ax2.plot(range(100), alts, color=color, linewidth=0.8, alpha=0.35, zorder=2)
-            plotted_any = True
+        flights_data.append({
+            "flight_id": str(fid),
+            "lons": lons.tolist(),
+            "lats": lats.tolist(),
+            "alts": alts.tolist(),
+            "cluster_id": int(cluster_id),
+            "is_medoid": bool(is_medoid)
+        })
 
-    if not plotted_any:
+    if not flights_data:
         raise RuntimeError(f"None of the mapped flight IDs were found in normalized flights for {route_id}")
 
-    # Labels & Styling
+    return {
+        "route_id": route_id,
+        "config_type": config_type,
+        "n0": n0,
+        "tau": tau,
+        "kmax": kmax,
+        "replicate": replicate,
+        "flights_data": flights_data,
+        "success": True
+    }
+
+
+def assemble_and_save_plot(payload: dict, out_path: Path) -> None:
+    """
+    Main-thread only: constructs the Cartopy GeoAxes, addscached basemap features,
+    plots flights/medoids/airports, and saves the final PNG.
+    """
+    import cartopy.crs as ccrs
+    from src.common.map_cache import EuropeanMapCache
+
+    route_id = payload["route_id"]
+    flights_data = payload["flights_data"]
+
+    # 1. Initialize Figure with Cartopy left panel and Standard right panel
+    fig = plt.figure(figsize=(11, 4.5))
+    ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.PlateCarree())
+    ax2 = fig.add_subplot(1, 2, 2)
+
+    # 2. Add cached European basemap features
+    map_cache = EuropeanMapCache().initialize()
+    map_cache.add_features_to_axes(ax1)
+
+
+
+    # 3. Add background airport markers
+    if not map_cache.airports_df.empty:
+        ax1.scatter(
+            map_cache.airports_df["lon"],
+            map_cache.airports_df["lat"],
+            color="#6c757d",
+            s=12,
+            alpha=0.3,
+            edgecolors="none",
+            transform=ccrs.PlateCarree(),
+            zorder=2
+        )
+
+    # 4. Plot trajectories
+    colors = plt.cm.tab10.colors
+    medoid_handles = {}
+
+    for fl_entry in flights_data:
+        lons = np.array(fl_entry["lons"])
+        lats = np.array(fl_entry["lats"])
+        alts = np.array(fl_entry["alts"])
+        cluster_id = fl_entry["cluster_id"]
+        is_medoid = fl_entry["is_medoid"]
+
+        color = colors[cluster_id % len(colors)]
+
+        if is_medoid:
+            line, = ax1.plot(lons, lats, color=color, linewidth=2.5, alpha=1.0, zorder=5, transform=ccrs.PlateCarree())
+            ax2.plot(range(100), alts, color=color, linewidth=2.5, alpha=1.0, zorder=5)
+            medoid_handles[cluster_id] = line
+        else:
+            ax1.plot(lons, lats, color=color, linewidth=0.8, alpha=0.35, zorder=3, transform=ccrs.PlateCarree())
+            ax2.plot(range(100), alts, color=color, linewidth=0.8, alpha=0.35, zorder=3)
+
+    # Calculate the bounding box of all plotted trajectories
+    min_lon, max_lon = 180.0, -180.0
+    min_lat, max_lat = 90.0, -90.0
+    
+    for fl_entry in flights_data:
+        min_lon = min(min_lon, min(fl_entry["lons"]))
+        max_lon = max(max_lon, max(fl_entry["lons"]))
+        min_lat = min(min_lat, min(fl_entry["lats"]))
+        max_lat = max(max_lat, max(fl_entry["lats"]))
+
+    # Apply explicit crop with a small visual padding (e.g., 1.5 degrees)
+    padding = 1.5
+    ax1.set_extent(
+        [min_lon - padding, max_lon + padding, min_lat - padding, max_lat + padding],
+        crs=ccrs.PlateCarree()
+    )
+# 5. Gridlines and Labels
+    try:
+        from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+        
+        # Let Cartopy handle dynamic gridlines AND labels based on the auto-cropped area
+        gl = ax1.gridlines(
+            draw_labels=True,  # Dynamically creates ticks based on view extent
+            linestyle="--",
+            color="dimgray",
+            linewidth=0.8,
+            alpha=0.6
+        )
+        
+        # Only show labels on the bottom and left axes to look like standard matplotlib ticks
+        gl.top_labels = False
+        gl.right_labels = False
+        
+        # Format them with the nice degree symbols (E/W/N/S)
+        gl.xformatter = LONGITUDE_FORMATTER
+        gl.yformatter = LATITUDE_FORMATTER
+        gl.xlabel_style = {'size': 8}
+        gl.ylabel_style = {'size': 8}
+
+    except Exception as e:
+        logger.warning(f"Failed to draw dynamic gridlines: {e}")
+        ax1.grid(True, linestyle="--", alpha=0.6, color="dimgray")
+
     ax1.set_xlabel("Longitude (deg)", fontsize=10)
     ax1.set_ylabel("Latitude (deg)", fontsize=10)
-    ax1.set_title("Ground Track", fontsize=11, fontweight="bold")
-    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.set_title(f"Ground Track — {route_id}", fontsize=11, fontweight="bold")
 
     ax2.set_xlabel("Normalized Time Point", fontsize=10)
     ax2.set_ylabel("Altitude (ft)", fontsize=10)
@@ -154,7 +252,8 @@ def generate_clustered_cohort_plot(
 
 def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict:
     """
-    Worker-safe helper: checks cache or renders plot PNG to disk without updating the parquet registry.
+    Worker-safe helper: checks cache, extracts plot data payload, and returns it.
+    Does NOT write any files or perform matplotlib figure operations in the worker.
     """
     try:
         route_id = task["route_id"]
@@ -195,26 +294,26 @@ def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict
             except Exception as e:
                 logger.warning(f"Could not read calibration plot registry during render check: {e}")
 
-        # 2. Render plot
-        logger.info(f"Generating plot for {route_id} ({config_type}: N0={n0}, tau={tau:.2f}, K={kmax})")
-        generate_clustered_cohort_plot(route_id, config_type, n0, tau, kmax, replicate, out_path, registry_df)
+        # 2. Extract cohort data (no plotting)
+        logger.info(f"Extracting plot data for {route_id} ({config_type}: N0={n0}, tau={tau:.2f}, K={kmax})")
+        payload = extract_cohort_plot_data(route_id, config_type, n0, tau, kmax, replicate, registry_df)
+        
         rel_path = out_path.relative_to(BASE_DIR).as_posix()
         return {
             "status": "success",
             "task": task,
-            "path": str(out_path),
+            "payload": payload,
             "newly_generated": True,
             "rel_path": rel_path,
         }
     except Exception as e:
-        logger.error(f"Failed to generate plot for task {task}: {e}", exc_info=True)
+        logger.error(f"Failed to extract plot data for task {task}: {e}", exc_info=True)
         return {"status": "failed", "task": task, "error": str(e)}
 
 
 def _register_plots(results: list[dict]) -> None:
     """
     Main-thread only: updates CALIBRATION_PLOT_REGISTRY for newly generated plots.
-    Ensures single-writer atomic registration.
     """
     new_rows = []
     for res in results:
@@ -261,7 +360,7 @@ def get_or_create_config_plot(
 ) -> Path:
     """
     Thread-safe lookup of calibration plot in CALIBRATION_PLOT_REGISTRY.
-    If cached, returns path. Otherwise, generates and registers it.
+    If cached, returns path. Otherwise, extracts data and draws/registers it.
     """
     task = {
         "route_id": route_id,
@@ -274,8 +373,13 @@ def get_or_create_config_plot(
     res = _render_plot_if_needed(task, registry_df=registry_df)
     if res.get("status") != "success":
         raise RuntimeError(f"Plot generation failed: {res.get('error')}")
+    
+    out_path = CALIBRATION_PLOTS_DIR / Path(res["rel_path"]).name
     if res.get("newly_generated", False):
+        assemble_and_save_plot(res["payload"], out_path)
         _register_plots([res])
+        return out_path
+    
     return Path(res["path"])
 
 
@@ -286,8 +390,8 @@ def _worker_generate_plot(task: dict) -> dict:
 
 def batch_generate_plots(plot_tasks: list[dict], max_workers: int = None) -> list:
     """
-    Executes multiple plot tasks in parallel without concurrent registry writes.
-    plot_tasks is a list of dicts: [{'route_id', 'config_type', 'n0', 'tau', 'kmax', 'replicate'}]
+    Executes multiple plot data extractions in parallel, then renders them
+    sequentially on the main thread to ensure absolute thread-safety.
     """
     if not plot_tasks:
         return []
@@ -295,17 +399,29 @@ def batch_generate_plots(plot_tasks: list[dict], max_workers: int = None) -> lis
     if max_workers is None:
         max_workers = min(4, multiprocessing.cpu_count())
 
-    logger.info(f"Batch generating {len(plot_tasks)} plots with {max_workers} workers...")
+    logger.info(f"Batch extracting data for {len(plot_tasks)} plots with {max_workers} workers...")
     
     results = []
     if max_workers <= 1:
         for task in plot_tasks:
             results.append(_worker_generate_plot(task))
     else:
-        # Use spawn method for subprocess safety with Matplotlib in multiprocessing
         ctx = multiprocessing.get_context("spawn")
         with ctx.Pool(processes=max_workers) as pool:
             results = pool.map(_worker_generate_plot, plot_tasks)
-            
+
+    # Render newly generated plots sequentially on the main thread
+    for res in results:
+        if res.get("status") == "success" and res.get("newly_generated", False):
+            out_path = CALIBRATION_PLOTS_DIR / Path(res["rel_path"]).name
+            try:
+                assemble_and_save_plot(res["payload"], out_path)
+                res["path"] = str(out_path)
+            except Exception as e:
+                logger.error(f"Failed to assemble and save plot to {out_path}: {e}", exc_info=True)
+                res["status"] = "failed"
+                res["error"] = str(e)
+                res["newly_generated"] = False
+
     _register_plots(results)
     return results

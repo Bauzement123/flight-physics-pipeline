@@ -57,11 +57,12 @@ B737_MAX_FAMILY = ["B37M", "B38M", "B39M"]
 ALL_TARGET_FAMILIES = A320_NEO_FAMILY + A320_CEO_FAMILY + B737_NG_FAMILY + B737_MAX_FAMILY
 
 # Geographic filtering limits (Padded European Bounding Box)
-# TODO: Recompute both boxes from actual data extent after re-ingestion (Stage 3.5).
-EUR_LAT_MIN = 22.0
+# Recomputed from custom airport extent (LLRM, LTCF, ENAS, LPAZ/LPPD) with 5.0 degree padding
+# Base bounds: Lat [30.0, 80.0], Lon [-26.0, 45.0]
+EUR_LAT_MIN = 25.0
 EUR_LAT_MAX = 85.0
-EUR_LON_MIN = -60.0
-EUR_LON_MAX = 53.0
+EUR_LON_MIN = -31.0
+EUR_LON_MAX = 50.0
 
 # Ensure directories exist upon import
 for directory in [DATA_DIR, MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, REGISTRIES_DIR, LOGS_DIR, REPORTS_DIR, DATA_DIR / "analysis" / "plots"]:
@@ -133,10 +134,10 @@ ERA5_REQUIRED_PRESSURE_LEVELS = [
 ERA5_GRID = 0.5
 
 # --- Geographic Filtering Constants (European Bounding Box) ---
-# Encompasses edges: Greenland, Svalbard, Canary Islands, Turkey, Israel
-# Built from base bounds Lat [27.0, 80.0], Lon [-55.0, 48.0] Padding aplied in code 
-# west, south, east, north = [-55.0, 27.0, 48.0, 80.0]
-WEATHER_BOUNDS_BBOX = [-55.0, 27.0, 48.0, 80.0]
+# Encompasses edges: Azores (LPAZ/LPPD), Svalbard (ENAS), Turkey (LTCF), Israel (LLRM)
+# Built from base bounds Lat [30.0, 80.0], Lon [-26.0, 45.0]
+# west, south, east, north = [-26.0, 30.0, 45.0, 80.0]
+WEATHER_BOUNDS_BBOX = [-26.0, 30.0, 45.0, 80.0]
 
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = DATA_DIR / "trajectories"

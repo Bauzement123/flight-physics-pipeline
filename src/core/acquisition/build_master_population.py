@@ -127,7 +127,7 @@ def build_master_population(
     arr_prefixes: list,
     output_path: Path,
     apply_bbox: bool = False,
-    resume: bool = False
+    resume: bool = True
 ):
     """
     Loops daily from start_date to end_date to download flight data,
