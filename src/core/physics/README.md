@@ -16,7 +16,7 @@ It operates as **Loop 3b** of the Flight Physics Pipeline.
 ## 1. Module Structure
 
 ```text
-src/physics/
+src/core/physics/
 ├── README.md              # This documentation file
 ├── engine.py              # Stateless, reusable core physics simulation helper functions
 ├── simulation.py          # Entrypoint for standard clean trajectories (uses engine.py)
@@ -75,7 +75,7 @@ Module Objectives
 
 ```mermaid
 graph TD
-    A[data/trajectories/<corridor>/clean/*_clean_si.parquet] -->|1. Ingest clean flights| B(simulation.py)
+    A["data/trajectories/<corridor>/clean/*_clean_si.parquet"] -->|1. Ingest clean flights| B(simulation.py)
     C[data/weather/*.nc] -->|2. Crop to WEATHER_BOUNDS_BBOX| D[cropped MetDataset & MetDataArray]
     D -->|3. Load cropped dataset to RAM| E[In-memory weather cache]
     
@@ -126,7 +126,7 @@ graph TD
     L -->|11. PSFlight & CoCiP eval| M[Simulated flights]
     
     M -->|12. Return simulated flights| B
-    B -->|13. Serialize individually| N[data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet]
+    B -->|13. Serialize individually| N["data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet"]
     B -->|14. Log skipped aircraft| O[skipped_aircraft.log]
     B -->|15. Update global registry| P[global_corridor_simulation_registry.parquet]
 ```
@@ -213,7 +213,7 @@ Breakdown:
 
 ```bash
 # 1. Run standard simulation with multithreading and batch optimization
-python -m src.physics.simulation \
+python -m src.core.physics.simulation \
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
     --out-dir "data/results/test_scenario/" \
     --weather-cache "data/weather" \
@@ -221,14 +221,14 @@ python -m src.physics.simulation \
     --batch-size 50
 
 # 2. Run standard simulation in LOW-MEMORY mode
-python -m src.physics.simulation \
+python -m src.core.physics.simulation \
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
     --out-dir "data/results/test_scenario/" \
     --weather-cache "data/weather" \
     --low-mem
 
 # 3. Run cloned batch simulation for specific ranks (Standard Mode)
-python -m src.physics.clone_simulation \
+python -m src.core.physics.clone_simulation \
     --ranks 1,3 \
     --start-date "2025-01-02" \
     --end-date "2025-01-05" \
@@ -238,7 +238,7 @@ python -m src.physics.clone_simulation \
     --batch-size 100
 
 # 4. Run cloned batch simulation in LOW-MEMORY mode
-python -m src.physics.clone_simulation \
+python -m src.core.physics.clone_simulation \
     --ranks 1,3 \
     --start-date "2025-01-02" \
     --end-date "2025-01-05" \
@@ -251,14 +251,14 @@ python -m src.physics.clone_simulation \
 
 ```powershell
 # Run standard simulation in low-memory mode
-python -m src.physics.simulation `
+python -m src.core.physics.simulation `
     --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
     --out-dir "data/results/test_scenario/" `
     --weather-cache "data/weather" `
     --low-mem
 
 # Run cloned batch simulation in standard mode with 4 threads
-python -m src.physics.clone_simulation `
+python -m src.core.physics.clone_simulation `
     --ranks 1,76,177,205,209,278,288,321,411,508,509,592,633,710,712,727,761,792,848,888,926 `
     --start-date "2025-12-01" `
     --end-date "2025-12-05" `
@@ -268,7 +268,7 @@ python -m src.physics.clone_simulation `
     --batch-size 50
 
 # Run cloned batch simulation in low-memory and test mode
-python -m src.physics.clone_simulation --ranks 1,76,177 --test-mode --weather-cache "data/weather" --out-dir "data/results/test_lowmem" --low-mem --overwrite
+python -m src.core.physics.clone_simulation --ranks 1,76,177 --test-mode --weather-cache "data/weather" --out-dir "data/results/test_lowmem" --low-mem --overwrite
 ```
 
 ---

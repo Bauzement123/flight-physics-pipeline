@@ -9,7 +9,7 @@ It operates as **Loop 3a** of the Flight Physics Pipeline. It is decoupled from 
 ## 1. Module Structure
 
 ```text
-src/weather/
+src/core/weather/
 ├── README.md                # This documentation file
 └── era5_manager.py          # Standalone modular weather downloader
 ```
@@ -79,12 +79,12 @@ graph TD
 ### Bash
 ```bash
 # Fetch weather data for a date range (skips already cached hours)
-python -m src.weather.era5_manager \
+python -m src.core.weather.era5_manager \
     --start "2025-11-01" \
     --end "2025-12-31"
 
 # Fetch weather data with verbose debugging output
-python -m src.weather.era5_manager \
+python -m src.core.weather.era5_manager \
     --start "2025-11-01T00:00:00" \
     --end "2025-11-01T06:00:00" \
     --debug
@@ -93,12 +93,12 @@ python -m src.weather.era5_manager \
 ### PowerShell
 ```powershell
 # Fetch weather data for a date range (skips already cached hours)
-python -m src.weather.era5_manager `
+python -m src.core.weather.era5_manager `
     --start "2025-11-01" `
     --end "2025-12-31"
 
 # Fetch weather data with verbose debugging output
-python -m src.weather.era5_manager `
+python -m src.core.weather.era5_manager `
     --start "2025-11-01T00:00:00" `
     --end "2025-11-01T06:00:00" `
     --debug

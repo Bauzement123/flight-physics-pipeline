@@ -18,7 +18,7 @@ It operates as **Loop 2b** and **Loop 2c** of the Flight Physics Pipeline.
 ## 1. Module Structure
 
 ```text
-src/corridor_modeling/
+src/core/corridor/
 ├── README.md                  # This documentation file
 ├── path_generator.py          # Core engine that performs coordinate projection, DTW medoid search, and SI grids
 ├── corridor_orchestrator.py   # CLI entrypoint for batch trajectory synthesis (Option A)
@@ -86,7 +86,7 @@ graph TD
     C -->|3. Load trajectory parquets| D[Cohort Dataframes]
     D -->|4. Clean holding patterns| E[Normalized Tracks]
     E -->|5. Vectorize & fit PCA| F[Trajectory PCA Space]
-    F -->|6. Calculate delta-CV| G{delta-CV < threshold?}
+    F -->|6. Calculate delta-CV| G{"delta-CV < threshold?"}
     G -->|No| H[Expand sample size N & requery]
     H --> D
     G -->|Yes| I[Mark route as converged]
@@ -99,7 +99,7 @@ graph TD
     M -->|14. Clean & fit PCA| N[Converged PCA Space]
     N -->|15. K-Means Silhouette check| O[Optimal clusters K & labels]
     O -->|16. Medoid selection| P[Identify originally-clean medoid paths]
-    P -->|17. Save corridor templates| Q[data/corridor_paths/<route>_corridor_c{id}.parquet]
+    P -->|17. Save corridor templates| Q["data/corridor_paths/<route>_corridor_c{id}.parquet"]
     Q -->|18. Batch update registry| R[global_model_registry.parquet]
 ```
 
@@ -133,11 +133,11 @@ graph TD
     B -->|4. Submit compute tasks| F[Pool 2: ProcessPoolExecutor CPU]
     E -->|5. Load raw file paths| F
     F -->|6. Clean holding patterns| G[Normalized Tracks]
-    G -->|7. Fit PCA & check stability| H{delta-CV < threshold?}
+    G -->|7. Fit PCA & check stability| H{"delta-CV < threshold?"}
     H -->|No| I[Re-queue for fetching larger sample]
     I --> C
     H -->|Yes| J[Run K-Means & select medoid paths]
-    J -->|8. Save corridor templates| K[data/corridor_paths/<route>_corridor_c{id}.parquet]
+    J -->|8. Save corridor templates| K["data/corridor_paths/<route>_corridor_c{id}.parquet"]
     
     B -->|9. Main-thread serial writes| L[Pool 3: Registry Flush]
     K -->|10. Register corridors| L
@@ -176,19 +176,19 @@ graph TD
 # ==========================================
 
 # Step 1: Run Stage 2 Stability Campaign on ranks 1-100 (4 workers)
-python -m src.corridor_modeling.stability_orchestrator \
+python -m src.core.corridor.stability_orchestrator \
     --lower-rank 1 \
     --upper-rank 100 \
     --max-workers 4
 
 # Step 2: Run Stage 3 Clustering Campaign on ranks 1-100
-python -m src.corridor_modeling.clustering_orchestrator \
+python -m src.core.corridor.clustering_orchestrator \
     --lower-rank 1 \
     --upper-rank 100 \
     --max-workers 4
 
 # Step 3: Run Trajectory Synthesis directly on rank 76
-python -m src.corridor_modeling.corridor_orchestrator \
+python -m src.core.corridor.corridor_orchestrator \
     --ranks 76 \
     --grid-seconds 60 \
     --overwrite
@@ -199,13 +199,13 @@ python -m src.corridor_modeling.corridor_orchestrator \
 # ==========================================
 
 # Run unified fetch-compute-write pipeline for specific ranks
-python -m src.corridor_modeling.streaming_pipeline \
+python -m src.core.corridor.streaming_pipeline \
     --ranks 1,5,12 \
     --fetch-threads 4 \
     --compute-workers 4
 
 # Run pipeline over rank range with stability checks disabled (single-pass fetch)
-python -m src.corridor_modeling.streaming_pipeline \
+python -m src.core.corridor.streaming_pipeline \
     --lower-rank 1 \
     --upper-rank 20 \
     --no-stability \
@@ -216,19 +216,19 @@ python -m src.corridor_modeling.streaming_pipeline \
 
 ```powershell
 # Run Stage 2 Stability Campaign on specific ranks
-python -m src.corridor_modeling.stability_orchestrator `
+python -m src.core.corridor.stability_orchestrator `
     --ranks 1,76,177 `
     --max-workers 4 `
     --overwrite
 
 # Run Stage 3 Clustering Campaign on specific ranks
-python -m src.corridor_modeling.clustering_orchestrator `
+python -m src.core.corridor.clustering_orchestrator `
     --ranks 1,76,177 `
     --max-workers 4 `
     --overwrite
 
 # Run Unified Streaming Pipeline in dry-run mode (prints route stats without running)
-python -m src.corridor_modeling.streaming_pipeline `
+python -m src.core.corridor.streaming_pipeline `
     --lower-rank 1 `
     --upper-rank 10 `
     --dry-run

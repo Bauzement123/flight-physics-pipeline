@@ -13,7 +13,7 @@ All outcomes, including summary tables, scatter plots, Pareto frontiers, heatmap
 ## 1. Module Structure
 
 ```text
-src/calibration/
+src/analysis/campaigns/
 ├── __init__.py                # Standard python package initialization
 ├── README.md                  # This documentation file (highly precise technical guide)
 ├── phase_a_d_pca.py           # Phase A: PCA dimension determination (D_PCA)
@@ -93,10 +93,10 @@ graph TD
     K -->|11. Write flight mappings| O[calibration_flight_cluster_map.parquet]
     O -->|12. Trigger batch plot generation| P(plot_helpers.py)
     P -->|13. Read/write cache| Q[calibration_plot_registry.parquet]
-    P -->|14. Save cohort plots| R[data/calibration/plots/*.png]
+    P -->|14. Save cohort plots| R["data/calibration/plots/*.png"]
     R -->|15. Load plots for report| L(variational_plots.py)
-    L -->|16. Generate stacked PDF reports| M[data/calibration/<route>_variational_summary.pdf]
-    L -->|17. Flush overall summary| N[data/calibration/all_routes_variational_summary.csv]
+    L -->|16. Generate stacked PDF reports| M["data/calibration/<route>_variational_summary.pdf"]
+    L -->|17. Flush overall summary| N["data/calibration/all_routes_variational_summary.csv"]
 ```
 
 #### Step-by-Step Description: Calibration Workflow
@@ -165,39 +165,39 @@ The orchestrator logs detailed metrics to both stdout and a rolling `variational
 
 ```bash
 # 1. Run Phase A PCA dimension calibration
-python -m src.calibration.phase_a_d_pca
+python -m src.analysis.campaigns.phase_a_d_pca
 
 # 2. Run Ground Truth geometric error vs. stability sweep (30 replicates)
-python -m src.calibration.gt_stability_sweep \
+python -m src.analysis.campaigns.gt_stability_sweep \
     --k-replicates 30
 
 # 3. Run Ground Truth sweep, printing summary tables without generating images
-python -m src.calibration.gt_stability_sweep \
+python -m src.analysis.campaigns.gt_stability_sweep \
     --k-replicates 30 \
     --table-only
 
 # 4. Run 3D Variational sweep orchestrator over all calibration routes (default 30 replicates)
-python -m src.calibration.variational_orchestrator \
+python -m src.analysis.campaigns.variational_orchestrator \
     --replicates 30
 
 # 5. Run variational sweep with custom replicates, output directory, and worker limit
-python -m src.calibration.variational_orchestrator \
+python -m src.analysis.campaigns.variational_orchestrator \
     --replicates 5 \
     --out-dir "data/calibration/run_v2" \
     --max-workers 4
 
 # 6. Run dry-run variational sweep (1 route, 2 replicates) for verification
-python -m src.calibration.variational_orchestrator \
+python -m src.analysis.campaigns.variational_orchestrator \
     --replicates 2 \
     --dry-run
 
 # 7. Manually generate Oracle cohort visualization plot
-python -m src.calibration.plot_cli \
+python -m src.analysis.campaigns.plot_cli \
     --route "LOWW-EHAM" \
     --config-type "oracle"
 
 # 8. Manually generate Pareto configuration cohort visualization plot
-python -m src.calibration.plot_cli \
+python -m src.analysis.campaigns.plot_cli \
     --route "LOWW-EHAM" \
     --config-type "pareto" \
     --n0 64 \
@@ -209,39 +209,39 @@ python -m src.calibration.plot_cli \
 
 ```powershell
 # 1. Run Phase A PCA dimension calibration
-python -m src.calibration.phase_a_d_pca
+python -m src.analysis.campaigns.phase_a_d_pca
 
 # 2. Run Ground Truth geometric error vs. stability sweep (30 replicates)
-python -m src.calibration.gt_stability_sweep \
+python -m src.analysis.campaigns.gt_stability_sweep \
     --k-replicates 30
 
 # 3. Run Ground Truth sweep, printing summary tables without generating images
-python -m src.calibration.gt_stability_sweep `
+python -m src.analysis.campaigns.gt_stability_sweep `
     --k-replicates 30 `
     --table-only
 
 # 4. Run 3D Variational sweep orchestrator over all calibration routes (default 30 replicates)
-python -m src.calibration.variational_orchestrator `
+python -m src.analysis.campaigns.variational_orchestrator `
     --replicates 30
 
 # 5. Run variational sweep with custom replicates, output directory, and worker limit
-python -m src.calibration.variational_orchestrator `
+python -m src.analysis.campaigns.variational_orchestrator `
     --replicates 5 `
     --out-dir "data/calibration/run_v2" `
     --max-workers 4
 
 # 6. Run dry-run variational sweep (1 route, 2 replicates) for verification
-python -m src.calibration.variational_orchestrator `
+python -m src.analysis.campaigns.variational_orchestrator `
     --replicates 2 `
     --dry-run
 
 # 7. Manually generate Oracle cohort visualization plot
-python -m src.calibration.plot_cli `
+python -m src.analysis.campaigns.plot_cli `
     --route "LOWW-EHAM" `
     --config-type "oracle"
 
 # 8. Manually generate Pareto configuration cohort visualization plot
-python -m src.calibration.plot_cli `
+python -m src.analysis.campaigns.plot_cli `
     --route "LOWW-EHAM" `
     --config-type "pareto" `
     --n0 64 `

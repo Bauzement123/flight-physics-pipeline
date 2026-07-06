@@ -7,7 +7,7 @@ The `analysis` module provides tools and scripts to aggregate flight trajectory 
 ## 1. Module Structure
 
 ```text
-src/analysis/
+src/analysis/verification/
 ├── flight_analysis.py             # CLI execution script for distance vs altitude analysis
 ├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
 ├── route_class_analysis.py        # CLI execution script for route class distribution histogram
@@ -70,7 +70,7 @@ graph TD
 > Visual rendering warning: Mermaid flowcharts require a compatible markdown viewer or renderer. If viewing in a raw text environment, refer to the step-by-step description below.
  
 ### Step-by-Step Data Workflow Description
-1. **Ingest Registries**: The orchestrator loads the global trajectory registry (`global_trajectory_registry.parquet`) and the global synthesized baseline registry (`global_synthesized_registry.parquet`) to identify files on disk. Simultaneously, it loads the master route summary pickle (`master_flights_route_summary.pkl`) to obtain geodesic route distances.
+1. **Ingest Registries**: The orchestrator loads the global trajectory registry (`global_trajectory_registry.parquet`) and the global synthesized baseline registry (`global_model_registry.parquet`) to identify files on disk. Simultaneously, it loads the master route summary pickle (`master_flights_route_summary.pkl`) to obtain geodesic route distances.
 2. **Batch Trajectory Processing**: The script loops over all unique parquet files, groups the waypoints by `flight_id`, and calculates the altitude at the top-K percent threshold using the `(1 - K/100)` quantile of the raw barometric pressure altitude column (`baroaltitude` for raw flights, `altitude` for synthesized paths).
 3. **Distance Matching**: The flight departure and arrival airport ICAOs are concatenated to form a route key `'DEP -> ARR'`. This key is matched against the route summary dictionary to retrieve the geodesic distance in meters.
 4. **Plotting**: Distance is scaled from meters to kilometers (`km`) for plotting, and the height threshold is kept in meters (`m`). Ticks and grid sublines are drawn at every 1 km (1,000 meters) of altitude. A scatter plot is generated with Matplotlib mapping airport distance (X-axis) against altitude (Y-axis), with synthesized baselines overlaid as red dots if enabled.
@@ -82,9 +82,9 @@ graph TD
 
 ### Bash Syntax Example
 ```bash
-python -m src.analysis.flight_analysis \
+python -m src.analysis.verification.flight_analysis \
   --registry data/flight_registry/registries/global_trajectory_registry.parquet \
-  --synthesized-registry data/flight_registry/registries/global_synthesized_registry.parquet \
+  --synthesized-registry data/flight_registry/registries/global_model_registry.parquet \
   --summary data/flight_registry/master_flights_route_summary.pkl \
   --output-dir data/analysis/plots \
   --min-distance 500 \
@@ -94,9 +94,9 @@ python -m src.analysis.flight_analysis \
 
 ### PowerShell Syntax Example
 ```powershell
-python -m src.analysis.flight_analysis `
+python -m src.analysis.verification.flight_analysis `
   --registry data/flight_registry/registries/global_trajectory_registry.parquet `
-  --synthesized-registry data/flight_registry/registries/global_synthesized_registry.parquet `
+  --synthesized-registry data/flight_registry/registries/global_model_registry.parquet `
   --summary data/flight_registry/master_flights_route_summary.pkl `
   --output-dir data/analysis/plots `
   --min-distance 500 `
@@ -109,7 +109,7 @@ python -m src.analysis.flight_analysis `
 
 #### Flight Distance vs. Height Plot (`flight_analysis.py`)
 * `--registry` (string): Path to the global raw trajectory manifest registry. Default: `data/flight_registry/registries/global_trajectory_registry.parquet`.
-* `--synthesized-registry` (string): Path to the global synthesized baseline registry. Default: `data/flight_registry/registries/global_synthesized_registry.parquet`.
+* `--synthesized-registry` (string): Path to the global synthesized baseline registry. Default: `data/flight_registry/registries/global_model_registry.parquet`.
 * `--summary` (string): Path to the route summary database. Default: `data/flight_registry/master_flights_route_summary.pkl`.
 * `--output-dir` (string): Destination directory for the exported plot. Default: `data/analysis/plots`.
 * `--min-height` (float): Minimum peak height in meters to filter out ground-level or truncated flights. Default: `0.0`.
@@ -135,20 +135,20 @@ python -m src.analysis.flight_analysis `
 ### CLI Syntax Examples (Route Popularity)
 ```bash
 # Standard window binning with 100km bins, filtering out routes with < 5 flights
-python -m src.analysis.route_popularity_analysis --bin-size 100 --min-frequency 5
+python -m src.analysis.verification.route_popularity_analysis --bin-size 100 --min-frequency 5
 
 # Cumulative binning with 200km bins, including all routes
-python -m src.analysis.route_popularity_analysis --bin-size 200 --cumulative --min-frequency 1
+python -m src.analysis.verification.route_popularity_analysis --bin-size 200 --cumulative --min-frequency 1
 ```
 
 #### Route Class Distribution Plot (`route_class_analysis.py`)
-* `--registry` (string): Path to the global synthesized baseline registry. Default: `data/flight_registry/registries/global_synthesized_registry.parquet`.
+* `--registry` (string): Path to the global synthesized baseline registry. Default: `data/flight_registry/registries/global_model_registry.parquet`.
 * `--output-plot` (string): Destination path for the exported distribution plot. Default: `data/analysis/plots/route_class_distribution.svg`.
 
 ### CLI Syntax Examples (Route Class Distribution)
 ```bash
 # Calculate route class distribution percentages and save the distribution histogram
-python -m src.analysis.route_class_analysis
+python -m src.analysis.verification.route_class_analysis
 ```
 
 #### Flight Level Distribution Boxplots (`flight_level_analysis.py`)
@@ -162,10 +162,10 @@ python -m src.analysis.route_class_analysis
 ### CLI Syntax Examples (Flight Level Distributions)
 ```bash
 # Generate route-by-route sorted boxplot distribution
-python -m src.analysis.flight_level_analysis --top-k-percent 10
+python -m src.analysis.verification.flight_level_analysis --top-k-percent 10
 
 # Generate 200km binned distance bracket boxplot distribution
-python -m src.analysis.flight_level_analysis --dist-step 200 --top-k-percent 10
+python -m src.analysis.verification.flight_level_analysis --dist-step 200 --top-k-percent 10
 ```
 
 ---

@@ -10,7 +10,7 @@ This module represents the second step in the Flight Physics Pipeline. It is res
 ## 1. Module Structure
 
 ```text
-src/processing/
+src/core/processing/
 ├── README.md                      # This primary documentation
 ├── kalman_filter.py               # EKF filtering & resampling engine
 └── TRAFFIC_LIBRARY_EKF_ANALYSIS.md # Advanced EKF mathematical reference
@@ -80,22 +80,22 @@ graph TD
 ### Bash
 ```bash
 # 1. Smooth a single raw trajectory file (automatically saves to sibling 'clean/' sub-folder)
-python -m src.processing.kalman_filter \
+python -m src.core.processing.kalman_filter \
     --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
 
 # 2. Batch smooth an entire directory of raw trajectories (skips already-processed files)
-python -m src.processing.kalman_filter \
+python -m src.core.processing.kalman_filter \
     --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw"
 ```
 
 ### PowerShell
 ```powershell
 # 1. Smooth a single raw trajectory file
-python -m src.processing.kalman_filter `
+python -m src.core.processing.kalman_filter `
     --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
 
 # 2. Batch smooth an entire directory of raw trajectories
-python -m src.processing.kalman_filter `
+python -m src.core.processing.kalman_filter `
     --input-file "data\trajectories\ranks_1-2_strat_fixed_val_1.0_seed_42_format_oneway_start_2025-01-01T00-00-00_end_2025-01-31T23-59-59_198b87"
 ```
 
