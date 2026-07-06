@@ -167,3 +167,84 @@ Rules:
 * Each workflow sub-section is numbered (4.1, 4.2, …) and titled with the script filename.
 * Diagrams must be self-contained — a reader should be able to understand one workflow without reading the others.
 * If two scripts share a significant portion of their workflow (e.g., both write to the same registry), this shared portion is described once in a "Shared Infrastructure" note at the top of Section 4, then referenced briefly in each sub-diagram.
+
+---
+
+## 7. Code Review and Quality Audit Standards
+
+Before broad documentation rewrites or major architectural refactors, perform a module-wise code review and record observations in temporary planning/audit notes under `data/temp/plans/`.
+
+For each module, systematically inspect:
+1. **Separation of concerns**: Ensure CLI parsing, business logic, and I/O are cleanly decoupled.
+2. **Code atomization & function length**: Keep entrypoint `main()` functions ≤ 80 lines and helpers ≤ 50 lines.
+3. **Dead code & unused imports**: Remove unreferenced variables, constants, and imports.
+4. **Config & path centralization**: Derive all paths from `BASE_DIR` in `config.py`.
+5. **Logging consistency**: Ensure single `setup_file_logger()` invocation per entrypoint.
+6. **Registry & cache consistency**: Verify atomic write patterns and uniform deduplication rules.
+7. **CLI design consistency**: Expose standard flags (`--out-dir`, `--log-file`, `--max-workers`, `--resume`).
+8. **Error handling & failure gates**: Log critical errors at `CRITICAL` level followed by clean `sys.exit(1)`.
+9. **Concurrency & process safety**: Guard shared resources and document thread vs. process pools.
+10. **Data schema contracts**: Centralize dataframe column whitelists and rename dictionaries.
+11. **Type hints & IO contracts**: Annotate all public helper functions and entrypoint methods.
+12. **Testability & pure-function boundaries**: Isolate data transformations from filesystem mutation.
+
+---
+
+## 8. Git, Workspace Hygiene & Scratch Policy
+
+* **Artifact Isolation**: Never commit generated files, recovered chat histories, local scratch folders, or OS artifacts (`.DS_Store`, `Thumbs.db`, `desktop.ini`).
+* **Broken Ref Hygiene**: If `git log --all` fails due to corrupted `.git/refs/**/desktop.ini` files, clean only those invalid ref files before executing historical git audits.
+* **Directory Policy**:
+  ```text
+  tools/ or src/devtools/        Tracked reusable developer utilities
+  scratch/                       Ignored local notes and experiments
+  data/temp/                     Ignored runtime temp and generated planning artifacts
+  src/scratchpad/                Deprecated or emptied after migration to real modules/tools
+  ```
+
+---
+
+## 9. Stale Reference & Namespace Hygiene
+
+Before finalizing documentation or refactor milestones, verify that no stale legacy paths or placeholder registry filenames remain. Run standard workspace greps:
+
+```bash
+grep -RIn "src/acquisition\|src/fetching\|src/filtering\|src/processing\|src/physics" src --include="README.md"
+grep -RIn "data/flight_registry\|global_synthesized\|global_corridor_registry" src --include="README.md"
+```
+
+Canonical modern namespaces:
+`src/core/acquisition/`, `src/core/fetching/`, `src/core/filtering/`, `src/core/processing/`, `src/core/corridor/`, `src/core/weather/`, `src/core/physics/`, `src/analysis/campaigns/`, `src/analysis/verification/`.
+
+---
+
+## 10. Tiered Agent Delegation & Cost-Optimization Architecture
+
+To maximize engineering velocity while keeping token consumption economical, the repository operates under a **Tiered Agent Delegation Architecture**:
+
+### 10.1 Roles & Responsibilities
+* **Primary Architect & Orchestrator (Antigravity / Frontier Models)**: Responsible for system architecture, complex multi-file planning, high-precision code review, git commit verification, and quality gate enforcement. Avoids burning frontier tokens on raw high-volume drafting, repetitive boilerplate generation, or initial document extraction.
+* **Drafting & Synthesis Engine (Local / Open-Source Models e.g., GPT OSS 120B via Continue or Claw Code)**: Responsible for heavy text synthesis, reading long audit logs, drafting initial markdown pattern catalogs, and performing broad routine scans.
+
+### 10.2 Delegation Protocols & Structured Return Formats
+1. **Batched Prompting**: When delegating synthesis tasks (e.g., cross-module pattern extraction) to local open-source models, split instructions into focused batches (e.g., 3–4 categories per prompt) referencing explicit file paths to avoid context drift and output truncation.
+2. **Structured Predraft Return Formats**: When delegating analytical or comparison tasks (such as Step 4.2 cross-module comparisons or Step 4.3 rule drafting), explicitly instruct the local model to return outputs as **structured predrafts** (e.g., Markdown comparison tables, explicit bulleted option lists, or draft rule blocks tagged with `[DRAFT]`). This ensures the local engine performs the heavy reading and initial structuring, leaving only a rapid, high-precision final review and polish pass for the Primary Architect.
+3. **Safe CLI Execution Boundaries & Clean JSON Extraction**: When invoking external local CLI agents (such as Claw Code) from automated scripts or pipelines where output must be saved to a file or parsed programmatically:
+   * **Use `--output-format json`**: Avoid `--output-format text` when writing to file (`Out-File`), as it embeds ANSI terminal spinners (`Thinking...`) and tool execution logs into the output file. Instead, invoke with `--output-format json` and parse the `.message` property.
+   * **PowerShell UTF-8 Encoding & Mojibake Prevention**: In PowerShell 5.1 on Windows, pipeline streams (`| Out-String` or pipe captures) decode external process output using `[Console]::OutputEncoding` (which defaults to Windows-1252). This corrupts multi-byte UTF-8 Unicode characters (such as non-breaking hyphens `‐`, en-dashes `–`, curly apostrophes `’`, and math symbols `≈`, `≤`) into garbled Mojibake strings (`ÔÇæ`, `Ôëñ`). To prevent character corruption, always force UTF-8 console encoding before executing pipeline captures:
+     ```powershell
+     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+     $OutputEncoding = [System.Text.Encoding]::UTF8
+     $json = Get-Content prompt.txt | claw --model gpt-oss-120b --permission-mode read-only --allowedTools read,glob --output-format json prompt --stdin | Out-String | ConvertFrom-Json
+     [IO.File]::WriteAllText("output.md", $json.message, [System.Text.Encoding]::UTF8)
+     ```
+   * **Prompt Piping vs. CLI Arguments**: Always pass prompt instructions and paths via input files piped to `--stdin` rather than `@parameter` syntax or raw string command-line arguments to ensure robust path resolution and prevent escaping errors.
+   * **Environment Variable Propagation**: When running in PowerShell sub-processes after setting API credentials via `setx`, ensure session variables are refreshed or explicitly loaded (`[Environment]::GetEnvironmentVariables(...)`) before invoking the CLI tool.
+4. **Strict Prohibition Against Creating/Executing Standalone `.ps1` Scripts**:
+   * **Never create temporary or standalone `.ps1` script files** (e.g., `run_claw.ps1`, `audit.ps1`) to run external tools or Claw Code. Executing `.ps1` files frequently fails across Windows environments due to PowerShell Execution Policy blocks (`Restricted`/`RemoteSigned`), UTF-16LE/BOM encoding mismatches when generating the script file, and quote-stripping across sub-shell boundaries.
+   * **Mandatory Execution Pattern**: Always execute commands directly inline using the terminal command tool (passing the exact PowerShell command block inline). Never wrap commands into `.ps1` script files on disk.
+5. **Verification Loop**: All predrafts generated by local drafting engines must be reviewed, refined, and verified by the Primary Architect against the standards in this document before being integrated into permanent repository documentation or source code.
+
+### 10.3 Standalone Rules & Copy-Pasteable Templates
+For full execution templates, copy-pasteable PowerShell blocks, and standalone guidelines on delegating to local open-source models via Claw Code (`gpt-oss-120b`), consult [.agents/rules/claw_delegation_rules.md](file:///G:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/.agents/rules/claw_delegation_rules.md).
+

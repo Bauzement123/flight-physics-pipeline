@@ -114,7 +114,7 @@ def clean_trajectories(input_file: str, out_dir: str):
             # Generate a 1-minute time grid between start and end of flight
             start_time = f_data['timestamp'].min()
             end_time = f_data['timestamp'].max()
-            grid_times = pd.date_range(start=start_time.floor('min'), end=end_time.ceil('min'), freq='1min', tz='UTC')
+            grid_times = pd.date_range(start=start_time.floor('min'), end=end_time.ceil('min'), freq='1min')
             
             # Create a grid DataFrame with timestamps
             df_grid = pd.DataFrame({'timestamp': grid_times})

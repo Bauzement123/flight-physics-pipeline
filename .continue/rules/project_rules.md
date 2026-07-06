@@ -127,3 +127,9 @@ src/scratchpad/                deprecated or emptied after migration
 ```
 
 Do not move or delete scratchpad utilities without an explicit classification pass and user approval.
+
+---
+
+## 6. Tiered Agent Delegation & Claw Code Protocols
+
+For detailed instructions and exact execution scripts when delegating heavy analysis, codebase scanning, and predrafting to local models via Claw Code (`gpt-oss-120b`), see [claw_delegation_rules.md](file:///G:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/.continue/rules/claw_delegation_rules.md).
