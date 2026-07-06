@@ -413,8 +413,8 @@ def run_batch_clone_simulation(
     
     if test_mode:
         logger.info("=== RUNNING IN TEST MODE ===")
-        start_date = "2025-12-03"
-        end_date = "2025-12-04"
+        start_date = "2025-01-02"
+        end_date = "2025-01-03"
         day_by_day = False
         
     if not start_date or not end_date:
