@@ -2,7 +2,31 @@
 data/
 weather_cache/
 
-# Python compiler outputs and caching
+# Continue / local AI assistant configuration
+.continue/agents/
+.continue/rules/new-rule.md
+.continue/**/desktop.ini
+
+# Local scratch, temporary plans, recovered chats, and accidental workspace artifacts
+scratch/
+G/
+recovered*_chat_history.md
+recovered_today_chat_history.md
+pipeline_changes.diff
+step*.md
+
+# Agent sandbox and local tool directories
+.claw/
+.sandbox-home/
+.sandbox-tmp/
+
+# Legacy data and old route concat directories
+legacy/
+
+# Thesis and project management artifacts
+PA/
+
+# Python compiler outputs, caching, environments, and packaging
 __pycache__/
 *.pyc
 *.pyo
@@ -10,6 +34,17 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ipynb_checkpoints/
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Coverage / test artifacts
+.coverage
+htmlcov/
+coverage.xml
 
 # Runtime log files
 *.log
@@ -26,6 +61,6 @@ extraction.log
 .idea/
 *.code-workspace
 desktop.ini
+.DS_Store
+Thumbs.db
 
-# Project management and thesis artifacts
-PA/

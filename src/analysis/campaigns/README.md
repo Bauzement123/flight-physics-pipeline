@@ -1,0 +1,302 @@
+# Hyperparameter Calibration Module
+
+This module handles the calibration of key hyperparameters ($D_{PCA}$, $N_{standard}$, $N_0$, $\tau$, and $K_{max}$) for spatial compression, trajectory stability checking, and corridor clustering. It runs statistical simulations, bootstrap sweeps, and benchmarks against Oracle Ground Truth parameters to optimize query costs while maintaining high-fidelity flight path extraction.
+
+The calibration workflow consists of two main campaigns:
+1. **Phase A Calibration (`phase_a_d_pca.py`)**: Evaluates fully-fetched cohorts across calibration routes to determine the minimum number of PCA components ($D_{PCA}$) required to capture at least 95% of spatial coordinate variance.
+2. **Phase B / 3D Variational Calibration (`variational_orchestrator.py`)**: Runs grid sweeps across initial query size ($N_0$), stability threshold ($\tau$), and maximum clusters ($K_{max}$) to locate the Pareto frontier of expected query costs versus geometric error.
+
+All outcomes, including summary tables, scatter plots, Pareto frontiers, heatmaps, and multi-page PDF reports, are written to the centralized `data/calibration/` folder (or a custom directory specified via the CLI).
+
+---
+
+## 1. Module Structure
+
+```text
+src/analysis/campaigns/
+├── __init__.py                # Standard python package initialization
+├── README.md                  # This documentation file (highly precise technical guide)
+├── phase_a_d_pca.py           # Phase A: PCA dimension determination (D_PCA)
+├── gt_stability_sweep.py      # Ground Truth geometric error vs. stability metric sweep
+├── variational_orchestrator.py # 3D Variational parameter sweep orchestrator (grid search & concurrency)
+├── variational_plots.py       # Visualization & PDF report compiler for parameter sweeps
+├── plot_helpers.py            # Cohort trajectory visualization & cache registry helper
+└── plot_cli.py                # Standalone CLI tool to manually render cohort plots
+```
+
+---
+
+## 2. Function Analysis Solution Tree (FAST)
+
+```text
+Module Objectives
+ └── Calibrate spatial compression and stability hyperparameters against Ground Truth (Phase A & B)
+      │
+      ├── Sub-objective 1: Determine optimal PCA dimensions (D_PCA)
+      │    └── Solution: run_phase_a() in phase_a_d_pca.py
+      │         ├── Inputs: raw trajectory registry, calibration routes list
+      │         └── Outputs: recommended D_PCA (95% variance) and baseline N_STANDARD
+      │
+      ├── Sub-objective 2: Benchmark split-half stability metrics against physical deviation
+      │    └── Solution: run_gt_sweep() in gt_stability_sweep.py
+      │         ├── Inputs: trajectory registry, N values, bootstrap replicates (k-replicates)
+      │         └── Outputs: raw/summary error CSV files, error-vs-N line plots, scatter plots
+      │
+      ├── Sub-objective 3: Orchestrate multi-dimensional grid sweeps (N_0 x tau x K_max) in parallel
+      │    └── Solution: main() in variational_orchestrator.py
+      │         ├── Inputs: route data, parameter grids (N0, tau, Kmax), bootstrap replicates
+      │         ├── Outputs: raw/summary variational grid CSVs, combined all-route summary
+      │         └── Concurrency: Oracle baselines prepared sequentially; route sweeps dispatched 
+      │                          concurrently via an OOM-resilient, dynamically scaling ProcessPoolExecutor
+      │
+      ├── Sub-objective 4: Compile visual report dashboards with Oracle Class, Pareto Frontiers, and stacked cohort plots
+      │    └── Solution: generate_route_pdf_report() in variational_plots.py
+      │         ├── Inputs: route variational summary, Oracle parameters, plots_per_page (default 3)
+      │         └── Outputs: multi-page PDF reports containing Pareto table, Pareto graph, stacked visualizations, and heatmaps
+      │
+      ├── Sub-objective 5: Compute physical 3D deviation metrics
+      │    └── Solution: _compute_geometric_error() in gt_stability_sweep.py
+      │         ├── Inputs: sample_medoid_vecs, oracle_medoid_vecs
+      │         ├── Formula: Bidirectional Chamfer Distance (0.5 * (Mean(Sample->Oracle) + Mean(Oracle->Sample)))
+      │         └── Outputs: symmetric mean 3D spatial waypoint deviation in kilometers
+      │
+      └── Sub-objective 6: Render clustered cohort plots & manage image registry caching
+           └── Solution: get_or_create_config_plot() in plot_helpers.py & plot_cli.py
+                ├── Inputs: route ID, configuration type (Oracle vs. Pareto), hyperparameters, replicate
+                ├── Caching: reads/writes metadata to CALIBRATION_PLOT_REGISTRY; saves PNGs to CALIBRATION_PLOTS_DIR
+                └── Outputs: 2-panel trajectory plot (Ground Track & Vertical Profile with bold medoids)
+```
+
+---
+
+## 3. Data Workflow
+
+> [!NOTE]
+> **Visual Rendering Warning**: Flowcharts are generated using Mermaid. If your markdown viewer does not natively support Mermaid rendering, please refer to the step-by-step text description provided directly below each diagram.
+
+```mermaid
+graph TD
+    A[data/flight_registry/registries/global_trajectory_registry.parquet] -->|1. Ingest raw trajectories| B(phase_a_d_pca.py)
+    B -->|2. Crop & normalize| C[Calibration Cohorts]
+    C -->|3. Evaluate 95% variance| D[Recommended D_PCA & N_STANDARD]
+    D -->|4. Manual update| E[src/common/config.py Constants]
+    
+    A -->|5. Ingest raw trajectories| F(gt_stability_sweep.py)
+    E -->|Read active D_PCA| F
+    F -->|6. Establish fully-fetched baselines| G[Oracle medoids]
+    G -->|7. Bootstrap sub-sample sweeps| H[Geometric deviation vs. sample N]
+    H -->|8. Serialize results| I[data/calibration/gt_vs_stability_summary.csv & plots]
+    
+    A -->|9. Ingest raw trajectories| J(variational_orchestrator.py)
+    E -->|Read active D_PCA| J
+    J -->|10. Compute route grid cells| K[N_0 x tau x K_max runs]
+    K -->|11. Write flight mappings| O[calibration_flight_cluster_map.parquet]
+    O -->|12. Trigger batch plot generation| P(plot_helpers.py)
+    P -->|13. Read/write cache| Q[calibration_plot_registry.parquet]
+    P -->|14. Save cohort plots| R["data/calibration/plots/*.png"]
+    R -->|15. Load plots for report| L(variational_plots.py)
+    L -->|16. Generate stacked PDF reports| M["data/calibration/<route>_variational_summary.pdf"]
+    L -->|17. Flush overall summary| N["data/calibration/all_routes_variational_summary.csv"]
+```
+
+#### Step-by-Step Description: Calibration Workflow
+1. **Phase A Ingestion & Preprocessing**: The `phase_a_d_pca.py` script queries the trajectory registry and loads the complete cohort of flights for the centralized calibration routes. The flights are filtered to airborne phases and holding-pattern normalized.
+2. **Variance Evaluation**: The script vectorizes coordinates, runs PCA, and computes the minimum number of PCA components needed to capture at least 95% variance for each route. The median of these values is printed as the recommended `D_PCA`.
+3. **Config Constants Update**: The recommended `D_PCA` and its companion query cost `N_STANDARD = 5 * D_PCA` are manually updated in `src/common/config.py`.
+4. **GT Sweep Ingestion & Oracle Baseline**: Using the active configuration parameters, `gt_stability_sweep.py` loads the full flight cohorts to establish the "Oracle Ground Truth" medoids and optimal clusters for the calibration routes. The oracle return dict contains `route_class` (derived from stability evaluation).
+5. **GT Bootstrap Sweep**: For different sample sizes ($N$), the script draws random subsets and compares their medoid centroids to the Oracle medoids, computing the 3D geometric deviation in kilometers. It also computes split-half stability metrics ($X_{scaled}$ vs. $X_{pca}$ split-half).
+6. **GT Outcomes Generation**: The script writes raw and aggregated CSV files and outputs line graphs of error-vs-$N$ and metric scatter plots to `data/calibration/`.
+7. **Variational Sweep Orchestration**: The `variational_orchestrator.py` script first prepares Oracle baselines for all routes sequentially (to avoid concurrent parquet I/O contention), then dispatches `run_route_variational_sweep` tasks in dynamic batches concurrently using a `ProcessPoolExecutor`.
+8. **Iterative Pipeline Simulation**: For each parameter cell, the script simulates the Stage 2 stability loop (doubling $N$ if $\Delta$CV $\ge \tau$ up to a maximum of 2 rerun rounds) followed by Stage 3 clustering.
+9. **Bidirectional Geometric Error Calculation**: Instead of a simple one-way minimum distance, error calculations are done using a symmetric Chamfer distance formula:
+   $$\text{Error} = \frac{1}{2} \left( \frac{1}{|S|} \sum_{s \in S} \min_{o \in O} d(s, o) + \frac{1}{|O|} \sum_{o \in O} \min_{s \in S} d(s, o) \right)$$
+   This ensures that $K=1$ configurations are appropriately penalized for failing to capture secondary or tertiary corridors (Recall penalty), correcting the historical bias towards over-simplifying multi-modal routes.
+10. **Flight Mappings & Plot Generation**: After numerical simulation, flight assignments for all runs are saved to `CALIBRATION_FLIGHT_CLUSTER_MAP`. The orchestrator identifies the non-dominated Pareto front configurations and invokes `batch_generate_plots()` in `plot_helpers.py` to create cohort plots in parallel.
+11. **Persistent Image Caching**: The helper uses `CALIBRATION_PLOT_REGISTRY` to prevent duplicate plot rendering. It generates 2-panel visualizations (Left: Ground Track; Right: Vertical Profile) and flushes PNGs to `data/calibration/plots/`.
+12. **Visual Report Compiling**: The orchestrator invokes `generate_route_pdf_report` in `variational_plots.py` to compile a multi-page PDF report for each route containing:
+    * **Page 1**: Executive table listing the non-dominated Pareto front configurations.
+    * **Page 2**: Scatter plot displaying the Pareto frontier (expected query cost vs. median geometric error).
+    * **Page 3+**: Cohort visualizations stacked vertically (default `plots_per_page = 3` per page) starting with the Oracle Ground Truth followed by the Pareto front configurations.
+    * **Remaining Pages**: Error heatmaps for each $K_{max}$ value, with overlaid contour lines showing database query costs.
+13. **Combined Summary Flush**: Variational files are saved for each route, and combined files are flushed to `all_routes_variational_raw.csv` and `all_routes_variational_summary.csv`.
+
+---
+
+### 3.1. Performance Profile: Optimization & Memory Modes
+
+#### Standard vs. Low-Memory Concurrency Control
+Because each worker process loads ~500-700 MB of scientific libraries (`numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`) into memory, executing multiple routes concurrently can lead to Out-Of-Memory (OOM) situations on low-RAM environments. 
+
+To address this, `variational_orchestrator.py` uses an **Aggressive, OOM-Resilient Concurrency Scheduler**:
+* **Initial Allocation**: At startup, the scheduler reads total and available memory via `psutil`. It estimates the safe worker capacity:
+  $$\text{estimated\_workers} = \min\left(N_{\text{routes}}, \text{CPU Count}, \lfloor\text{Free RAM (GB)} / 0.6\rfloor\right)$$
+* **Aggressive Escalation**: The routes are chunked and dispatched in batches of size `current_workers`. If a batch finishes successfully with no MemoryErrors, the scheduler **increases** the worker count by 1 for the next batch to maximize hardware utilization, capped by the total remaining routes and CPU cores.
+* **OOM Pullback & Lock**: If any process encounters a `MemoryError` or `ProcessExpired` due to memory limits:
+  1. The failed route is immediately re-queued.
+  2. The worker count is scaled down: `current_workers = max(1, current_workers - 1)`.
+  3. A `limit_reached` flag is set to `True`, locking the worker count from scaling up again for the remainder of the run.
+
+---
+
+### 3.2. Metric & Progress Logging Formats
+
+The orchestrator logs detailed metrics to both stdout and a rolling `variational_orchestrator.log` file:
+
+* **Startup Memory Assessment**:
+  ```text
+  2026-07-01 13:46:57,817 - [3D-VARIATIONAL] - INFO - System: 7.3 GB total RAM, 2.1 GB free. Starting with max_workers=2.
+  ```
+* **Success and Concurrency Scaling**:
+  ```text
+  2026-07-01 13:54:10,853 - [3D-VARIATIONAL] - INFO - [EDDF-LIRF] Sweep completed in 83.93s.
+  2026-07-01 13:54:14,081 - [3D-VARIATIONAL] - INFO - No OOM detected. Aggressively scaling workers 2 -> 3.
+  ```
+* **OOM Event & Pullback Action**:
+  ```text
+  2026-07-01 13:55:12,104 - [3D-VARIATIONAL] - WARNING - [ESSA-LEMD] OOM/MemoryError at max_workers=4: [MemoryLimitExceeded]
+  2026-07-01 13:55:12,108 - [3D-VARIATIONAL] - WARNING - OOM detected. Scaling workers 4 -> 3. Re-queuing 2 route(s): ['ESSA-LEMD', 'LFRS-LFMN']
+  ```
+
+---
+
+## 4. CLI Usage Guide
+
+### Bash
+
+```bash
+# 1. Run Phase A PCA dimension calibration
+python -m src.analysis.campaigns.phase_a_d_pca
+
+# 2. Run Ground Truth geometric error vs. stability sweep (30 replicates)
+python -m src.analysis.campaigns.gt_stability_sweep \
+    --k-replicates 30
+
+# 3. Run Ground Truth sweep, printing summary tables without generating images
+python -m src.analysis.campaigns.gt_stability_sweep \
+    --k-replicates 30 \
+    --table-only
+
+# 4. Run 3D Variational sweep orchestrator over all calibration routes (default 30 replicates)
+python -m src.analysis.campaigns.variational_orchestrator \
+    --replicates 30
+
+# 5. Run variational sweep with custom replicates, output directory, and worker limit
+python -m src.analysis.campaigns.variational_orchestrator \
+    --replicates 5 \
+    --out-dir "data/calibration/run_v2" \
+    --max-workers 4
+
+# 6. Run dry-run variational sweep (1 route, 2 replicates) for verification
+python -m src.analysis.campaigns.variational_orchestrator \
+    --replicates 2 \
+    --dry-run
+
+# 7. Manually generate Oracle cohort visualization plot
+python -m src.analysis.campaigns.plot_cli \
+    --route "LOWW-EHAM" \
+    --config-type "oracle"
+
+# 8. Manually generate Pareto configuration cohort visualization plot
+python -m src.analysis.campaigns.plot_cli \
+    --route "LOWW-EHAM" \
+    --config-type "pareto" \
+    --n0 64 \
+    --tau 0.10 \
+    --kmax 4
+```
+
+### PowerShell
+
+```powershell
+# 1. Run Phase A PCA dimension calibration
+python -m src.analysis.campaigns.phase_a_d_pca
+
+# 2. Run Ground Truth geometric error vs. stability sweep (30 replicates)
+python -m src.analysis.campaigns.gt_stability_sweep \
+    --k-replicates 30
+
+# 3. Run Ground Truth sweep, printing summary tables without generating images
+python -m src.analysis.campaigns.gt_stability_sweep `
+    --k-replicates 30 `
+    --table-only
+
+# 4. Run 3D Variational sweep orchestrator over all calibration routes (default 30 replicates)
+python -m src.analysis.campaigns.variational_orchestrator `
+    --replicates 30
+
+# 5. Run variational sweep with custom replicates, output directory, and worker limit
+python -m src.analysis.campaigns.variational_orchestrator `
+    --replicates 5 `
+    --out-dir "data/calibration/run_v2" `
+    --max-workers 4
+
+# 6. Run dry-run variational sweep (1 route, 2 replicates) for verification
+python -m src.analysis.campaigns.variational_orchestrator `
+    --replicates 2 `
+    --dry-run
+
+# 7. Manually generate Oracle cohort visualization plot
+python -m src.analysis.campaigns.plot_cli `
+    --route "LOWW-EHAM" `
+    --config-type "oracle"
+
+# 8. Manually generate Pareto configuration cohort visualization plot
+python -m src.analysis.campaigns.plot_cli `
+    --route "LOWW-EHAM" `
+    --config-type "pareto" `
+    --n0 64 `
+    --tau 0.10 `
+    --kmax 4
+```
+---
+
+### 4.1. Parameter References
+
+#### Parameter Reference (`gt_stability_sweep.py`)
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--k-replicates` | `int` | `30` | Number of bootstrap replicate selections to run per sample size. |
+| `--table-only` | `flag` | *False* | If set, generates and saves only summary CSV files, bypassing Matplotlib plot rendering. |
+
+#### Parameter Reference (`variational_orchestrator.py`)
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--replicates` | `int` | `30` | Number of bootstrap replicate simulations to run per parameter grid cell. |
+| `--dry-run` | `flag` | *False* | Enables dry-run mode: limits the sweep to 1 route, 2 replicates, and disables PDF report rendering. |
+| `--max-workers` | `int` | *None* | Sets an upper bound on starting process concurrency. If omitted, scales dynamically based on RAM/CPU. |
+| `--out-dir` | `str` | *None* | Custom destination directory for CSV logs and compiled PDF dashboards. Defaults to `data/calibration/`. |
+
+#### Parameter Reference (`plot_cli.py`)
+
+| CLI Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--route` | `str` | *None* | **[Required]** Route ID to visualize (e.g. `LOWW-EHAM`). |
+| `--config-type` | `str` | `oracle` | Choice of configuration to plot: `oracle` or `pareto`. |
+| `--n0` | `int` | `64` | Initial sample size $N_0$ (only used if `config-type` is `pareto`). |
+| `--tau` | `float` | `0.10` | Stability threshold $\tau$ (only used if `config-type` is `pareto`). |
+| `--kmax` | `int` | `4` | Maximum clusters $K_{max}$ (only used if `config-type` is `pareto`). |
+| `--replicate` | `int` | `0` | Replicate seed to plot (only used if `config-type` is `pareto`). |
+
+---
+
+## 5. Prerequisites & Dependencies
+
+### Python Libraries
+* `pandas` & `pyarrow` (for Parquet and CSV table storage)
+* `numpy` (for matrix math, distance calculations, and scaling)
+* `scikit-learn` (for PCA and K-Means clustering)
+* `matplotlib` (for heatmaps, scatter plots, and multi-page PDF generation)
+* `psutil` (for CPU and RAM monitoring)
+
+### Input Files
+* `data/flight_registry/registries/global_trajectory_registry.parquet` (provides trajectory paths)
+* Python modules:
+  * `src.common.config`
+  * `src.common.registry_io`
+  * `src.corridor_modeling.pca_compressor`
+  * `src.corridor_modeling.clustering_worker`
+  * `src.corridor_modeling.stability_worker`
+
+For physical units, coordinate transformations, and directory structure conventions, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
