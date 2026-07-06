@@ -13,7 +13,12 @@ import pandas as pd
 import numpy as np
 from traffic.data import airports
 
-from src.common.config import ROUTE_SUMMARY_PARQUET, ROUTE_SUMMARY_CSV, ROUTE_SUMMARY_PKL
+from src.common.config import (
+    ROUTE_SUMMARY_PARQUET,
+    ROUTE_SUMMARY_CSV,
+    ROUTE_SUMMARY_PKL,
+    init_runtime,
+)
 from src.common.utils import setup_file_logger
 
 # Configure logging
@@ -141,7 +146,8 @@ def enrich_route_summary(
     return True
 
 if __name__ == "__main__":
-    setup_file_logger(log_filename="enrichment.log")
+    init_runtime()
+    setup_file_logger(log_filename="acquisition.log")
     pkl_file = ROUTE_SUMMARY_PKL
     csv_file = ROUTE_SUMMARY_CSV
     parquet_file = ROUTE_SUMMARY_PARQUET

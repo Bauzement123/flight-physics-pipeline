@@ -5,8 +5,9 @@ The `acquisition` module handles Track A (fetching flights from Trino) and Track
 ## 1. Module Structure
 
 ```text
-src/acquisition/
+src/core/acquisition/
 ├── build_master_population.py  # Queries Trino FlightsData4 (Track A)
+├── enrich_route_summary.py     # Enriches route summaries with vectorized great-circle distances
 ├── fleet_builder.py            # Slices OpenAirframes & AircraftDB (Track B)
 └── master_merger.py            # Merges flights population and fleet registry
 ```
@@ -38,15 +39,23 @@ Acquisition Module
         ├── Full outer merge of both database DataFrames on 'icao24'
         ├── Coalesce columns (preferring OpenAirframes values, falling back to OpenSky when null)
         └── Export final results in both CSV and Parquet formats to the output directory
-└── Merge Flights and Fleet Registry (master_merger.py)
-    ├── Auto-resolve or load specific flight population and enriched fleet files
-    ├── Clean/normalize icao24 merge keys
-    ├── Perform Inner Join on 'icao24' to align flights with fleet metadata
-    ├── Align and order schema with the target 14 columns
-    └── Export final merged dataset (default: master_flights.parquet)
+├── Merge Flights and Fleet Registry (master_merger.py)
+│   ├── Auto-resolve or load specific flight population and enriched fleet files
+│   ├── Clean/normalize icao24 merge keys
+│   ├── Perform Inner Join on 'icao24' to align flights with fleet metadata
+│   ├── Align and order schema with the target 14 columns
+│   └── Export final merged dataset (default: master_flights.parquet)
+└── Enrich Route Summary (enrich_route_summary.py)
+    ├── Load RouteSummary pickle/csv/parquet file
+    ├── Split route descriptions (e.g., LIRF -> LFMN) into origin/dest ICAOs
+    ├── Retrieve latitude/longitude coordinates via traffic.data.airports
+    ├── Compute geodetic great-circle distances via vectorized Haversine formula
+    └── Overwrite summary files with new distance_m column
 ```
 
 ## 3. Data Workflow
+
+### 3.1 Workflow A — Population Ingestion, Fleet Building & Merger (`build_master_population.py`, `fleet_builder.py`, `master_merger.py`)
 
 The acquisition module executes Track A and Track B in parallel, then merges them:
 
@@ -102,11 +111,29 @@ graph TD
 3. **Merger Stage**:
    * `master_merger.py` loads the latest flight population and enriched fleet files, performs an inner join on `icao24`, filters and orders the columns to the final 14-column layout, and saves the output to `data/flight_registry/master_flights.parquet`.
 
+---
+
+### 3.2 Workflow B — Route Summary Distance Enrichment (`enrich_route_summary.py`)
+
+```mermaid
+graph TD
+    A[data/flight_registry/master_flights_route_summary.pkl] -->|Read & Split Routes| B[enrich_route_summary.py]
+    C[(traffic.data.airports)] -->|Retrieve Airport Coordinates| B
+    B -->|Calculate Great-Circle Distance| D[Calculate Haversine Distance in Meters]
+    D -->|Write Enriched Output| E[data/flight_registry/master_flights_route_summary.csv / .pkl / .parquet]
+```
+
+**Step-by-step:**
+1. **Route Summary Loading**: `enrich_route_summary.py` loads the aggregated flight summary file (`master_flights_route_summary.pkl`).
+2. **Endpoint Coordinate Parsing**: It splits route strings (e.g., `LIRF -> LFMN`) into origin and destination ICAO codes, then queries the `traffic` airport library (`traffic.data.airports`) to retrieve latitude and longitude coordinates for each unique airport.
+3. **Vectorized Haversine Calculation**: Using vectorized NumPy trigonometric math, it calculates the great-circle geodesic distance between origin and destination coordinates in meters.
+4. **Export**: The resulting DataFrame, enriched with the `distance_m` column, overwrites the master route summary files in Pickle, Parquet, and CSV formats.
+
 ## 4. CLI Usage Guide
 
 ### Ingest Flights (Track A)
 ```bash
-python -m src.acquisition.build_master_population --start-date "2025-01-01" --end-date "2025-01-31" --dep_prefixes "B,E,L" --arr_prefixes "B,E,L"
+python -m src.core.acquisition.build_master_population --start-date "2025-01-01" --end-date "2025-01-31" --dep_prefixes "B,E,L" --arr_prefixes "B,E,L"
 ```
 * **Parameters**:
   * `--start-date` / `--end-date`: Query window bounds (format: `YYYY-MM-DD`).
@@ -116,7 +143,7 @@ python -m src.acquisition.build_master_population --start-date "2025-01-01" --en
 
 ### Slice Fleet (Track B - Redesigned)
 ```bash
-python -m src.acquisition.fleet_builder --chunk-size 1000000 --output-dir "data/aircraft_db"
+python -m src.core.acquisition.fleet_builder --chunk-size 1000000 --output-dir "data/aircraft_db"
 ```
 * **Parameters**:
   * `--openairframes`: Path to OpenAirframes `.csv.gz` (defaults to path in `config.py`).
@@ -128,15 +155,24 @@ python -m src.acquisition.fleet_builder --chunk-size 1000000 --output-dir "data/
 ### Merge Flight Population and Fleet Registry
 ```bash
 # Merge using automatic latest file resolution
-python -m src.acquisition.master_merger
+python -m src.core.acquisition.master_merger
 
 # Merge using specific input and output paths
-python -m src.acquisition.master_merger --flights "data/flight_registry/ParentPopulation.parquet" --fleet "data/aircraft_db/Enriched_Fleet.parquet" --output "data/flight_registry/master_flights.parquet"
+python -m src.core.acquisition.master_merger --flights "data/flight_registry/ParentPopulation.parquet" --fleet "data/aircraft_db/Enriched_Fleet.parquet" --output "data/flight_registry/master_flights.parquet"
 ```
 * **Parameters**:
   * `--flights`: Path to input flight population file (CSV or Parquet). If omitted, automatically finds the latest file matching `ParentPopulation_*.parquet` or `ParentPopulation_*.csv` in `data/flight_registry/`.
   * `--fleet`: Path to input enriched fleet file (CSV or Parquet). If omitted, automatically finds the latest file matching `*_Enriched_Fleet.parquet` or `*_Enriched_Fleet.csv` in `data/aircraft_db/`.
   * `--output`: Path to write final merged Parquet file (default: `data/flight_registry/master_flights.parquet`).
+
+### Enrich Route Summary
+```bash
+python -m src.core.acquisition.enrich_route_summary
+```
+```powershell
+python -m src.core.acquisition.enrich_route_summary
+```
+* **Parameters**: None. Runs directly against configured summary paths in `config.py`.
 
 ## 5. Prerequisites & Dependencies
 
