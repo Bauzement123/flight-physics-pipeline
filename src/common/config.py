@@ -48,6 +48,23 @@ AIRPORTS_CACHE_PATH = REGISTRIES_DIR / "airport_coordinates.json"
 # --- Default Pipeline Parameters ---
 DEFAULT_AIRPORT_PREFIXES = ["B", "E", "L"]
 
+# Fetching module defaults (§3.3.1)
+MIN_DISTANCE_KM: float = 800.0          # Default minimum corridor distance filter
+DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
+
+# Trino retry / timeout parameters (§3.3.1)
+BACKOFF_MAX_RETRIES: int = 10           # Max Trino retry attempts (exponential back-off)
+BACKOFF_INITIAL_DELAY: float = 1.0      # Initial back-off delay in seconds
+BACKOFF_FACTOR: float = 2.0             # Multiplicative factor applied after each retry
+BACKOFF_MAX_DELAY: float = 60.0         # Hard cap on per-retry delay in seconds
+TRINO_QUERY_TIMEOUT_SECS: int = 300     # Trino query execution timeout in seconds
+
+# Fetching filename conventions (§3.3.1)
+RAW_TRAJECTORY_SUFFIX: str = "_raw.parquet"
+RAW_CONCAT_SUFFIX: str = "_all_raw.parquet"
+FETCH_RUNS_DIRNAME: str = "runs"
+RAW_TRAJECTORY_DIRNAME: str = "raw"
+
 # Target aircraft typecode families
 A320_NEO_FAMILY = ["A19N", "A20N", "A21N"]
 A320_CEO_FAMILY = ["A318", "A319", "A320", "A321"]
@@ -64,9 +81,7 @@ EUR_LAT_MAX = 85.0
 EUR_LON_MIN = -31.0
 EUR_LON_MAX = 50.0
 
-# Ensure directories exist upon import
-for directory in [DATA_DIR, MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, REGISTRIES_DIR, LOGS_DIR, REPORTS_DIR, DATA_DIR / "analysis" / "plots"]:
-    directory.mkdir(parents=True, exist_ok=True)
+
 
 # PCA Calibration Constants
 # D_PCA and N_STANDARD are sentinel placeholders (-1). Run the Phase A/B
@@ -160,9 +175,21 @@ def get_dataset_dir(dataset_name: str) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-# Unify temporary directory handling and environment variables redirection
+# Temporary directory (pure path constant — no side-effects on import)
 TEMP_DIR = DATA_DIR / "temp"
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
-for env_var in ['TEMP', 'TMP', 'TMPDIR']:
-    os.environ[env_var] = str(TEMP_DIR)
 
+
+def init_runtime() -> None:
+    """Create required runtime directories and redirect temp env variables.
+
+    Must be called explicitly by every module entrypoint (``if __name__ == '__main__'``
+    block) before performing any filesystem I/O.  Must NOT be called at import time.
+    """
+    for directory in [
+        DATA_DIR, MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, REGISTRIES_DIR,
+        LOGS_DIR, REPORTS_DIR, TEMP_DIR,
+        DATA_DIR / "analysis" / "plots",
+    ]:
+        directory.mkdir(parents=True, exist_ok=True)
+    for env_var in ["TEMP", "TMP", "TMPDIR"]:
+        os.environ[env_var] = str(TEMP_DIR)

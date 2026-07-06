@@ -227,16 +227,18 @@ class StreamingCorridorOrchestrator:
 
     def _do_fetch(self, job: RouteJobState) -> tuple:
         """Pool 1 thread: I/O only. Returns (success, new_registry_entries)."""
-        success, new_entries = opensky_fetcher.fetch_trajectories(
-            input_list_path=job.input_list_path,
+        res = opensky_fetcher.fetch_trajectories(
+            dep=job.dep,
+            arr=job.arr,
             out_dir=self.out_dir,
+            flight_source=job.input_list_path,
             sample_size=job.current_n,
             seed=job.seed + job.round_index,   # different seed per round
             start_date=job.start_date,
             end_date=job.end_date,
             typecode=job.typecode,
         )
-        return success, new_entries
+        return res.success, res.registry_entries
 
     def _submit_compute(self, job: RouteJobState, pool: ProcessPoolExecutor) -> None:
         """Submits compute job with a snapshot of the current registry."""

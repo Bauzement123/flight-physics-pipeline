@@ -15,6 +15,17 @@ recovered_today_chat_history.md
 pipeline_changes.diff
 step*.md
 
+# Agent sandbox and local tool directories
+.claw/
+.sandbox-home/
+.sandbox-tmp/
+
+# Legacy data and old route concat directories
+legacy/
+
+# Thesis and project management artifacts
+PA/
+
 # Python compiler outputs, caching, environments, and packaging
 __pycache__/
 *.pyc
@@ -53,5 +64,3 @@ desktop.ini
 .DS_Store
 Thumbs.db
 
-# Project management and thesis artifacts
-PA/

@@ -1,4 +1,3 @@
-import os
 import glob
 import pandas as pd
 from pathlib import Path
@@ -7,24 +6,44 @@ import logging
 from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
-    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY
+    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY, RAW_CONCAT_SUFFIX
 )
 from src.common.registry_utils import save_model_registry
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, to_project_relative
 
 logger = logging.getLogger(__name__)
 
-def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, description: str):
+def _is_excluded_path(path: Path | str, exclude_filename_suffixes: tuple[str, ...]) -> bool:
+    """Return True when a discovered registry candidate should be ignored."""
+    return bool(exclude_filename_suffixes) and Path(path).name.endswith(exclude_filename_suffixes)
+
+
+def index_parquet_files(
+    pattern: str,
+    registry_file: Path,
+    search_dirs: list[Path],
+    description: str,
+    exclude_filename_suffixes: tuple[str, ...] = (),
+):
     logger.info(f"--- Rebuilding/Updating {description} Registry ---")
     
     # 1. Search directories for matching parquet files
     found_files = []
+    excluded_count = 0
     for s_dir in search_dirs:
         if s_dir.exists():
             glob_pattern = str(s_dir / "**" / pattern)
-            found_files.extend(glob.glob(glob_pattern, recursive=True))
+            candidates = glob.glob(glob_pattern, recursive=True)
+            excluded_count += sum(
+                1 for filepath in candidates if _is_excluded_path(filepath, exclude_filename_suffixes)
+            )
+            found_files.extend(
+                filepath for filepath in candidates if not _is_excluded_path(filepath, exclude_filename_suffixes)
+            )
             
     logger.info(f"Found {len(found_files)} files matching '{pattern}' on disk.")
+    if excluded_count:
+        logger.info(f"Excluded {excluded_count} concat/backup files from {description} registry indexing.")
     
     # Load existing registry if it exists
     existing_df = None
@@ -33,13 +52,18 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
         try:
             existing_df = pd.read_parquet(registry_file)
             if not existing_df.empty and 'file_path' in existing_df.columns:
-                # Verify that all files in the manifest still exist on disk
+                # Verify that all files in the manifest still exist on disk and are still indexable.
                 original_len = len(existing_df)
-                existing_df = existing_df[existing_df['file_path'].apply(lambda p: (BASE_DIR / p).exists())]
+                existing_df = existing_df[
+                    existing_df['file_path'].apply(
+                        lambda p: (BASE_DIR / p).exists()
+                        and not _is_excluded_path(p, exclude_filename_suffixes)
+                    )
+                ]
                 pruned_count = original_len - len(existing_df)
                 
                 if pruned_count > 0:
-                    logger.info(f"Pruned {pruned_count} stale entries from {registry_file.name} (associated files were deleted).")
+                    logger.info(f"Pruned {pruned_count} stale/excluded entries from {registry_file.name}.")
                 
                 if not existing_df.empty:
                     indexed_files = set(existing_df['file_path'].unique())
@@ -55,7 +79,7 @@ def index_parquet_files(pattern: str, registry_file: Path, search_dirs: list, de
     skipped_count = 0
     for filepath_str in found_files:
         filepath = Path(filepath_str)
-        rel_path = filepath.resolve().relative_to(BASE_DIR).as_posix()
+        rel_path = to_project_relative(filepath)
         
         if rel_path in indexed_files:
             skipped_count += 1
@@ -126,7 +150,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
     new_entries = []
     for filepath_str in found_files:
         filepath = Path(filepath_str)
-        rel_path = filepath.resolve().relative_to(BASE_DIR).as_posix()
+        rel_path = to_project_relative(filepath)
         
         name = filepath.name
         if name.endswith(".parquet") and "_synthesized_c" in name:
@@ -170,7 +194,8 @@ def build_global_manifest():
         search_dirs=[
             TRAJECTORIES_DIR
         ],
-        description="Raw Trajectory"
+        description="Raw Trajectory",
+        exclude_filename_suffixes=(RAW_CONCAT_SUFFIX,)
     )
     
     # 2. Clean EKF trajectories registry
@@ -211,5 +236,7 @@ def build_global_manifest():
     )
 
 if __name__ == "__main__":
+    from src.common.config import init_runtime
+    init_runtime()
     setup_file_logger(log_filename="manifest.log")
     build_global_manifest()
