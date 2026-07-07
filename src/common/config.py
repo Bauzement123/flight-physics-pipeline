@@ -168,6 +168,19 @@ CORRIDOR_PATHS_DIR = DATA_DIR / "corridor_paths"
 RESULTS_DIR = DATA_DIR / "results"
 CORRIDOR_SIMULATIONS_DIR = RESULTS_DIR / "corridor_simulations"
 
+# --- Phase Quality Campaign Filtering Defaults ---
+# Default metadata pre-filter thresholds (None = check is ignored/pass-through unless overridden via CLI)
+DEFAULT_PREFILTER_THRESHOLDS = {
+    "max_dep_horiz_dist": None,          # meters
+    "max_dep_vert_dist": None,           # meters
+    "max_arr_horiz_dist": None,          # meters
+    "max_arr_vert_dist": None,           # meters
+    "max_dep_candidates": None,          # count
+    "max_arr_candidates": None,          # count
+    "max_duration_pct_above_median": None, # % above route median
+    "min_duration_pct_below_median": None, # % below route median
+}
+
 # Physical unit conversion factors
 M_TO_FT = 3.280839895
 MPS_TO_KT = 1.9438444924
