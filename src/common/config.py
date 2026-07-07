@@ -38,6 +38,13 @@ CALIBRATION_PLOTS_DIR = DATA_DIR / "calibration" / "plots"
 ORACLE_COHORT_CACHE_DIR = DATA_DIR / "calibration" / "cache" / "oracle_cohorts"
 # Note: Medoid flight_id is also stored per-cluster directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
 
+# --- Phase Quality Filter Campaign Paths ---
+PHASE_QUALITY_DIR = DATA_DIR / "calibration" / "phase_quality"
+PHASE_QUALITY_REGISTRIES_DIR = PHASE_QUALITY_DIR / "registries"
+PHASE_QUALITY_RUNS_DIR = PHASE_QUALITY_DIR / "runs"
+AUDIT_CANDIDATE_POOL_REGISTRY = PHASE_QUALITY_REGISTRIES_DIR / "audit_candidate_pool.parquet"
+AUDIT_COHORT_MAP_REGISTRY = PHASE_QUALITY_REGISTRIES_DIR / "audit_cohort_map.parquet"
+
 # --- Aircraft Database Paths ---
 DEFAULT_AIRCRAFT_DB_PATH = AIRCRAFT_DB_DIR / "aircraft-database-complete-2025-08.csv"
 DEFAULT_OPENAIRFRAMES_PATH = AIRCRAFT_DB_DIR / "openairframes_adsb_2024-01-01_2026-02-23.csv.gz"

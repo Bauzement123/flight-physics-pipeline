@@ -34,6 +34,8 @@ def extract_cohort_plot_data(
     kmax: int,
     replicate: int,
     registry_df: pd.DataFrame = None,
+    crop_airports: bool = False,
+    crop_padding: float = 1.5,
 ) -> dict:
     """
     Worker-safe extraction function that retrieves flight mapping and normalizes trajectories.
@@ -50,17 +52,25 @@ def extract_cohort_plot_data(
         if not GLOBAL_FLIGHT_CLUSTER_MAP.exists():
             raise FileNotFoundError(f"Oracle cluster map not found: {GLOBAL_FLIGHT_CLUSTER_MAP}")
         df_map = pd.read_parquet(GLOBAL_FLIGHT_CLUSTER_MAP)
-        df_map = df_map[df_map["route_id"] == oracle_route_id]
+        if "route" in df_map.columns and "route_id" not in df_map.columns:
+            df_map = df_map.rename(columns={"route": "route_id"})
+        df_map_oracle = df_map[df_map["route_id"] == oracle_route_id]
+        if df_map_oracle.empty:
+            # Fallback to standard route_id if ORACLE_ prefix was not used during registration
+            df_map_oracle = df_map[df_map["route_id"] == route_id]
+        df_map = df_map_oracle
         if df_map.empty:
-            raise ValueError(f"No oracle mappings found for route {oracle_route_id} in {GLOBAL_FLIGHT_CLUSTER_MAP}")
+            raise ValueError(f"No oracle mappings found for route {oracle_route_id} (or {route_id}) in {GLOBAL_FLIGHT_CLUSTER_MAP}")
     else:
         if not CALIBRATION_FLIGHT_CLUSTER_MAP.exists():
             raise FileNotFoundError(f"Calibration cluster map not found: {CALIBRATION_FLIGHT_CLUSTER_MAP}")
         df_map = pd.read_parquet(CALIBRATION_FLIGHT_CLUSTER_MAP)
+        if "route" in df_map.columns and "route_id" not in df_map.columns:
+            df_map = df_map.rename(columns={"route": "route_id"})
         df_map = df_map[
             (df_map["route_id"] == route_id) &
             (df_map["N_0"] == n0) &
-            (df_map["tau"] == tau) &
+            (np.isclose(df_map["tau"], tau, atol=1e-5)) &
             (df_map["K_max"] == kmax) &
             (df_map["replicate"] == replicate)
         ]
@@ -126,6 +136,8 @@ def extract_cohort_plot_data(
         "kmax": kmax,
         "replicate": replicate,
         "flights_data": flights_data,
+        "crop_airports": crop_airports,
+        "crop_padding": crop_padding,
         "success": True
     }
 
@@ -196,8 +208,23 @@ def assemble_and_save_plot(payload: dict, out_path: Path) -> None:
         min_lat = min(min_lat, min(fl_entry["lats"]))
         max_lat = max(max_lat, max(fl_entry["lats"]))
 
-    # Apply explicit crop with a small visual padding (e.g., 1.5 degrees)
-    padding = 1.5
+    # Check if crop_airports is requested
+    crop_airports = payload.get("crop_airports", False)
+    padding = payload.get("crop_padding", 1.5)
+
+    if crop_airports:
+        clean_route = route_id.replace("ORACLE_", "").split("_")[0]
+        parts = clean_route.split("-")
+        if len(parts) >= 2 and not map_cache.airports_df.empty:
+            dep_icao, arr_icao = parts[0].strip().upper(), parts[-1].strip().upper()
+            dep_arr_df = map_cache.airports_df[map_cache.airports_df["icao"].str.upper().isin([dep_icao, arr_icao])]
+            if not dep_arr_df.empty and len(dep_arr_df) >= 1:
+                min_lon = dep_arr_df["lon"].min()
+                max_lon = dep_arr_df["lon"].max()
+                min_lat = dep_arr_df["lat"].min()
+                max_lat = dep_arr_df["lat"].max()
+                logger.info(f"[{route_id}] Cropping map extent to airports {dep_icao}/{arr_icao} + {padding} deg padding.")
+
     ax1.set_extent(
         [min_lon - padding, max_lon + padding, min_lat - padding, max_lat + padding],
         crs=ccrs.PlateCarree()
@@ -263,10 +290,14 @@ def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict
         kmax = int(task["kmax"])
         replicate = int(task["replicate"])
 
+        crop_airports = task.get("crop_airports", False)
+        crop_padding = task.get("crop_padding", 1.5)
+        suffix = "_cropped" if crop_airports else ""
+
         if config_type == "ORACLE":
-            fn = f"{route_id}_oracle.png"
+            fn = f"{route_id}_oracle{suffix}.png"
         else:
-            fn = f"{route_id}_N{n0}_tau{tau:.2f}_K{kmax}_rep{replicate}.png"
+            fn = f"{route_id}_N{n0}_tau{tau:.2f}_K{kmax}_rep{replicate}{suffix}.png"
         out_path = CALIBRATION_PLOTS_DIR / fn
 
         # 1. Cache Check
@@ -277,10 +308,15 @@ def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict
                     (df_reg["route_id"] == route_id) &
                     (df_reg["config_type"] == config_type) &
                     (df_reg["N_0"] == n0) &
-                    (df_reg["tau"] == tau) &
+                    (np.isclose(df_reg["tau"], tau, atol=1e-5)) &
                     (df_reg["K_max"] == kmax) &
                     (df_reg["replicate"] == replicate)
                 ]
+                if "crop_airports" in df_reg.columns:
+                    match = match[match["crop_airports"] == crop_airports]
+                elif crop_airports:
+                    match = pd.DataFrame()
+
                 if not match.empty:
                     saved_path = BASE_DIR / match["file_path"].iloc[0]
                     if saved_path.exists():
@@ -295,8 +331,11 @@ def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict
                 logger.warning(f"Could not read calibration plot registry during render check: {e}")
 
         # 2. Extract cohort data (no plotting)
-        logger.info(f"Extracting plot data for {route_id} ({config_type}: N0={n0}, tau={tau:.2f}, K={kmax})")
-        payload = extract_cohort_plot_data(route_id, config_type, n0, tau, kmax, replicate, registry_df)
+        logger.info(f"Extracting plot data for {route_id} ({config_type}: N0={n0}, tau={tau:.2f}, K={kmax}, crop={crop_airports})")
+        payload = extract_cohort_plot_data(
+            route_id, config_type, n0, tau, kmax, replicate, registry_df,
+            crop_airports=crop_airports, crop_padding=crop_padding
+        )
         
         rel_path = out_path.relative_to(BASE_DIR).as_posix()
         return {
@@ -326,6 +365,7 @@ def _register_plots(results: list[dict]) -> None:
                 "tau": float(task["tau"]),
                 "K_max": int(task["kmax"]),
                 "replicate": int(task["replicate"]),
+                "crop_airports": bool(task.get("crop_airports", False)),
                 "file_path": res["rel_path"],
             })
 
@@ -357,6 +397,8 @@ def get_or_create_config_plot(
     kmax: int,
     replicate: int,
     registry_df: pd.DataFrame = None,
+    crop_airports: bool = False,
+    crop_padding: float = 1.5,
 ) -> Path:
     """
     Thread-safe lookup of calibration plot in CALIBRATION_PLOT_REGISTRY.
@@ -369,6 +411,8 @@ def get_or_create_config_plot(
         "tau": tau,
         "kmax": kmax,
         "replicate": replicate,
+        "crop_airports": crop_airports,
+        "crop_padding": crop_padding,
     }
     res = _render_plot_if_needed(task, registry_df=registry_df)
     if res.get("status") != "success":

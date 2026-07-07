@@ -27,11 +27,13 @@ def main():
     parser.add_argument("--tau", type=float, default=0.10, help="Stability threshold tau (for pareto)")
     parser.add_argument("--kmax", type=int, default=4, help="Maximum clusters K_max (for pareto)")
     parser.add_argument("--replicate", type=int, default=0, help="Replicate seed (for pareto)")
+    parser.add_argument("--crop-airports", action="store_true", help="Crop map extent to arrival/departure airports plus padding")
+    parser.add_argument("--crop-padding", type=float, default=1.5, help="Padding in degrees around airports when cropping (default: 1.5)")
 
     args = parser.parse_args()
 
     try:
-        print(f"Generating {args.config_type.upper()} plot for route {args.route}...")
+        print(f"Generating {args.config_type.upper()} plot for route {args.route} (crop_airports={args.crop_airports})...")
         path = get_or_create_config_plot(
             route_id=args.route,
             config_type=args.config_type,
@@ -39,6 +41,8 @@ def main():
             tau=args.tau,
             kmax=args.kmax,
             replicate=args.replicate,
+            crop_airports=args.crop_airports,
+            crop_padding=args.crop_padding,
         )
         print(f"Success! Saved to: {path}")
     except Exception as e:
