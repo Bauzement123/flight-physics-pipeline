@@ -1,114 +1,108 @@
 # Architecture Blueprint: Flight Physics Pipeline
 
-This document defines the architecture, data schemas, module objectives, and workflow connections within the Flight Physics Pipeline. It aligns precisely with the current state of the codebase.
+This document defines the architecture, data schemas, module objectives, and workflow connections within the Flight Physics Pipeline. It serves as the canonical technical source of truth and aligns precisely with the modern modular state of the codebase.
 
 ---
 
 ## 1. Pipeline Overview
 
-The Flight Physics Pipeline is a modular, data-driven framework written in Python designed to ingest, process, cluster, and simulate aircraft trajectories. It transitions raw ADSB waypoints into physical contrail simulations by executing a sequence of decoupled loops:
+The Flight Physics Pipeline is an end-to-end, modular, data-driven framework written in Python designed to ingest, process, cluster, and simulate aircraft trajectories. It transitions raw Automatic Dependent Surveillance–Broadcast (ADS-B) waypoints into physical contrail and emissions simulations by executing a sequence of decoupled processing loops:
 
-1.  **Ingestion & Filtering (Loops 1 & 2)**: Corridor slicing and sampling ADSB data.
-2.  **Smoothing & Resampling (Loop 2b)**: Extended Kalman Filtering (EKF) and grid resampling.
-3.  **Synthesis (Loop 2c)**: DTW trajectory clustering and route centroid synthesis.
-4.  **Weather Acquisition (Loop 3a)**: Copernicus CDS ERA5 NetCDF reanalysis downloads.
-5.  **Physics Simulation (Loop 3b)**: PSFlight performance and CoCiP contrail modeling.
+1. **Acquisition & Population Building**: Constructing master flight schedules, enriching route summaries with geodesic distances, and assembling fleet databases (`src/core/acquisition`).
+2. **Fetching (Loops 1 & 2)**: Querying, slicing, and downloading raw ADS-B trajectory waypoints from remote OpenSky Trino database partitions (`src/core/fetching`).
+3. **Trajectory Processing (Loop 2b)**: Coordinate smoothing via Extended Kalman Filtering (EKF) in a local Lambert projection plane and uniform 1-minute temporal resampling (`src/core/processing`).
+4. **Corridor & Path Synthesis (Loop 2c)**: Dynamic Time Warping (DTW) clustering, PCA compression, stability sweeps, and streaming corridor pipeline orchestration (`src/core/corridor`).
+5. **Weather Acquisition (Loop 3a)**: Bulk downloading and managing Copernicus Climate Data Store (CDS) ERA5 NetCDF reanalysis atmospheric data (`src/core/weather`).
+6. **Physics Simulation (Loop 3b)**: Simulating flight performance, fuel burn, emissions, and CoCiP contrail formation using `PSFlight` and PyContrails (`src/core/physics`).
+7. **Analysis & Campaigns**: Statistical verification of trajectory characteristics, route popularity, flight levels, and phase quality calibration campaigns (`src/analysis/*`).
 
 ---
 
 ## 2. Directory Structure
 
-All modules interact with a standardized dataset layer stored under the project root:
+All modules interact with a standardized dataset layer stored under the project root (`data/`), derived dynamically from `BASE_DIR` in `src/common/config.py`:
 
 ```text
 data/
-├── flight_registry/         # Master lists and summary index files
-│   └── registries/          # Global Parquet-based tracking registries
-├── flight_lists/            # Sliced flight list Parquet files (e.g. EGLL-KJFK.parquet)
-├── trajectories/            # Trajectory coordinates partitioned by run directories
-│   └── <run_name>/
-│       ├── raw/             # Raw trajectory waypoints fetched from OpenSky
-│       └── clean/           # Smoothed and resampled EKF trajectory outputs
-├── weather/                 # Local cache of ERA5 NetCDF files
-│   └── logs/                # Weather acquisition logs
-├── master_flight_paths/     # Flight route boundary and definition files
-├── simulation_profiles/     # Configuration profiles for physics runs
-├── synthesized_paths/       # DTW-synthesized baseline route centroid Parquet files
-├── results/                 # Output simulated Parquet files (PSFlight + CoCiP outcomes)
-└── analysis/                # Generated visualization plots and statistical reports
-    ├── plots/               # PNG, PDF, or HTML figure exports
-    └── reports/             # Aggregated stats, CSV tables, or summary logs
+├── registries/              # Global Parquet-based tracking registries (trajectory, clean, simulation, model, etc.)
+├── databases/               # Static flight and aircraft databases
+│   ├── master_flights/      # Master flight schedules and route summary tables/pickles
+│   └── aircraft_db/         # OpenAirframes and aircraft metadata CSV/GZ files
+├── flight_lists/            # Sliced corridor flight schedule Parquet files (e.g., EGLL-KJFK.parquet)
+├── trajectories/            # Trajectory waypoints partitioned by dataset/run directories
+│   ├── raw/                 # Raw waypoints fetched from OpenSky Trino
+│   └── clean/               # Resampled and EKF-smoothed trajectory outputs
+├── weather/                 # Local cache of Copernicus CDS ERA5 NetCDF files
+├── corridor_paths/          # Temporal gridded route centroids and cluster paths
+├── calibration/             # Calibration outputs, cluster maps, oracle caches, and phase quality runs
+│   ├── cache/               # Cached oracle cohorts
+│   ├── phase_quality/       # Phase schema campaign registries and run outputs
+│   └── plots/               # Calibration diagnostic plots
+├── results/                 # Final simulation results
+│   └── corridor_simulations/ # PSFlight + CoCiP simulated trajectories
+├── analysis/                # Analysis outputs and statistical evaluation
+│   └── reports/             # Aggregated statistical summaries and CSV tables
+└── logs/                    # Centralized pipeline execution logs (one fixed log file per module)
 ```
 
 ### 2.1 Source Code Directory Structure
 
-The source files under `src/` are structured by pipeline module:
+The source files under `src/` are structured strictly by functional domain and module:
 
 ```text
 src/
-├── common/                  # Shared serialization, configurations, and registries manager
-│   ├── adapters.py
-│   ├── build_global_manifest.py
-│   ├── config.py
-│   ├── enrich_route_summary.py
-│   ├── migrate_directories.py
-│   ├── utils.py
+├── common/                  # Shared configs, serialization adapters, registry managers, and utilities
+│   ├── adapters.py          # DataFrame to pycontrails.Flight structures and SI unit conversions
+│   ├── build_global_manifest.py # Rebuilds global registries with keep='last' deduplication
+│   ├── config.py            # Centralized paths, registries, physical constants, and default parameters
+│   ├── exceptions.py        # Custom pipeline exception hierarchy
+│   ├── map_cache.py         # Caching layer for geographic map data and airport coordinates
+│   ├── registry_utils.py    # Thread-safe atomic parquet reading/writing and registry helpers
+│   ├── utils.py             # Centralized logging setup (setup_file_logger) and retry/backoff utilities
 │   └── README.md
-├── fetching/                # OpenSky Trino database querying and caching
-│   ├── fetcher_orchestrator.py
-│   ├── opensky_fetcher.py
-│   └── README.md
-├── filtering/               # Corridor schedules slicing and filter workflows
-│   ├── filter_orchestrator.py
-│   ├── population_filter.py
-│   └── README.md
-├── processing/              # Coordinate EKF smoothing and 1-minute resampling
-│   ├── kalman_filter.py
-│   ├── TRAFFIC_LIBRARY_EKF_ANALYSIS.md
-│   └── README.md
-├── synthesis/               # Dynamic Time Warping (DTW) route synthesis
-│   ├── path_generator.py
-│   ├── synthesis_orchestrator.py
-│   └── README.md
-├── weather/                 # ERA5 NetCDF reanalysis downloads from CDS API
-│   ├── era5_manager.py
-│   └── README.md
-├── physics/                 # PSFlight performance and CoCiP contrail simulations
-│   ├── clone_simulation.py
-│   ├── simulation.py
-│   └── README.md
-├── analysis/                # Flight trajectory statistics and visualization analysis
-│   ├── flight_analysis.py
-│   ├── route_popularity_analysis.py
-│   ├── route_class_analysis.py
-│   ├── flight_level_analysis.py
-│   └── README.md
-├── Architecture Blueprint.md # This architecture overview
+├── core/                    # Core pipeline processing modules
+│   ├── acquisition/         # Master population building, fleet merging, and route summary enrichment
+│   ├── corridor/            # DTW clustering, PCA compression, stability sweeps, and streaming pipeline
+│   ├── fetching/            # OpenSky Trino querying, caching, and batch download orchestration
+│   ├── physics/             # PSFlight performance and CoCiP contrail simulation engine and cloning
+│   ├── processing/          # Coordinate EKF smoothing and uniform 1-minute temporal resampling
+│   └── weather/             # Copernicus CDS ERA5 NetCDF reanalysis management and downloading
+├── analysis/                # Analytical suites, verification, and calibration campaigns
+│   ├── campaigns/           # Phase quality filtering, stability sweeps, and variational orchestrators
+│   ├── plotting/            # Map verification and plotting utilities
+│   └── verification/        # Flight statistics, route popularity, route class, and flight level analysis
+├── scratchpad/              # Deprecated historical migration scripts (retained for archive purposes)
+├── Architecture Blueprint.md # This canonical architecture overview
 └── conventions.md           # Project-wide programming and coding standards
 ```
 
-### Run Folder Naming Template
+> [!NOTE]
+> **Deprecated Namespaces**: Historical root-level folders (`src/fetching`, `src/filtering`, `src/physics`, `src/processing`, `src/synthesis`, `src/weather`) have been removed. All active modules reside within `src/core/*` or `src/analysis/*`. The `src/scratchpad/` directory is deprecated per Section 8 of project rules and should not be used for new development.
+
+### 2.2 Run Folder Naming Template
+
 Run directories under `data/trajectories/` are generated dynamically based on CLI configurations:
 `ranks_[ranks_spec]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
-*   **Ranks Specification (`[ranks_spec]`)**: Range uses `to` (e.g., `ranks_1to5`), list uses hyphens (e.g., `ranks_1-5`).
-*   **Hash Suffix**: A deterministic 6-character MD5 checksum of the parameter prefix to guarantee unique cohort namespaces.
+* **Ranks Specification (`[ranks_spec]`)**: Range uses `to` (e.g., `ranks_1to5`), list uses hyphens (e.g., `ranks_1-5`).
+* **Hash Suffix**: A deterministic 6-character MD5 checksum of the parameter prefix generated via `src.common.utils` to guarantee unique cohort namespaces.
 
-Simulation results stored under `data/results/` do not use this naming scheme and are instead saved iteratively corridor-by-corridor in route-specific folders inside `data/results/cloned_simulations/`.
+Simulation results stored under `data/results/` do not use this naming scheme and are instead saved iteratively corridor-by-corridor in route-specific folders inside `data/results/corridor_simulations/`.
 
 ---
 
 ## 3. Global Conventions & Standards
 
 ### 3.1 Datetime Timezone Standard
-*   **UTC Standard**: Datetime columns can be timezone-aware UTC (e.g., with `+00:00` offset or `'UTC'`) or timezone-naive UTC, consistently used within each module to ensure seamless comparisons. Standard fetched data from Trino/OpenSky outputs timezone-aware UTC. Enforce timezone-naive UTC for internal simulation engine processing if required by third-party packages (e.g., PyContrails).
+* **UTC Standard**: Datetime columns can be timezone-aware UTC (e.g., with `+00:00` offset or `'UTC'`) or timezone-naive UTC, consistently used within each module to ensure seamless comparisons. Standard fetched data from Trino/OpenSky outputs timezone-aware UTC. Timezone-naive UTC is enforced for internal simulation engine processing when required by third-party packages (e.g., PyContrails).
 
 ### 3.2 File Suffix Conventions
-Standard suffixes indicate the processing state of trajectory datasets:
+Standard suffixes indicate the processing state of trajectory datasets across the pipeline:
 
 | File Suffix | Description | Format |
 |---|---|---|
 | `*_raw.parquet` | Raw waypoints containing coordinates, noise, and gaps. | Parquet |
-| `*_clean_si.parquet` | Resampled and EKF-smoothed coordinates. | Parquet |
+| `*_all_raw.parquet` | Concatenated raw trajectory waypoints across a cohort. | Parquet |
+| `*_clean_si.parquet` | Resampled and EKF-smoothed coordinates in SI units. | Parquet |
 | `*_synthesized_c[ID].parquet` | Temporal-gridded DTW trajectory route centroids. | Parquet |
 | `*_simulated.parquet` | Trajectories containing PSFlight and CoCiP simulation results. | Parquet |
 
@@ -119,64 +113,231 @@ The pipeline converts raw aviation inputs into SI units during EKF smoothing and
 |---|---|---|---|
 | **Altitude** | Feet (ft) | Meters (m) | `M_TO_FT = 3.280839895` |
 | **Speed** | Knots (kt) | Meters per second (m/s) | `MPS_TO_KT = 1.9438444924` |
-| **Distance** | Kilometers (km) | Meters (m) | $1 \text{ km} = 1000 \text{ m}$ |
+| **Distance** | Kilometers (km) | Meters (m) | \(1 \text{ km} = 1000 \text{ m}\) |
 | **ROCD** | Feet per minute (ft/min) | Meters per second (m/s) | `MPS_TO_FPM = 196.8503937` |
 | **Coordinates** | Degrees (WGS84) | Meters (LAEA Projection) | Custom Lambert Azimuthal Equal Area |
 
+### 3.4 Centralized Registries
+All global state tracking is managed via atomic Parquet registries defined in `src/common/config.py`:
+
+* `GLOBAL_TRAJECTORY_REGISTRY`: Tracks raw trajectory acquisition status (`data/registries/global_trajectory_registry.parquet`).
+* `GLOBAL_CLEAN_REGISTRY`: Tracks EKF smoothing and resampling completion (`data/registries/global_clean_registry.parquet`).
+* `GLOBAL_SIMULATION_REGISTRY`: Tracks individual flight physics simulation outcomes (`data/registries/global_simulation_registry.parquet`).
+* `GLOBAL_CORRIDOR_SIM_REGISTRY`: Tracks corridor-level cloned simulation progress (`data/registries/global_corridor_simulation_registry.parquet`).
+* `GLOBAL_MODEL_REGISTRY`: Stores DTW cluster medoid IDs and corridor model metadata (`data/registries/global_model_registry.parquet`).
+* `GLOBAL_STABILITY_REGISTRY`: Tracks corridor stability sweep metrics (`data/registries/global_stability_registry.parquet`).
+* `GLOBAL_FLIGHT_CLUSTER_MAP`: Maps individual flights to assigned DTW clusters (`data/registries/global_flight_cluster_map.parquet`).
+* `CALIBRATION_PLOT_REGISTRY`: Indexes diagnostic calibration plots (`data/registries/calibration_plot_registry.parquet`).
+* `AUDIT_CANDIDATE_POOL_REGISTRY`: Tracks candidate flights for phase quality campaigns (`data/calibration/phase_quality/registries/audit_candidate_pool.parquet`).
+* `AUDIT_COHORT_MAP_REGISTRY`: Maps cohorts audited during phase quality filtering (`data/calibration/phase_quality/registries/audit_cohort_map.parquet`).
+
+### 3.5 Centralized Logging Policy
+All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `logging.basicConfig(...)` is strictly forbidden. Log files are written to fixed filenames in `data/logs/` (`LOGS_DIR`):
+
+* `fetching.log`: OpenSky Trino queries and download progress.
+* `acquisition.log`: Master population building and fleet merging.
+* `processing.log`: Kalman filtering and coordinate smoothing.
+* `corridor.log`: Corridor clustering, PCA compression, stability sweeps, and streaming pipeline execution.
+* `weather.log`: Copernicus CDS ERA5 NetCDF downloads.
+* `simulation.log`: PSFlight and CoCiP simulation runs.
+* `calibration.log`: Phase quality and variational calibration campaigns.
+* `skipped_aircraft.log`: Global append-only log recording skipped airframes across all pipeline stages.
+
 ---
 
-## 4. Module Specifications
+## 4. Module Specifications & FAST Mapping
+
+Every module adheres to a Function Analysis Solution Tree (FAST) structure mapping architectural objectives to code implementations, data contracts, and safety/fallback behaviors.
 
 ### 4.1 Common Module (`src/common/`)
-*   **Objectives**: Centralizes pipeline paths, configurations, DataFrame-to-PyContrails serialization adapters, global registry manifest rebuilding, and route summary utilities.
-*   **Key Files**:
-    *   [config.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py): Path definitions, ERA5 constants, and centralized unit conversion factors (`M_TO_FT`, `MPS_TO_KT`, `MPS_TO_FPM`).
-    *   [adapters.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/adapters.py): Converts DataFrames to `pycontrails.Flight` structures and handles timezone UTC parsing. Converts metrics to aviation units for Traffic using centralized config constants.
-    *   [build_global_manifest.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/build_global_manifest.py): Rebuilds global registries under `data/flight_registry/registries/` using imported directory paths and standard `keep='last'` deduplication.
-    *   [enrich_route_summary.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/enrich_route_summary.py): Vectorized Haversine geodesic distance enrichment. Run without path-injection hacks.
-    *   [utils.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/utils.py): Logger utilities and dynamic folder name hash generation. Prioritizes lowercase `master_flights_route_summary.pkl`.
+* **Objective**: Provide centralized configuration, atomic filesystem operations, DataFrame-to-PyContrails serialization, and logging infrastructure.
+* **FAST Mapping**:
+  ```text
+  Common Infrastructure
+   ├── Paths & Constants: config.py
+   │    ├── Inputs: OS environment / filesystem location
+   │    └── Outputs: Resolved pathlib.Path objects and SI conversion constants
+   ├── Serialization: adapters.py::dataframe_to_flight()
+   │    ├── Inputs: EKF clean DataFrame (SI units, UTC time)
+   │    ├── Outputs: pycontrails.Flight container
+   │    └── Safety: Validates kinematic consistency and timezone parsing
+   ├── Atomic I/O: registry_utils.py::read_registry() / write_registry()
+   │    ├── Inputs: Target parquet file and DataFrame
+   │    ├── Outputs: Thread-safe atomic file writes via temporary `.tmp.` files
+   │    └── Safety: Prevents corrupted Parquet files during concurrent worker execution
+   └── Logging & Retries: utils.py::setup_file_logger() / retry_backoff()
+        ├── Inputs: Module log filename and retry parameters
+        └── Safety: Implements exponential backoff (`BACKOFF_FACTOR=2.0`) up to `BACKOFF_MAX_RETRIES=10`
+  ```
 
-### 4.2 Fetching Module (`src/fetching/`)
-*   **Objectives**: Queries raw waypoints for sliced flight lists from OpenSky database partitions.
-*   **Key Files**:
-    *   [opensky_fetcher.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/fetching/opensky_fetcher.py): Remote Trino client queries (already returning SI units from database) and local cache checks.
-    *   [fetcher_orchestrator.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/fetching/fetcher_orchestrator.py): Argument parsers, seed validations, and batch downloads. Validates and blocks conflicting `--ranks` and `--upper-rank` usage.
+### 4.2 Core Acquisition (`src/core/acquisition/`)
+* **Objective**: Build master flight schedules, filter by geographic bounding boxes, enrich routes with geodesic distances, and merge aircraft metadata.
+* **FAST Mapping**:
+  ```text
+  Population Acquisition
+   ├── Schedule Building: build_master_population.py::main()
+   │    ├── Inputs: Raw ADS-B schedule databases and airport prefix filters
+   │    ├── Outputs: MASTER_FLIGHTS_FILE (`data/databases/master_flights/master_flights.parquet`)
+   │    └── Safety: Logs progress to `acquisition.log`; skips malformed schedule rows
+   ├── Route Enrichment: enrich_route_summary.py::enrich_summary()
+   │    ├── Inputs: Master flight schedules and airport coordinates cache
+   │    ├── Outputs: ROUTE_SUMMARY_PARQUET / ROUTE_SUMMARY_PKL
+   │    └── Safety: Vectorized Haversine geodesic distance calculation
+   └── Fleet Construction: fleet_builder.py / master_merger.py
+        ├── Inputs: OpenAirframes database (`openairframes_adsb_2024-01-01_2026-02-23.csv.gz`)
+        └── Outputs: Enriched flight schedules with validated ICAO typecodes and engine families
+  ```
 
-### 4.3 Filtering Module (`src/filtering/`)
-*   **Objectives**: Slices master schedules based on corridor airport pairs, temporal bounds, and route summary ranks.
-*   **Key Files**:
-    *   [population_filter.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/filtering/population_filter.py): Filtering algorithms and timezone UTC mapping. Includes aliases for CLI arguments (`--file` / `--master-file`). Setup `extraction.log` file logging.
-    *   [filter_orchestrator.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/filtering/filter_orchestrator.py): Batch corridor generator. Includes argument aliases and setups `extraction.log` file logging in output directory.
+### 4.3 Core Fetching (`src/core/fetching/`)
+* **Objective**: Query OpenSky Trino database partitions for sliced corridor schedules, apply caching, and execute batch downloads.
+* **FAST Mapping**:
+  ```text
+  Trajectory Fetching
+   ├── Query Execution: opensky_fetcher.py::fetch_trajectory()
+   │    ├── Inputs: Flight icao24, callsign, and time bounds
+   │    ├── Outputs: Raw waypoints DataFrame (`*_raw.parquet` in SI units)
+   │    └── Safety: Checks local cache before querying; applies `retry_backoff()` on Trino timeouts
+   └── Batch Orchestration: fetcher_orchestrator.py::main()
+        ├── Inputs: Corridor flight list parquets and rank specifications
+        ├── Outputs: Populates `GLOBAL_TRAJECTORY_REGISTRY`; saves raw trajectory files
+        └── Safety: Logs to `fetching.log`; validates conflicting `--ranks` vs `--upper-rank` flags; supports `--resume`
+  ```
 
-### 4.4 Trajectory Processing Module (`src/processing/`)
-*   **Objectives**: Prepares flight coordinates by applying an Extended Kalman Filter (EKF) in a local Lambert projection plane and interpolating points to a uniform 1-minute temporal grid.
-*   **Key Files**:
-    *   [kalman_filter.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/processing/kalman_filter.py): Integrates the `traffic` EKF library. Utilizes centralized constants from config for scaling. Writes execution details to `extraction.log`.
-    *   **EKF Index Exception**: The index setting code prior to calling EKF remains commented out to prevent time-serialization JSON crashes. This is a documented exception to standard pandas row index alignment conventions.
+### 4.4 Core Processing (`src/core/processing/`)
+* **Objective**: Clean raw ADS-B waypoints by applying an Extended Kalman Filter (EKF) in a local Lambert projection plane and resampling to a uniform 1-minute grid.
+* **FAST Mapping**:
+  ```text
+  Trajectory Processing (EKF)
+   └── Smoothing & Resampling: kalman_filter.py::process_flight()
+        ├── Inputs: Raw trajectory waypoints (`*_raw.parquet`)
+        ├── Outputs: Clean SI trajectories (`*_clean_si.parquet`) and `GLOBAL_CLEAN_REGISTRY` update
+        ├── Safety: Uses `traffic` library EKF; logs anomalies to `processing.log`
+        └── Exception: Index setting prior to EKF is omitted to prevent time-serialization JSON crashes
+  ```
 
-### 4.5 Path Synthesis Module (`src/synthesis/`)
-*   **Objectives**: Compiles DTW spatial trajectory centroids across flight cohorts to produce idealized baseline route trajectories.
-*   **Key Files**:
-    *   [path_generator.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/synthesis/path_generator.py): DTW clustering, spatial resampling, and FL250 cruise altitude synthesis validations. Gracefully resolves absolute output directories outside the workspace. Drops derivative kinematic columns (`gs`, `heading`, `rocd`, etc.) before instantiating PyContrails flight containers to force dynamic, kinematically consistent recalculation.
-    *   [synthesis_orchestrator.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/synthesis/synthesis_orchestrator.py): Cohort synthesis manager and skip checks.
+### 4.5 Core Corridor (`src/core/corridor/`)
+* **Objective**: Synthesize baseline route paths via Dynamic Time Warping (DTW) clustering, perform PCA dimensionality compression, and evaluate cluster stability across cohorts.
+* **FAST Mapping**:
+  ```text
+  Corridor Synthesis & Clustering
+   ├── Path Generation: path_generator.py::generate_corridor_paths()
+   │    ├── Inputs: Clean SI trajectories across a route cohort
+   │    ├── Outputs: Temporal gridded route centroids (`*_synthesized_c[ID].parquet`)
+   │    └── Safety: Drops derivative kinematic columns (`gs`, `heading`, `rocd`) before PyContrails instantiation to force dynamic recalculation; enforces FL250 cruise altitude validations
+   ├── PCA Compression: pca_compressor.py::compress_trajectories()
+   │    ├── Inputs: Clean trajectory coordinates
+   │    ├── Outputs: Reduced feature matrix retaining 95% variance (`D_PCA`)
+   │    └── Safety: Fallback to standard features if trajectory count < `MIN_FLIGHTS_FOR_CLUSTERING`
+   ├── Stability Sweeps: stability_orchestrator.py / stability_worker.py
+   │    ├── Inputs: Resampled cohort flights across clustering rounds
+   │    ├── Outputs: Updates `GLOBAL_STABILITY_REGISTRY` and `GLOBAL_MODEL_REGISTRY`
+   │    └── Safety: Sequential loop fallback if parallel worker pool fails
+   └── Streaming Pipeline: streaming_pipeline.py::main()
+        ├── Inputs: End-to-end corridor run parameters
+        └── Outputs: Orchestrates fetching, EKF processing, clustering, and simulation
+  ```
 
-### 4.6 Weather Acquisition Module (`src/weather/`)
-*   **Objectives**: Bulk fetches ERA5 reanalysis datasets via Copernicus CDS API.
-*   **Key Files**:
-    *   [era5_manager.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/weather/era5_manager.py): Background download threads, self-healing corruption handlers, and `weather_acquisition.log` logging. Handles single integer pressure level inputs robustly.
+### 4.6 Core Weather (`src/core/weather/`)
+* **Objective**: Bulk download and manage Copernicus Climate Data Store (CDS) ERA5 NetCDF atmospheric reanalysis data on required pressure levels and surface grids.
+* **FAST Mapping**:
+  ```text
+  Weather Acquisition
+   └── ERA5 Management: era5_manager.py::download_era5()
+        ├── Inputs: Bounding box (`WEATHER_BOUNDS_BBOX`), time range, and required pressure levels
+        ├── Outputs: Cached NetCDF files in `data/weather/`
+        └── Safety: Background download threads; self-healing corruption checks; logs to `weather.log`
+  ```
 
-### 4.7 Physics Simulation Module (`src/physics/`)
-*   **Objectives**: Simulates fuel usage, emissions, contrail generation, and radiative forcing using `PSFlight` and `CoCiP` models.
-*   **Key Files**:
-    *   [simulation.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/physics/simulation.py): PSFlight + CoCiP executor. Skips unsupported aircraft types, appending details to `skipped_aircraft.log` under the output directory.
-    *   [clone_simulation.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/physics/clone_simulation.py): Re-simulates flight cohorts using synthesized route paths under temporal offsets. Appends skipped flights to the centralized `skipped_aircraft.log` in the root output folder.
+### 4.7 Core Physics (`src/core/physics/`)
+* **Objective**: Execute aircraft performance, fuel burn, emissions, and CoCiP contrail modeling using `PSFlight` and PyContrails.
+* **FAST Mapping**:
+  ```text
+  Physics Simulation
+   ├── Individual Simulation: simulation.py::run_simulation()
+   │    ├── Inputs: Clean SI trajectories and ERA5 NetCDF weather data
+   │    ├── Outputs: Simulated trajectories (`*_simulated.parquet`) and `GLOBAL_SIMULATION_REGISTRY`
+   │    └── Safety: Skips unsupported aircraft typecodes, appending details to `skipped_aircraft.log`
+   └── Cohort Cloning: clone_simulation.py::clone_corridor()
+        ├── Inputs: Synthesized route centroids and temporal departure offsets
+        ├── Outputs: Route-specific simulation results in `data/results/corridor_simulations/` and `GLOBAL_CORRIDOR_SIM_REGISTRY`
+        └── Safety: Logs execution to `simulation.log`; appends unsupported airframes to `skipped_aircraft.log`
+  ```
 
-### 4.8 Analysis Module (`src/analysis/`)
-*   **Objectives**: Visualizes flight metrics, aggregates statistical characteristics of flight trajectories (e.g. airport-to-airport geodesic distances vs. maximum cruise/baroaltitudes), and exports plots/reports.
-*   **Key Files**:
-    *   [flight_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/flight_analysis.py): Aggregates trajectory logs, merges with route summaries, and produces distance vs height scatter plots.
-    *   [route_popularity_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/route_popularity_analysis.py): Aggregates total flights and unique route counts into distance bins, exporting a dual Y-axis plot.
-    *   [route_class_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/route_class_analysis.py): Aggregates unique routes and total path counts across the 4 route classes, exporting a percentage distribution chart.
-    *   [flight_level_analysis.py](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/flight_level_analysis.py): Extracts stable cruise altitudes per flight, converts to Flight Levels, groups by route or distance bins, and generates candlestick boxplots.
-    *   [README.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/analysis/README.md): Conforms to project documentation standards with FAST tree and workflow diagram.
+### 4.8 Analysis & Campaigns (`src/analysis/`)
+* **Objective**: Verify flight characteristics, analyze route popularity and flight levels, and execute phase quality calibration campaigns.
+* **FAST Mapping**:
+  ```text
+  Analysis & Verification
+   ├── Flight Verification: verification/flight_analysis.py / flight_level_analysis.py
+   │    ├── Inputs: Clean trajectories and route summary tables
+   │    ├── Outputs: Distance vs height scatter plots, candlestick flight level boxplots, and CSV reports
+   │    └── Safety: Aggregates logs cleanly; handles missing optional columns gracefully
+   ├── Route Classification: verification/route_popularity_analysis.py / route_class_analysis.py
+   │    ├── Inputs: Master flight route summaries
+   │    ├── Outputs: Dual Y-axis popularity histograms and 4-class route percentage charts
+   │    └── Safety: Exports reproducible summary tables to `data/analysis/reports/`
+   └── Phase Quality Campaigns: campaigns/phase_schema_orchestrator.py / variational_orchestrator.py
+        ├── Inputs: Calibration routes (`CALIBRATION_ROUTES`), candidate pools, and stability sweeps
+        ├── Outputs: Updates `AUDIT_CANDIDATE_POOL_REGISTRY`, `AUDIT_COHORT_MAP_REGISTRY`, and diagnostic plots
+        └── Safety: Enforces pre-filter thresholds (`DEFAULT_PREFILTER_THRESHOLDS`); logs to `calibration.log`
+  ```
 
+---
+
+## 5. End-to-End Data Workflow
+
+```mermaid
+flowchart TD
+    subgraph Input_Layer ["1. Acquisition & Input Layer"]
+        A[OpenSky / Raw Schedules] -->|build_master_population.py| B[(Master Flights DB)]
+        B -->|enrich_route_summary.py| C[(Route Summary Table)]
+        C -->|population_filter.py| D[Corridor Flight Lists]
+    end
+
+    subgraph Fetching_Layer ["2. Trajectory Fetching Layer"]
+        D -->|fetcher_orchestrator.py| E[OpenSky Trino Database]
+        E -->|opensky_fetcher.py| F[Raw Trajectories<br/>*_raw.parquet]
+        F -->|Update| G[(GLOBAL_TRAJECTORY_REGISTRY)]
+    end
+
+    subgraph Processing_Layer ["3. Processing & Smoothing Layer"]
+        F -->|kalman_filter.py<br/>Traffic EKF| H[Clean SI Trajectories<br/>*_clean_si.parquet]
+        H -->|Update| I[(GLOBAL_CLEAN_REGISTRY)]
+    end
+
+    subgraph Corridor_Layer ["4. Corridor & Synthesis Layer"]
+        H -->|pca_compressor.py| J[PCA Feature Matrix]
+        J -->|path_generator.py<br/>DTW Clustering| K[Synthesized Centroids<br/>*_synthesized_cID.parquet]
+        K -->|Update| L[(GLOBAL_MODEL_REGISTRY<br/>& STABILITY_REGISTRY)]
+    end
+
+    subgraph Weather_Layer ["5. Weather Acquisition Layer"]
+        M[Copernicus CDS API] -->|era5_manager.py| N[(ERA5 NetCDF Cache)]
+    end
+
+    subgraph Simulation_Layer ["6. Physics Simulation Layer"]
+        H -->|simulation.py<br/>+ ERA5 Weather| O[Simulated Trajectories<br/>*_simulated.parquet]
+        K -->|clone_simulation.py<br/>+ Temporal Offsets| P[Cloned Corridor Results<br/>data/results/corridor_simulations/]
+        O -->|Update| Q[(GLOBAL_SIMULATION_REGISTRY)]
+        P -->|Update| R[(GLOBAL_CORRIDOR_SIM_REGISTRY)]
+        O -.->|Unsupported Airframes| S[skipped_aircraft.log]
+        P -.->|Unsupported Airframes| S
+    end
+
+    subgraph Analysis_Layer ["7. Analysis & Campaigns Layer"]
+        H -->|flight_analysis.py<br/>flight_level_analysis.py| T[Verification Plots & Reports]
+        P -->|variational_orchestrator.py| U[Phase Quality Campaign Plots]
+        T -->|Save| V[data/analysis/]
+        U -->|Save| V
+    end
+```
+
+**Step-by-Step Description:**
+1. **Schedule Acquisition & Enrichment**: `build_master_population.py` ingests raw ADS-B schedules to build the master flights database (`master_flights.parquet`). `enrich_route_summary.py` calculates Haversine geodesic distances and populates the route summary tables.
+2. **Corridor Slicing**: Corridor schedules are sliced into specific airport pair flight lists (`data/flight_lists/`) based on geographic bounding boxes and route popularity ranks.
+3. **Trajectory Fetching**: `fetcher_orchestrator.py` reads the corridor flight lists and queries OpenSky Trino via `opensky_fetcher.py`. Raw waypoint parquets (`*_raw.parquet`) are saved to `data/trajectories/raw/`, and `GLOBAL_TRAJECTORY_REGISTRY` is updated atomically.
+4. **EKF Smoothing**: `kalman_filter.py` reads raw waypoints, projects coordinates to a local Lambert azimuthal equal-area plane, applies an Extended Kalman Filter (EKF), and resamples to a uniform 1-minute grid. Clean SI parquets (`*_clean_si.parquet`) are saved to `data/trajectories/clean/`, updating `GLOBAL_CLEAN_REGISTRY`.
+5. **PCA Compression & DTW Clustering**: `pca_compressor.py` reduces trajectory feature dimensions to `D_PCA` components. `path_generator.py` executes Dynamic Time Warping (DTW) clustering across flight cohorts, producing temporal-gridded route centroids (`*_synthesized_c[ID].parquet`) in `data/corridor_paths/` and updating `GLOBAL_MODEL_REGISTRY` and `GLOBAL_STABILITY_REGISTRY`.
+6. **Weather Retrieval**: `era5_manager.py` downloads atmospheric reanalysis NetCDF files from Copernicus CDS for the European bounding box (`WEATHER_BOUNDS_BBOX`) across required pressure levels, caching them in `data/weather/`.
+7. **Physics & Contrail Simulation**: `simulation.py` and `clone_simulation.py` combine clean trajectories (or synthesized centroids) with ERA5 weather data to run PSFlight performance and CoCiP contrail models. Results are saved to `data/results/corridor_simulations/`, updating `GLOBAL_SIMULATION_REGISTRY` and `GLOBAL_CORRIDOR_SIM_REGISTRY`. Unsupported airframes are safely skipped and logged to `skipped_aircraft.log`.
+8. **Analysis & Verification**: Analytical suites in `src/analysis/` ingest clean trajectories, simulated outputs, and route summaries to export verification plots, flight level candlestick charts, and phase quality campaign reports into `data/analysis/`.
