@@ -24,11 +24,11 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.decomposition import PCA
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-from src.analysis.campaigns.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
-from src.analysis.campaigns.variational_orchestrator import _evaluate_custom_k, _is_oom_error
-from src.analysis.campaigns.plot_helpers import batch_generate_plots
+from src.analysis.campaigns.variational.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
+from src.analysis.campaigns.variational.variational_orchestrator import _evaluate_custom_k, _is_oom_error
+from src.analysis.campaigns.common.plot_helpers import batch_generate_plots
 from src.common.config import (
     BASE_DIR,
     CALIBRATION_ROUTES,

@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 
-from src.analysis.campaigns.plot_helpers import get_or_create_config_plot
+from src.analysis.campaigns.common.plot_helpers import get_or_create_config_plot
 
 logger = logging.getLogger(__name__)
 

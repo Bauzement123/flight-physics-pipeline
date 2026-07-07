@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP, ORACLE_COHORT_CACHE_DIR
 from src.common.registry_utils import load_trajectory_registry

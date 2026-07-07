@@ -17,10 +17,10 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-from src.analysis.campaigns.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
-from src.analysis.campaigns.variational_plots import generate_route_pdf_report
+from src.analysis.campaigns.variational.gt_stability_sweep import _compute_geometric_error, _prepare_oracle
+from src.analysis.campaigns.variational.variational_plots import generate_route_pdf_report
 from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_FLIGHT_CLUSTER_MAP
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
@@ -296,7 +296,7 @@ def _save_route_results(
             })
 
         # Run batch plot generation
-        from src.analysis.campaigns.plot_helpers import batch_generate_plots
+        from src.analysis.campaigns.common.plot_helpers import batch_generate_plots
         try:
             batch_generate_plots(plot_tasks)
         except Exception as e:

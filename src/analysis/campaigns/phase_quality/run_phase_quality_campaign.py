@@ -7,10 +7,10 @@ visual audit PDF reports across European target routes.
 
 Usage Examples:
     # Run baseline (no filters, 100% pass-through) on all 6 routes in PNG format:
-    python -m src.analysis.campaigns.run_phase_quality_campaign --all --workers 4 --format PNG
+    python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign --all --workers 4 --format PNG
 
     # Run with departure distance <= 5000m and min duration >= -30% of median:
-    python -m src.analysis.campaigns.run_phase_quality_campaign --all --workers 4 --format PNG --max-dep-horiz-dist 5000 --min-duration-pct-below-median 30
+    python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign --all --workers 4 --format PNG --max-dep-horiz-dist 5000 --min-duration-pct-below-median 30
 """
 
 import argparse
@@ -28,8 +28,8 @@ from src.common.config import (
     DEFAULT_PREFILTER_THRESHOLDS,
 )
 from src.common.utils import setup_file_logger, load_route_summary
-from src.analysis.campaigns.phase_quality_filters import apply_metadata_prefilters
-from src.analysis.campaigns.phase_quality_plots import compile_route_audit_pdf
+from src.analysis.campaigns.phase_quality.phase_quality_filters import apply_metadata_prefilters
+from src.analysis.campaigns.phase_quality.phase_quality_plots import compile_route_audit_pdf
 
 logger = logging.getLogger(__name__)
 

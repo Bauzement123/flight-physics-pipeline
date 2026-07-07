@@ -21,7 +21,7 @@ from src.common.config import (
     BASE_DIR,
 )
 from src.common.utils import setup_file_logger
-from src.analysis.campaigns.phase_quality_plots import compile_route_audit_pdf
+from src.analysis.campaigns.phase_quality.phase_quality_plots import compile_route_audit_pdf
 
 logger = logging.getLogger(__name__)
 
