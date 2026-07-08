@@ -101,20 +101,22 @@ flowchart TD
 4. Execute `apply_metadata_prefilters()` row-by-row to evaluate departure/arrival horizontal and vertical distances, candidate counts, and route duration anomalies.
 5. Annotate each flight with `status` (`PASSED` vs `REJECTED`), `fail_stage`, and `reject_reason`, exporting the full summary table to `filter_evaluation.csv`.
 6. Dispatch multi-page PDF compilation tasks across parallel worker processes using `ProcessPoolExecutor`.
-7. Each worker loads raw parquet trajectory files for its assigned route and cross-references evaluation statuses.
-8. Compile a 10-page visual audit PDF report displaying Cartopy ground tracks and raw altitude profiles, saving to the run directory.
+7. Each worker loads raw parquet trajectory files for its assigned route and cross-references evaluation statuses. If `--use-clean` or `--clean-dir` is specified, it automatically queries `GLOBAL_CLEAN_REGISTRY` and standard `clean/` directories to load cleaned EKF trajectory files.
+8. Compile a 10-page visual audit PDF report displaying Cartopy ground tracks and altitude profiles, saving to the run directory. When clean trajectories are provided, each cohort page renders a 4-plot 2x2 grid (Raw Top vs. Clean Bottom) with 1-to-1 color-phase alignment.
 
 ---
 
 ### 3.3 Optimization & Memory Modes
 - **Rasterized PNG Mode**: When `--format PNG` is selected, trajectory lines are rasterized at 150 DPI while text and axes remain vector graphics. This prevents severe PDF rendering lag on standard laptops when viewing 2,400 dense flight paths.
 - **Row-by-Row Pre-Filtering**: Metadata pre-filters are evaluated directly on the summary DataFrame before any trajectory parquet files are loaded from disk, saving significant memory and I/O bandwidth.
+- **Clean Registry Indexing**: When `--use-clean` is passed, `run_phase_quality_campaign.py` pre-loads `GLOBAL_CLEAN_REGISTRY` into a hash map ($O(1)$ lookup) to resolve clean trajectory file paths without crawling directories.
 
 ### 3.4 Metric & Progress Logging Formats
 All logging is routed through `setup_file_logger()` to `data/logs/corridor.log`:
 ```text
 2026-07-07 19:50:00,123 - [INFO] - [run_phase_quality_campaign] Starting campaign run: run_dephoriz5000_durbelow30_png
 2026-07-07 19:50:01,456 - [INFO] - [run_phase_quality_campaign] Pre-filtering complete: 2400 PASSED, 0 REJECTED. Saved filter_evaluation.csv.
+2026-07-07 19:50:55,911 - [INFO] - [EDDF-LIRF] Loaded clean registry index with 2,051 entries.
 2026-07-07 19:51:15,789 - [INFO] - [phase_quality_plots] [EDDF-LIRF] Successfully generated EDDF-LIRF_audit_report.pdf
 ```
 
@@ -137,6 +139,7 @@ python -m src.analysis.campaigns.phase_quality.build_audit_candidate_pool
 ```bash
 python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign \
     --all \
+    --use-clean \
     --workers 4 \
     --format PNG \
     --max-dep-horiz-dist 5000 \
@@ -147,6 +150,7 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign \
 ```powershell
 python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
     --all `
+    --use-clean `
     --workers 4 `
     --format PNG `
     --max-dep-horiz-dist 5000 `
@@ -161,6 +165,10 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
 | `--all` | Flag | `False` | Run campaign across all 6 target European routes. |
 | `--workers` | Integer | `4` | Number of parallel worker processes for PDF compilation. |
 | `--format` | String | `SVG` | Plot rendering format (`SVG` vector vs `PNG` rasterized). |
+| `--out-dir` | String | *Optional* | Custom output directory for evaluation results and PDFs. |
+| `--show-rejected` | Flag | `False` | Plot rejected trajectories on audit pages. |
+| `--clean-dir` | String | *Optional* | Directory containing cleaned/post-processed trajectory parquet files for 4-plot comparison. |
+| `--use-clean` | Flag | `False` | Automatically resolve and load clean trajectories from normal directories and `GLOBAL_CLEAN_REGISTRY` for 4-plot comparison. |
 | `--max-dep-horiz-dist` | Float | `None` | Max departure horizontal distance to airport center (meters). |
 | `--max-dep-vert-dist` | Float | `None` | Max departure vertical distance to airport altitude (meters). |
 | `--max-arr-horiz-dist` | Float | `None` | Max arrival horizontal distance to airport center (meters). |
@@ -182,6 +190,7 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
 ### 5.2 Referenced Registry & Config Files
 - `src.common.config.AUDIT_CANDIDATE_POOL_REGISTRY`: Parquet file containing candidate flight metadata.
 - `src.common.config.AUDIT_COHORT_MAP_REGISTRY`: Parquet file mapping flights to temporal cohorts.
+- `src.common.config.GLOBAL_CLEAN_REGISTRY`: Parquet file indexing cleaned EKF trajectories across all routes.
 - `src.common.config.PHASE_QUALITY_RUNS_DIR`: Base directory for campaign output folders.
 - `src.common.config.DEFAULT_PREFILTER_THRESHOLDS`: Dictionary holding default filter threshold values.
 - For global project naming conventions, see [conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/conventions.md).

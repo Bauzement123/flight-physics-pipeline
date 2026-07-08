@@ -62,6 +62,124 @@ def _get_phase_color(val: Any) -> str:
     return DEFAULT_COLOR
 
 
+def _extract_valid_coords_and_time(df_fl: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Extracts cleaned coordinates (lons, lats, alts, t_norm, phases) from a trajectory DataFrame."""
+    lon_col = "lon" if "lon" in df_fl.columns else "longitude"
+    lat_col = "lat" if "lat" in df_fl.columns else "latitude"
+    alt_col = "baroaltitude" if "baroaltitude" in df_fl.columns else ("geoaltitude" if "geoaltitude" in df_fl.columns else "altitude")
+    time_col = "time" if "time" in df_fl.columns else "timestamp"
+
+    if not all(col in df_fl.columns for col in [lon_col, lat_col, alt_col]):
+        return None
+
+    df_fl = df_fl.sort_values(by=time_col) if time_col in df_fl.columns else df_fl
+    lons, lats, alts = df_fl[lon_col].values.astype(float), df_fl[lat_col].values.astype(float), df_fl[alt_col].values.astype(float)
+    valid_mask = ~(np.isnan(lons) | np.isnan(lats) | np.isinf(lons) | np.isinf(lats) | np.isnan(alts))
+    if not np.any(valid_mask):
+        return None
+
+    lons, lats, alts = lons[valid_mask], lats[valid_mask], alts[valid_mask]
+    if time_col in df_fl.columns:
+        ts_series = pd.to_datetime(df_fl[time_col])
+        ts = (ts_series - ts_series.iloc[0]).dt.total_seconds().values.astype(float)[valid_mask]
+        t_norm = (ts / ts[-1]) if (len(ts) > 1 and ts[-1] > 0) else np.linspace(0.0, 1.0, len(ts))
+    else:
+        t_norm = np.linspace(0.0, 1.0, len(lons))
+
+    phases = df_fl["flight_phase"].values[valid_mask] if "flight_phase" in df_fl.columns else [None] * len(lons)
+    return lons, lats, alts, t_norm, phases
+
+
+def _render_trajectory_pair_on_axes(
+    ax_map: plt.Axes,
+    ax_prof: plt.Axes,
+    candidate_flight_ids: list[str],
+    trajectories: dict[str, pd.DataFrame],
+    eval_records: dict[str, dict] | None,
+    show_rejected: bool,
+    map_cache: EuropeanMapCache,
+    route_id: str,
+    crop_padding: float,
+    label_prefix: str = "Raw",
+) -> dict[str, Any]:
+    """Helper to render ground track and vertical profile onto given axes."""
+    min_lon, max_lon, min_lat, max_lat, min_alt, max_alt = 180.0, -180.0, 90.0, -90.0, 1e9, -1e9
+    stats = {"plotted": 0, "rejected": 0, "prefilter": 0, "postfilter": 0, "total_points": 0, "na_points": 0, "flights_with_na": 0}
+
+    if not map_cache.airports_df.empty:
+        ax_map.scatter(map_cache.airports_df["lon"], map_cache.airports_df["lat"], color="#6c757d", s=12, alpha=0.3, edgecolors="none", transform=ccrs.PlateCarree(), zorder=2)
+
+    for fid in candidate_flight_ids:
+        status = eval_records[fid].get("status", "PASSED") if eval_records and fid in eval_records else "PASSED"
+        fail_stage = eval_records[fid].get("fail_stage", "NONE") if eval_records and fid in eval_records else "NONE"
+        if status == "REJECTED":
+            stats["rejected"] += 1
+            stats["prefilter" if fail_stage == "PREFILTER" else "postfilter"] += (1 if fail_stage in ["PREFILTER", "POSTFILTER"] else 0)
+            if not show_rejected or fid not in trajectories:
+                continue
+
+        df_fl = trajectories.get(fid)
+        if df_fl is None or df_fl.empty:
+            continue
+        coords = _extract_valid_coords_and_time(df_fl)
+        if not coords:
+            continue
+        lons, lats, alts, t_norm, phases = coords
+        colors = [_get_phase_color(p) for p in phases]
+
+        fl_na = sum(1 for p in phases if pd.isna(p) or p is None or _get_phase_color(p) == DEFAULT_COLOR)
+        stats["total_points"] += len(phases)
+        stats["na_points"] += fl_na
+        stats["flights_with_na"] += 1 if fl_na > 0 else 0
+
+        min_lon, max_lon = min(min_lon, np.nanmin(lons)), max(max_lon, np.nanmax(lons))
+        min_lat, max_lat = min(min_lat, np.nanmin(lats)), max(max_lat, np.nanmax(lats))
+        min_alt, max_alt = min(min_alt, np.nanmin(alts)), max(max_alt, np.nanmax(alts))
+
+        if status == "REJECTED" and show_rejected:
+            ax_map.plot(lons, lats, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
+            ax_prof.plot(t_norm, alts, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
+        else:
+            stats["plotted"] += 1
+            pts_xy = np.array([lons, lats]).T.reshape(-1, 1, 2)
+            ax_map.add_collection(LineCollection(np.concatenate([pts_xy[:-1], pts_xy[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4, transform=ccrs.PlateCarree()))
+            pts_zt = np.array([t_norm, alts]).T.reshape(-1, 1, 2)
+            ax_prof.add_collection(LineCollection(np.concatenate([pts_zt[:-1], pts_zt[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4))
+
+    _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lon, max_lon, min_lat, max_lat, min_alt, max_alt, label_prefix)
+    return stats
+
+
+def _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lon, max_lon, min_lat, max_lat, min_alt, max_alt, label_prefix):
+    """Formats gridlines, extent, labels, and limits for a subplot pair."""
+    parts = route_id.split("-")
+    if len(parts) >= 2 and not map_cache.airports_df.empty:
+        dep_arr_df = map_cache.airports_df[map_cache.airports_df["icao"].str.upper().isin([parts[0].strip().upper(), parts[-1].strip().upper()])]
+        if not dep_arr_df.empty:
+            min_lon, max_lon = min(min_lon, dep_arr_df["lon"].min()), max(max_lon, dep_arr_df["lon"].max())
+            min_lat, max_lat = min(min_lat, dep_arr_df["lat"].min()), max(max_lat, dep_arr_df["lat"].max())
+
+    if min_lon < max_lon and min_lat < max_lat:
+        ax_map.set_extent([min_lon - crop_padding, max_lon + crop_padding, min_lat - crop_padding, max_lat + crop_padding], crs=ccrs.PlateCarree())
+
+    try:
+        from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+        gl = ax_map.gridlines(draw_labels=True, linestyle="--", color="dimgray", linewidth=0.6, alpha=0.5)
+        gl.top_labels = gl.right_labels = False
+        gl.xformatter, gl.yformatter = LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+        gl.xlabel_style = gl.ylabel_style = {"size": 8}
+    except Exception:
+        ax_map.grid(True, linestyle="--", alpha=0.5)
+
+    ax_map.set_title(f"{label_prefix} Ground Track", fontsize=10)
+    ax_prof.set_title(f"{label_prefix} Vertical Profile", fontsize=10)
+    ax_prof.set_xlabel("Normalized Time Point [0, 1]", fontsize=9)
+    ax_prof.set_ylabel("Altitude (ft)", fontsize=9)
+    ax_prof.grid(True, linestyle="--", alpha=0.5)
+    ax_prof.set_xlim(-0.02, 1.02)
+    ax_prof.set_ylim(max(0.0, min_alt - 1000.0), max_alt + 2500.0 if (min_alt < max_alt and max_alt > -1e8) else 45000.0)
+
+
 def plot_cohort_audit_page(
     route_id: str,
     cohort_idx: int,
@@ -71,207 +189,41 @@ def plot_cohort_audit_page(
     show_rejected: bool = False,
     crop_padding: float = 1.5,
     plot_format: str = "SVG",
+    trajectories_clean: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[plt.Figure, dict[str, int]]:
     """
-    Renders a single cohort audit page (Cartopy ground track + time-normalized [0, 1]
-    vertical profile) for the fixed candidate flights assigned to this cohort.
-    
-    Surviving trajectories are color-coded by flight_phase.
-    Returns: (fig, stats_dict)
+    Renders a cohort audit page. If trajectories_clean is provided, renders 4 plots
+    in a 2x2 grid (Top: Raw, Bottom: Clean). Otherwise renders 2 plots in a 1x2 grid.
     """
-    fig = plt.figure(figsize=(12, 5.2))
-    ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.PlateCarree())
-    ax2 = fig.add_subplot(1, 2, 2)
+    is_four_plot = trajectories_clean is not None
+    fig = plt.figure(figsize=(13, 10.2 if is_four_plot else 5.2))
+    ax1 = fig.add_subplot(2 if is_four_plot else 1, 2, 1, projection=ccrs.PlateCarree())
+    ax2 = fig.add_subplot(2 if is_four_plot else 1, 2, 2)
 
     if plot_format.upper() == "PNG":
         ax1.set_rasterization_zorder(10)
         ax2.set_rasterization_zorder(10)
 
-    # 1. Add cached European basemap features
     map_cache = EuropeanMapCache().initialize()
     map_cache.add_features_to_axes(ax1)
 
-    # 2. Add background airport markers
-    if not map_cache.airports_df.empty:
-        ax1.scatter(
-            map_cache.airports_df["lon"],
-            map_cache.airports_df["lat"],
-            color="#6c757d",
-            s=12,
-            alpha=0.3,
-            edgecolors="none",
-            transform=ccrs.PlateCarree(),
-            zorder=2,
-        )
+    stats = _render_trajectory_pair_on_axes(ax1, ax2, candidate_flight_ids, trajectories, eval_records, show_rejected, map_cache, route_id, crop_padding, label_prefix="Raw" if is_four_plot else "")
 
-    # Track bounding boxes and statistics
-    min_lon, max_lon = 180.0, -180.0
-    min_lat, max_lat = 90.0, -90.0
-    min_alt, max_alt = 1e9, -1e9
-    plotted_count = 0
-    rejected_count = 0
-    prefilter_rejects = 0
-    postfilter_rejects = 0
+    if is_four_plot:
+        ax3 = fig.add_subplot(2, 2, 3, projection=ccrs.PlateCarree())
+        ax4 = fig.add_subplot(2, 2, 4)
+        if plot_format.upper() == "PNG":
+            ax3.set_rasterization_zorder(10)
+            ax4.set_rasterization_zorder(10)
+        map_cache.add_features_to_axes(ax3)
+        _render_trajectory_pair_on_axes(ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records, show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean")
 
-    total_points = 0
-    na_points = 0
-    flights_with_na = 0
-
-    # 3. Iterate over the fixed candidate flights for this cohort
-    for fid in candidate_flight_ids:
-        status = "PASSED"
-        fail_stage = "NONE"
-        if eval_records and fid in eval_records:
-            status = eval_records[fid].get("status", "PASSED")
-            fail_stage = eval_records[fid].get("fail_stage", "NONE")
-
-        if status == "REJECTED":
-            rejected_count += 1
-            if fail_stage == "PREFILTER":
-                prefilter_rejects += 1
-            elif fail_stage == "POSTFILTER":
-                postfilter_rejects += 1
-
-            if not show_rejected or fid not in trajectories:
-                continue
-
-        df_fl = trajectories.get(fid)
-        if df_fl is None or df_fl.empty:
-            continue
-
-        # Extract coordinates
-        lon_col = "lon" if "lon" in df_fl.columns else "longitude"
-        lat_col = "lat" if "lat" in df_fl.columns else "latitude"
-        alt_col = "baroaltitude" if "baroaltitude" in df_fl.columns else (
-            "geoaltitude" if "geoaltitude" in df_fl.columns else "altitude"
-        )
-        time_col = "time" if "time" in df_fl.columns else "timestamp"
-
-        if not all(col in df_fl.columns for col in [lon_col, lat_col, alt_col]):
-            continue
-
-        df_fl = df_fl.sort_values(by=time_col) if time_col in df_fl.columns else df_fl
-        lons = df_fl[lon_col].values.astype(float)
-        lats = df_fl[lat_col].values.astype(float)
-        alts = df_fl[alt_col].values.astype(float)
-
-        # Coordinate cleaning: filter out NaN or Inf coordinates to prevent Shapely warnings
-        valid_mask = ~(np.isnan(lons) | np.isnan(lats) | np.isinf(lons) | np.isinf(lats) | np.isnan(alts))
-        if not np.any(valid_mask):
-            continue
-
-        lons = lons[valid_mask]
-        lats = lats[valid_mask]
-        alts = alts[valid_mask]
-
-        # Note: Altitude is NOT normalized! It remains in real physical altitude (feet).
-
-        # Adopt corridor model time normalization (pca_compressor.py::vectorize_flight)
-        if time_col in df_fl.columns:
-            ts_series = pd.to_datetime(df_fl[time_col])
-            ts = (ts_series - ts_series.iloc[0]).dt.total_seconds().values.astype(float)[valid_mask]
-            if len(ts) > 1 and ts[-1] > 0:
-                t_norm = ts / ts[-1]
-            else:
-                t_norm = np.linspace(0.0, 1.0, len(ts))
-        else:
-            t_norm = np.linspace(0.0, 1.0, len(lons))
-
-        # Track NA phase statistics
-        phases = df_fl["flight_phase"].values[valid_mask] if "flight_phase" in df_fl.columns else [None] * len(lons)
-        colors = [_get_phase_color(p) for p in phases]
-
-        fl_pts = len(phases)
-        fl_na = sum(1 for p in phases if pd.isna(p) or p is None or _get_phase_color(p) == DEFAULT_COLOR)
-        total_points += fl_pts
-        na_points += fl_na
-        if fl_na > 0:
-            flights_with_na += 1
-
-        # Update bounding box
-        min_lon = min(min_lon, np.nanmin(lons))
-        max_lon = max(max_lon, np.nanmax(lons))
-        min_lat = min(min_lat, np.nanmin(lats))
-        max_lat = max(max_lat, np.nanmax(lats))
-        min_alt = min(min_alt, np.nanmin(alts))
-        max_alt = max(max_alt, np.nanmax(alts))
-
-        if status == "REJECTED" and show_rejected:
-            # Plot rejected flights as faint dashed gray line
-            ax1.plot(lons, lats, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
-            ax2.plot(t_norm, alts, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
-        else:
-            plotted_count += 1
-            # Build fast LineCollections for ground track
-            pts_xy = np.array([lons, lats]).T.reshape(-1, 1, 2)
-            segs_xy = np.concatenate([pts_xy[:-1], pts_xy[1:]], axis=1)
-            lc_xy = LineCollection(segs_xy, colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4, transform=ccrs.PlateCarree())
-            ax1.add_collection(lc_xy)
-
-            # Build LineCollections for vertical profile
-            pts_zt = np.array([t_norm, alts]).T.reshape(-1, 1, 2)
-            segs_zt = np.concatenate([pts_zt[:-1], pts_zt[1:]], axis=1)
-            lc_zt = LineCollection(segs_zt, colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4)
-            ax2.add_collection(lc_zt)
-
-    # 4. Auto-crop extent to airports + padding
-    parts = route_id.split("-")
-    if len(parts) >= 2 and not map_cache.airports_df.empty:
-        dep_icao, arr_icao = parts[0].strip().upper(), parts[-1].strip().upper()
-        dep_arr_df = map_cache.airports_df[
-            map_cache.airports_df["icao"].str.upper().isin([dep_icao, arr_icao])
-        ]
-        if not dep_arr_df.empty and len(dep_arr_df) >= 1:
-            min_lon = min(min_lon, dep_arr_df["lon"].min())
-            max_lon = max(max_lon, dep_arr_df["lon"].max())
-            min_lat = min(min_lat, dep_arr_df["lat"].min())
-            max_lat = max(max_lat, dep_arr_df["lat"].max())
-
-    if min_lon < max_lon and min_lat < max_lat:
-        ax1.set_extent(
-            [min_lon - crop_padding, max_lon + crop_padding, min_lat - crop_padding, max_lat + crop_padding],
-            crs=ccrs.PlateCarree(),
-        )
-
-    # 5. Gridlines and formatting
-    try:
-        from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
-        gl = ax1.gridlines(draw_labels=True, linestyle="--", color="dimgray", linewidth=0.6, alpha=0.5)
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xformatter = LONGITUDE_FORMATTER
-        gl.yformatter = LATITUDE_FORMATTER
-        gl.xlabel_style = {"size": 8}
-        gl.ylabel_style = {"size": 8}
-    except Exception as e:
-        logger.debug(f"Gridline error: {e}")
-        ax1.grid(True, linestyle="--", alpha=0.5)
-
-    # Title summary header with NA Statistics
-    na_pct = (na_points / total_points * 100.0) if total_points > 0 else 0.0
+    na_pct = (stats["na_points"] / stats["total_points"] * 100.0) if stats["total_points"] > 0 else 0.0
     summary_str = f"Route: {route_id} | Cohort {cohort_idx} ({len(candidate_flight_ids)} Candidates)\n"
-    if eval_records:
-        summary_str += f"Plotted: {plotted_count} | Dropped: {rejected_count} (Pre: {prefilter_rejects}, Post: {postfilter_rejects}) | "
-    else:
-        summary_str += f"Baseline Audit: Displaying all {plotted_count} trajectories | "
-    summary_str += f"Phase NA: {na_points:,}/{total_points:,} pts ({na_pct:.1f}%) in {flights_with_na} flights"
+    summary_str += f"Plotted: {stats['plotted']} | Dropped: {stats['rejected']} (Pre: {stats['prefilter']}, Post: {stats['postfilter']}) | " if eval_records else f"Baseline Audit: Displaying {stats['plotted']} trajectories | "
+    summary_str += f"Phase NA: {stats['na_points']:,}/{stats['total_points']:,} pts ({na_pct:.1f}%) in {stats['flights_with_na']} flights"
 
     fig.suptitle(summary_str, fontsize=10.5, fontweight="bold", y=0.98)
-
-    ax1.set_title("Ground Track", fontsize=10)
-    ax2.set_title("Vertical Profile", fontsize=10)
-    ax2.set_xlabel("Normalized Time Point [0, 1]", fontsize=9)
-    ax2.set_ylabel("Altitude (ft)", fontsize=9)
-    ax2.grid(True, linestyle="--", alpha=0.5)
-
-    # Explicitly set limits since add_collection does not autoscale
-    ax2.set_xlim(-0.02, 1.02)
-    if min_alt < max_alt and max_alt > -1e8:
-        ax2.set_ylim(max(0.0, min_alt - 1000.0), max_alt + 2500.0)
-    else:
-        ax2.set_ylim(0.0, 45000.0)
-
-    # Add phase color legend including NA entry
     legend_handles = [
         mlines.Line2D([], [], color=PHASE_COLORS["GND"], label="GND (Ground)", linewidth=2),
         mlines.Line2D([], [], color=PHASE_COLORS["CL"], label="CL (Climb)", linewidth=2),
@@ -281,18 +233,7 @@ def plot_cohort_audit_page(
         mlines.Line2D([], [], color=DEFAULT_COLOR, label="NA / Unlabeled", linewidth=2),
     ]
     ax2.legend(handles=legend_handles, loc="upper right", fontsize=7.5, framealpha=0.85)
-
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-
-    stats = {
-        "plotted": plotted_count,
-        "rejected": rejected_count,
-        "prefilter": prefilter_rejects,
-        "postfilter": postfilter_rejects,
-        "total_points": total_points,
-        "na_points": na_points,
-        "flights_with_na": flights_with_na,
-    }
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     return fig, stats
 
 
@@ -304,11 +245,9 @@ def compile_route_audit_pdf(
     eval_df: pd.DataFrame | None = None,
     show_rejected: bool = False,
     plot_format: str = "SVG",
+    trajectories_clean: dict[str, pd.DataFrame] | None = None,
 ) -> Path:
-    """
-    Compiles a multi-page PDF report for a given route by iterating through
-    all cohorts (1 through 10) in the cohort map. Logs detailed NA statistics.
-    """
+    """Compiles a multi-page PDF report for a route by iterating through all cohorts."""
     out_pdf_path = Path(out_pdf_path)
     out_pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -317,18 +256,11 @@ def compile_route_audit_pdf(
         logger.warning(f"No cohort mapping found for route {route_id}")
         return out_pdf_path
 
-    eval_records = None
-    if eval_df is not None and not eval_df.empty:
-        df_eval_route = eval_df[eval_df["route_id"] == route_id]
-        eval_records = df_eval_route.set_index("flight_id").to_dict(orient="index")
-
+    eval_records = eval_df[eval_df["route_id"] == route_id].set_index("flight_id").to_dict(orient="index") if eval_df is not None and not eval_df.empty else None
     cohorts = sorted(df_route_map["cohort_idx"].unique())
-    logger.info(f"Compiling {len(cohorts)}-page PDF audit report ({plot_format.upper()} mode) for {route_id} -> {out_pdf_path.name}...")
+    logger.info(f"Compiling {len(cohorts)}-page PDF audit report ({plot_format.upper()} mode, 4-plot={trajectories_clean is not None}) for {route_id} -> {out_pdf_path.name}...")
 
-    route_total_pts = 0
-    route_na_pts = 0
-    route_na_flights = 0
-
+    route_total_pts, route_na_pts, route_na_flights = 0, 0, 0
     with PdfPages(out_pdf_path) as pdf:
         for c_idx in cohorts:
             c_fids = df_route_map[df_route_map["cohort_idx"] == c_idx]["flight_id"].tolist()
@@ -339,25 +271,18 @@ def compile_route_audit_pdf(
                 trajectories=trajectories,
                 eval_records=eval_records,
                 show_rejected=show_rejected,
+                crop_padding=1.5,
                 plot_format=plot_format,
+                trajectories_clean=trajectories_clean,
             )
             pdf.savefig(fig, dpi=DEFAULT_DPI, bbox_inches="tight")
             plt.close(fig)
-
             route_total_pts += stats["total_points"]
             route_na_pts += stats["na_points"]
             route_na_flights += stats["flights_with_na"]
-
             na_pct = (stats["na_points"] / stats["total_points"] * 100.0) if stats["total_points"] > 0 else 0.0
-            logger.info(
-                f"   -> Cohort {c_idx:2d}: Rendered {stats['plotted']:2d} flights | "
-                f"Phase NA: {stats['na_points']:6d}/{stats['total_points']:6d} pts ({na_pct:4.1f}%) across {stats['flights_with_na']:2d} flights."
-            )
+            logger.info(f"   -> Cohort {c_idx:2d}: Rendered {stats['plotted']:2d} flights | Phase NA: {stats['na_points']:6d}/{stats['total_points']:6d} pts ({na_pct:4.1f}%) across {stats['flights_with_na']:2d} flights.")
 
     route_na_pct = (route_na_pts / route_total_pts * 100.0) if route_total_pts > 0 else 0.0
-    logger.info(
-        f"[{route_id} Summary] Total Trajectory Points: {route_total_pts:,} | "
-        f"Total Phase NA: {route_na_pts:,} ({route_na_pct:.1f}%) across {route_na_flights} flights."
-    )
-    logger.info(f"Successfully generated {out_pdf_path}")
+    logger.info(f"[{route_id} Summary] Total Trajectory Points: {route_total_pts:,} | Total Phase NA: {route_na_pts:,} ({route_na_pct:.1f}%) across {route_na_flights} flights.")
     return out_pdf_path
