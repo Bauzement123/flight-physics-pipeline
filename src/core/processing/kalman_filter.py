@@ -575,6 +575,7 @@ def _process_single_raw_file(
     out_dir_path: Path,
     save_diagnostics: bool,
     overwrite: bool,
+    target_flight_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Loads one raw Parquet, cleans each flight via clean_pycontrails_flight, writes output."""
     out_path = out_dir_path / raw_file.name.replace("_raw.parquet", "_clean_si.parquet")
@@ -591,6 +592,8 @@ def _process_single_raw_file(
     registry_entries: list[dict[str, Any]] = []
 
     for fid, pyc_flight in flights_dict.items():
+        if target_flight_ids is not None and fid not in target_flight_ids:
+            continue
         t_code = pyc_flight.attrs.get("aircraft_type", None)
         if not is_supported_typecode(t_code):
             log_skipped_aircraft(fid, t_code, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in raw parquet")
@@ -634,26 +637,82 @@ def process_trajectories_by_route_ranks(
     overwrite: bool = False,
 ) -> None:
     """Resolves target corridors by rank/route, processes all raw Parquet files, updates registry."""
-    target_routes = extract_target_routes(ranks=ranks, rank_range=rank_range, routes=routes)
-    if not target_routes and source_dir is None:
-        logging.warning("No target routes or source directory specified.")
-        return
-
-    search_dirs = (
-        [Path(source_dir)] if source_dir
-        else [
-            BASE_DIR / "data" / "trajectories" / f"rank_{r.get('rank', 0)}_{r['route']}" / "raw"
-            for r in target_routes
-        ]
-    )
     all_entries: list[dict[str, Any]] = []
-    for s_dir in search_dirs:
+
+    if source_dir is not None:
+        s_dir = Path(source_dir)
         if not s_dir.exists():
-            continue
+            logging.warning(f"Specified source_dir does not exist: {s_dir}")
+            return
         o_dir = Path(out_dir) if out_dir else (s_dir.parent / "clean" if s_dir.name == "raw" else s_dir)
         o_dir.mkdir(parents=True, exist_ok=True)
         for rf in s_dir.glob("*_raw.parquet"):
             all_entries.extend(_process_single_raw_file(rf, o_dir, save_diagnostics, overwrite))
+    else:
+        from src.common.registry_utils import get_flights_for_route
+
+        # Gather target (dep, arr) pairs to process
+        target_corridors: list[tuple[str, str]] = []
+        if routes:
+            for r in routes:
+                if "-" in r:
+                    dep, arr = r.split("-", 1)
+                    target_corridors.append((dep.strip().upper(), arr.strip().upper()))
+                else:
+                    logging.warning(f"Skipping malformed route format: {r} (expected DEP-ARR)")
+
+        if ranks or rank_range:
+            routes_df = extract_target_routes(
+                specific_ranks=ranks,
+                lower=rank_range[0] if rank_range else None,
+                upper=rank_range[1] if rank_range else None,
+            )
+            for _, row in routes_df.iterrows():
+                target_corridors.append((row["dep"], row["arr"]))
+
+        if not target_corridors:
+            logging.warning("No target corridors resolved by ranks/routes.")
+            return
+
+        # Query registry for flight ids/paths matching resolved corridors
+        matching_dfs = []
+        for dep, arr in target_corridors:
+            matching_dfs.append(get_flights_for_route(dep, arr))
+
+        if not matching_dfs:
+            logging.warning("No matching trajectory records resolved.")
+            return
+
+        df_target = pd.concat(matching_dfs).drop_duplicates(subset=["flight_id"])
+        if df_target.empty:
+            logging.warning("No trajectory records found in registry for target corridors.")
+            return
+
+        # Group target flight IDs by their raw relative file path
+        grouped = df_target.groupby("file_path")["flight_id"].apply(set).to_dict()
+
+        for rel_file_path, fids in grouped.items():
+            raw_file = BASE_DIR / rel_file_path
+            if not raw_file.exists():
+                logging.warning(f"Raw file registered but not found on disk: {raw_file}")
+                continue
+
+            # Determine clean output directory
+            if out_dir:
+                o_dir = Path(out_dir)
+            else:
+                o_dir = raw_file.parent.parent / "clean" if raw_file.parent.name == "raw" else raw_file.parent
+            o_dir.mkdir(parents=True, exist_ok=True)
+
+            all_entries.extend(
+                _process_single_raw_file(
+                    raw_file=raw_file,
+                    out_dir_path=o_dir,
+                    save_diagnostics=save_diagnostics,
+                    overwrite=overwrite,
+                    target_flight_ids=fids,
+                )
+            )
 
     if all_entries:
         update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)

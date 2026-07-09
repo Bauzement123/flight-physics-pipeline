@@ -142,10 +142,10 @@ Module Objective
       │    └── Output : pycontrails.Flight object in SI units
       │
       └── Sub-objective 11 — Batch orchestration & registry update
-           ├── Input : raw *_raw.parquet files per corridor directory
+           ├── Input : raw *_raw.parquet files resolved via registry
            ├── Solution : process_trajectories_by_route_ranks()
-           │   extract_target_routes() → resolve corridor rank/route → search dirs
-           │   _process_single_raw_file() per raw Parquet
+           │   get_flights_for_route() / extract_target_routes() → query registry for files
+           │   _process_single_raw_file() per unique registered Parquet file
            │     parquet_to_pycontrails() → dict[flight_id → pycontrails.Flight]
            │     clean_pycontrails_flight() per flight (includes Rule 11 check)
            │     write_flights_to_parquet() → *_clean_si.parquet
@@ -166,11 +166,11 @@ and updating `GLOBAL_CLEAN_REGISTRY`.
 ```mermaid
 flowchart TD
     A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
-    B --> C["process_trajectories_by_route_ranks()\nextract_target_routes(ranks, rank_range, routes)\n→ reads master_flights_route_summary.parquet"]
+    B --> C["process_trajectories_by_route_ranks()\nResolve targets via ranks/routes"]
     C --> D{"source_dir provided?"}
-    D -->|Yes| E["[Path(source_dir)]"]
-    D -->|No| F["BASE_DIR/data/trajectories/rank_R_ROUTE/raw\nper resolved corridor"]
-    E --> G["For each search_dir: glob *_raw.parquet"]
+    D -->|Yes| E["Read *_raw.parquet files\nfrom source_dir"]
+    D -->|No| F["Query trajectory registry\nvia get_flights_for_route()\nGroup target flights by file_path"]
+    E --> G["For each raw file:\n_process_single_raw_file()"]
     F --> G
     G --> H{"*_clean_si.parquet exists\nAND --overwrite not set?"}
     H -->|Yes| I["LOG INFO: skip file"]
@@ -198,8 +198,8 @@ flowchart TD
 **Step-by-step:**
 
 1. **Logger setup**: `main()` immediately calls `setup_file_logger("processing.log")`, directing all `logging` output to `data/logs/processing.log`. `logging.basicConfig()` is never called.
-2. **Route resolution**: `process_trajectories_by_route_ranks()` calls `extract_target_routes(ranks, rank_range, routes)`, which reads `master_flights_route_summary.parquet` to map rank indices or corridor strings to candidate `search_dirs`. If `--source-dir` is supplied instead, that single directory is used directly, bypassing route lookup.
-3. **Raw file enumeration**: For each resolved `search_dir`, all files matching `*_raw.parquet` are globbed. The output directory defaults to the sibling `clean/` subdirectory (i.e., `search_dir.parent / "clean"` when `search_dir.name == "raw"`), or the value of `--out-dir` if provided.
+2. **Corridor resolution**: If `--source-dir` is provided, the pipeline processes files directly from that directory. Otherwise, it resolves target departure/arrival corridor pairs using `--routes` and/or by calling `extract_target_routes` with the provided `--ranks`/`--rank-range`.
+3. **Registry-based file query**: For the resolved corridors, it queries the trajectory registry using `get_flights_for_route(dep, arr)` to obtain matching `flight_id`s and their registered relative `file_path`s. The matching flight IDs are grouped by raw `file_path` so that each raw Parquet file is processed exactly once, filtering in-memory to target flights only.
 4. **Overwrite guard**: `_process_single_raw_file()` checks whether the target `*_clean_si.parquet` already exists. If it does and `--overwrite` is not set, the file is skipped and an `INFO` log entry is written.
 5. **Ingestion**: `parquet_to_pycontrails(raw_file)` reads the raw Parquet and returns a `dict[flight_id → pycontrails.Flight]`. Each flight's `typecode` is read from `pyc_flight.attrs["aircraft_type"]`.
 6. **Rule 11 typecode gate**: `is_supported_typecode(t_code)` is called for every flight. Any record with a missing, `NaN`, or out-of-family typecode is dropped immediately. `log_skipped_aircraft(fid, t_code, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in raw parquet")` appends a tab-separated audit entry to `data/logs/skipped_aircraft.log`. Processing continues with the next flight.
