@@ -1,177 +1,375 @@
 # Trajectory Processing & EKF Smoothing Module
 
-This module represents the second step in the Flight Physics Pipeline. It is responsible for mathematically smoothing the raw ADS-B trajectories downloaded from OpenSky, dropping ground-level noise, applying an Extended Kalman Filter (EKF), and resampling coordinates to a 1-minute frequency optimal for PyContrails.
+This module is **Step 2.1** of the Flight Physics Pipeline. It consumes raw, noisy ADS-B
+trajectories produced by the fetching stage, applies a **6-Dimensional Kinematic Extended
+Kalman Filter (EKF)** derived from the `traffic` library's mathematics, resamples every
+flight to a canonical equidistant time grid (`CORRIDOR_TIME_GRID_SECONDS = 60 s`), assigns
+OpenAP aerodynamic flight phases, and writes clean SI Parquet trajectories — optionally
+augmented with per-step EKF diagnostic tensors — to the `clean/` corridor subdirectory.
+It also exposes two **programmatic in-process entry points** (`clean_traffic_flight` and
+`clean_pycontrails_flight`) so that other pipeline stages can invoke the filter without
+ever touching the filesystem.
 
 > [!IMPORTANT]
-> **Input Expectation**: The EKF smoothing engine is explicitly designed and calibrated to be invoked on **raw, noisy flight trajectories** (high-frequency waypoints), not on synthesized/idealized paths or centroid trajectories.
+> **Input Expectation**: The EKF engine is calibrated for **raw, high-frequency, noisy
+> ADS-B trajectories**. Do not feed it synthesised or centroid paths.
+
+> [!IMPORTANT]
+> **Rule 11 — Strict Typecode Validation**: Every entry point that accepts a `typecode`
+> argument calls `is_supported_typecode(typecode)` from `src.common.config` before any
+> processing begins. Records with missing (`None`, `NaN`), empty, or unsupported typecodes
+> are **silently dropped and logged** to `data/logs/skipped_aircraft.log` via
+> `log_skipped_aircraft()`. No default typecode is ever injected.
 
 ---
 
-## 1. Module Structure
+## 2. Module Structure
 
 ```text
 src/core/processing/
-├── README.md                      # This primary documentation
-├── kalman_filter.py               # EKF filtering & resampling engine
-└── TRAFFIC_LIBRARY_EKF_ANALYSIS.md # Advanced EKF mathematical reference
+├── README.md                          # This documentation file
+├── kalman_filter.py                   # 6D Kinematic EKF filtering, grid resampling,
+│                                      #   phase assignment & registry update engine
+└── TRAFFIC_LIBRARY_EKF_ANALYSIS.md   # Advanced mathematical reference for the EKF
 ```
 
 ---
 
-## 2. Function Analysis Solution Tree (FAST)
+## 3. Function Analysis Solution Tree (FAST)
 
 ```text
-Module Objectives
- └── Apply Extended Kalman Filter (EKF) smoothing and resample raw ADSB waypoints
+Module Objective
+ └── Apply 6D Kinematic EKF smoothing, resample to 60 s grid, assign aerodynamic phases,
+     write clean SI Parquet trajectories, and optionally export diagnostic tensors.
       │
-      ├── Sub-objective 1: Ingest raw coordinates, normalize schema, and scale to aviation units
-       │    └── Solution: parquet_to_pycontrails() in adapters.py normalizes raw OpenSky column names (lat→latitude, baroaltitude→altitude, etc.) and groups by flight_id; pycontrails_to_traffic() then scales SI units to aviation units (ft, kt, ft/min) for EKF input
+      ├── Sub-objective 1 — Typecode validation & early rejection
+      │    ├── Input : typecode string (from Parquet attrs or caller)
+      │    ├── Solution : is_supported_typecode(typecode)  [src.common.config]
+      │    │              → returns False for None/NaN/empty/out-of-family
+      │    ├── On reject : log_skipped_aircraft(fid, typecode, "ERROR_FLAG: …")
+      │    │               → appends to data/logs/skipped_aircraft.log
+      │    └── Output : bool guard; processing proceeds only on True
       │
-      ├── Sub-objective 2: Group trajectories and filter to valid airborne tracks
-      │    └── Solution: Ingest DataFrame into traffic collection, run airborne() segmentation, and bypass flights with unknown/missing typecodes or < 10 points
+      ├── Sub-objective 2 — Airborne segmentation & uniform grid injection
+      │    ├── Input : traffic.core.Flight in aviation units (ft, kt, ft/min)
+      │    ├── Solution : Flight.airborne() → drop < 10 points
+      │    │   _prepare_grid_and_project():
+      │    │     • Build uniform DatetimeIndex at CORRIDOR_TIME_GRID_SECONDS spacing
+      │    │     • Merge raw + grid timestamps; deduplicate; sort
+      │    │     • _fill_geodetic_gaps(): great-circle lat/lon interpolation (WGS84 Geod)
+      │    │       for ADS-B gaps > GEODESIC_DISTANCE_THRESHOLD_M (100 000 m)
+      │    │     • Time-interpolate all columns; ffill/bfill boundary rows
+      │    │     • LAEA Cartesian projection centred on flight mean lat/lon
+      │    │       (+proj=laea via pyproj; yields (x, y) in metres)
+      │    └── Output : df_merged (DatetimeIndex), grid_times, to_lonlat Transformer
       │
-      ├── Sub-objective 3: Check cache index for processed flights
-      │    └── Solution: Query global_clean_registry.parquet to skip already-smoothed flight paths
+      ├── Sub-objective 3 — EKF state preprocessing
+      │    ├── Input : df_merged with columns [x, y, alt_baro, math_angle, velocity, vert_rate]
+      │    ├── Solution : ProcessXYZZFilterBase.preprocess()  [traffic library]
+      │    │              Scales aviation-unit columns to EKF internal representation;
+      │    │              state vector order: [x, y, alt_baro, math_angle, velocity, vert_rate]
+      │    └── Output : measurements pd.DataFrame (DatetimeIndex)
       │
-      ├── Sub-objective 4: Apply Rauch-Tung-Striebel (RTS) Kalman smoothing
-      │    └── Solution: Project flight coordinates onto local Cartesian 2D plane (laea) and run EKF math engine
+      ├── Sub-objective 4 — 6D Kinematic EKF forward pass + diagnostic recording
+      │    ├── Input : measurements DataFrame
+      │    ├── Solution : run_6d_kinematic_ekf()
+      │    │   _compute_R_Q() : empirical rolling-window noise matrices
+      │    │     (verbatim copy of traffic EKF.apply() lines 246-326)
+      │    │   Forward loop [verbatim traffic.algorithms.filters.ekf.extended_kalman_filter
+      │    │                  lines 40-73, + 2 extra diagnostic recording lines]:
+      │    │     _ekf_predict() : F = EKF.jacobian_state_transition(x, dt)
+      │    │                      x_pred = EKF.state_transition_function(x, dt)
+      │    │                      P_pred = F @ P @ F.T + Q
+      │    │     _ekf_correct() : nu = measurement − x_pred  (innovation)
+      │    │                      S  = H @ P_pred @ H.T + R  (innovation covariance)
+      │    │                      σ-gate: |ν_j| > reject_sigma · √S_jj
+      │    │                        → zero H_jj, replace measurement_j with x_pred_j
+      │    │                      K = solve(S, H @ P_pred).T  (Kalman gain)
+      │    │                      x_u = x_pred + K @ nu
+      │    │                      P_u = (I − K @ H) @ P_pred
+      │    │                      + record S_hist[i] = S   ← diagnostic line 1
+      │    │                      + record e_hist[i] = nu  ← diagnostic line 2
+      │    └── Output : states (T,6), covariances P_hist (T,6,6),
+      │                 S_hist (T,6,6), e_hist (T,6)
       │
-      ├── Sub-objective 5: Snap flight path to standard temporal grids
-      │    └── Solution: Resample EKF smoothed Cartesian coordinates to standard 1-minute intervals
+      ├── Sub-objective 5 — RTS backward smoother
+      │    ├── Input : states_df, covariances P_hist, Q, timestamps,
+      │    │           EKF.jacobian_state_transition, EKF.state_transition_function
+      │    ├── Solution : rts_smoother()  [traffic.algorithms.filters.ekf — no custom math]
+      │    └── Output : smoothed_states pd.DataFrame (T,6)
       │
-      └── Sub-objective 6: Convert outputs back to SI units and save
-           └── Solution: Re-convert aviation units back to SI metric standards, strip EKF processing columns, write to Parquet, and register cleaned IDs
+      ├── Sub-objective 6 — EKF quality metrics
+      │    ├── Input : S_hist (T,6,6), P_hist (T,6,6), e_hist (T,6)
+      │    ├── Solution : compute_ekf_quality_metrics()
+      │    │     mean_NIS  = Σ (e_i^T S_i^{-1} e_i) / valid_steps
+      │    │     NIS factor  = 6 / max(6, mean_NIS)
+      │    │     trace factor = exp(−max(0, max_trace_P − 60) / 500)
+      │    │     quality_score = clip(NIS_factor × trace_factor, 0, 1)
+      │    └── Output : (ekf_quality_score, ekf_mean_nis, ekf_max_trace_p)
+      │
+      ├── Sub-objective 7 — Optional diagnostic tensor export
+      │    ├── Input : measurements, e_hist, S_hist, P_hist, metrics
+      │    ├── Solution : _save_diagnostics() → np.savez_compressed()
+      │    │     File : {out_dir}/diagnostics/{flight_id}_ekf_diag.npz
+      │    │     Keys : timestamps (T,), e_k (T,6), S_k (T,6,6),
+      │    │             P_k (T,6,6), metrics (3,)
+      │    └── Output : relative path string (vs BASE_DIR) written to registry
+      │
+      ├── Sub-objective 8 — Postprocessing & grid resampling
+      │    ├── Input : smoothed_states, df_merged, to_lonlat Transformer, grid_times
+      │    ├── Solution : ProcessXYZZFilterBase.postprocess(smoothed_states)
+      │    │   → back-converts EKF state to aviation units (alt_ft, gs_kts, vr_fpm)
+      │    │   to_lonlat.transform(x, y) → (longitude, latitude) in WGS84
+      │    │   df_out sliced at grid_times → df_resampled
+      │    └── Output : df_resampled (exact 60 s grid points only)
+      │
+      ├── Sub-objective 9 — Flight phase assignment
+      │    ├── Input : df_resampled in aviation units (altitude ft, groundspeed kts,
+      │    │           vertical_rate ft/min)
+      │    ├── Solution : assign_flight_phases()
+      │    │   Primary : openap.phase.FlightPhase.set_trajectory() + .phaselabel()
+      │    │   Fallback (OpenAP unavailable): ROCD threshold
+      │    │     > 500 ft/min → "CL", < −500 ft/min → "DE", else → "CR"
+      │    │   Writes both "flight_phase" and "phase" columns
+      │    └── Output : df_phased with phase labels
+      │
+      ├── Sub-objective 10 — Metadata re-injection & pycontrails conversion
+      │    ├── Input : df_phased, f_air.data (original airborne segment), flight_id, typecode
+      │    ├── Solution : _finalize_resampled_flight()
+      │    │   Re-injects icao24, callsign, typecode, airports, firstseen, lastseen
+      │    │   Sets onground = False
+      │    │   traffic_to_pycontrails(df_phased, typecode=typecode)
+      │    └── Output : pycontrails.Flight object in SI units
+      │
+      └── Sub-objective 11 — Batch orchestration & registry update
+           ├── Input : raw *_raw.parquet files per corridor directory
+           ├── Solution : process_trajectories_by_route_ranks()
+           │   extract_target_routes() → resolve corridor rank/route → search dirs
+           │   _process_single_raw_file() per raw Parquet
+           │     parquet_to_pycontrails() → dict[flight_id → pycontrails.Flight]
+           │     clean_pycontrails_flight() per flight (includes Rule 11 check)
+           │     write_flights_to_parquet() → *_clean_si.parquet
+           │   update_global_registry(GLOBAL_CLEAN_REGISTRY, entries)
+           └── Output : *_clean_si.parquet + GLOBAL_CLEAN_REGISTRY updated
 ```
 
 ---
 
-## 3. Data Workflow
+## 4. Data Workflow
 
-> [!NOTE]
-> **Mermaid Render Support**: The workflow diagram below uses Mermaid syntax. If you are viewing this markdown file in VS Code and it does not render visually, you will need to install a Mermaid preview extension, such as **Markdown Preview Mermaid Support** (by Matt Bierner) or view it in an environment that supports it natively (like GitHub or Obsidian).
+### 4.1 Workflow A — Batch File Processing (`kalman_filter.py` CLI)
+
+This is the primary batch execution path. It is invoked from the command line to process
+all raw Parquet files for one or more corridor directories, writing clean SI Parquet files
+and updating `GLOBAL_CLEAN_REGISTRY`.
 
 ```mermaid
-graph TD
-    A[Raw Parquet Input] --> B[1. File-Level Cache Check]
-    B -->|Miss| C[2. parquet_to_pycontrails: Normalize Schema & Load per flight_id]
-    B -->|Hit| O[Skip Entire Batch]
-    C --> D[3. Flight-Level Cache Check]
-    D -->|Miss| E[4. pycontrails_to_traffic: Scale to Aviation Units]
-    E --> F[5. Drop NaNs & Filter Airborne Tracks]
-    F --> G[6. Project to 2D Cartesian plane]
-    G --> H[7. Apply Extended Kalman Filter]
-    H --> I[8. Reconstruct Flight & Resample to 1-min]
-    I --> J[9. Re-inject Metadata Columns]
-    D -->|Hit| J
-    J --> K[10. traffic_to_pycontrails: Revert to SI Units]
-    K --> L[11. Save Clean Parquet Output & Register]
+flowchart TD
+    A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
+    B --> C["process_trajectories_by_route_ranks()\nextract_target_routes(ranks, rank_range, routes)\n→ reads master_flights_route_summary.parquet"]
+    C --> D{"source_dir provided?"}
+    D -->|Yes| E["[Path(source_dir)]"]
+    D -->|No| F["BASE_DIR/data/trajectories/rank_R_ROUTE/raw\nper resolved corridor"]
+    E --> G["For each search_dir: glob *_raw.parquet"]
+    F --> G
+    G --> H{"*_clean_si.parquet exists\nAND --overwrite not set?"}
+    H -->|Yes| I["LOG INFO: skip file"]
+    H -->|No| J["parquet_to_pycontrails(raw_file)\n→ dict[flight_id → pycontrails.Flight]"]
+    J --> K{"is_supported_typecode(t_code)?"}
+    K -->|No| L["log_skipped_aircraft(fid, t_code,\n'ERROR_FLAG: …')\n→ data/logs/skipped_aircraft.log"]
+    K -->|Yes| M["clean_pycontrails_flight(\n  pyc_flight, fid, t_code,\n  CORRIDOR_TIME_GRID_SECONDS,\n  save_diagnostics, diag_path)"]
+    M --> N["pycontrails_to_traffic()\n→ traffic.core.Flight"]
+    N --> O["Flight.airborne() — drop ground segments\nDrop if < 10 points"]
+    O --> P["_prepare_grid_and_project()\n1 Build uniform 60 s DatetimeIndex grid\n2 Merge raw + grid timestamps\n3 _fill_geodetic_gaps() — great-circle interp\n   for gaps > 100 000 m (WGS84)\n4 Time-interpolate all columns; ffill/bfill\n5 LAEA Cartesian projection (+proj=laea)\n   centred on flight mean lat/lon"]
+    P --> Q["ProcessXYZZFilterBase.preprocess()\nState vector: [x, y, alt_baro, math_angle,\n               velocity, vert_rate]"]
+    Q --> R["run_6d_kinematic_ekf()\n_compute_R_Q() — empirical R, Q\nForward loop (verbatim traffic EKF + 2 diag lines):\n  _ekf_predict() → x_pred, P_pred\n  _ekf_correct() → x_u, P_u, S_hist[i], e_hist[i]"]
+    R --> S["rts_smoother()\n[traffic lib — no custom math]\n→ smoothed_states (T,6)"]
+    S --> T["compute_ekf_quality_metrics(S_hist, P_hist, e_hist)\n→ ekf_quality_score ∈ [0,1]\n   ekf_mean_nis, ekf_max_trace_p"]
+    T --> U{"--save-diagnostics?"}
+    U -->|Yes| V["_save_diagnostics()\n→ {out_dir}/diagnostics/{fid}_ekf_diag.npz\n  keys: timestamps, e_k (T,6),\n        S_k (T,6,6), P_k (T,6,6), metrics"]
+    U -->|No| W["diag_rel = None"]
+    V --> X["ProcessXYZZFilterBase.postprocess()\nto_lonlat.transform(x,y) → lat/lon WGS84\nSlice at grid_times → df_resampled"]
+    W --> X
+    X --> Y["_finalize_resampled_flight()\nRe-inject metadata, onground=False\nassign_flight_phases() — OpenAP primary,\nROCD fallback (>500→CL, <−500→DE, else CR)\ntraffic_to_pycontrails() → SI units"]
+    Y --> Z["write_flights_to_parquet(pc_flights)\n→ {out_dir}/*_clean_si.parquet"]
+    Z --> AA["update_global_registry(GLOBAL_CLEAN_REGISTRY, entries)\nColumns: flight_id, file_path,\n  ekf_quality_score, ekf_mean_nis,\n  ekf_max_trace_p, diag_file_path\n→ data/registries/global_clean_registry.parquet"]
 ```
 
-1. **Pre-Execution Cache Checks**: Bypasses processing if the target output file already exists on disk (file-level check) or skips individual flight coordinates if their IDs are already indexed in `global_clean_registry.parquet` (flight-level check).
-2. **Schema Normalization & Loading**: `parquet_to_pycontrails()` (from `src/common/adapters.py`) reads the raw Parquet file, renames raw OpenSky columns to the PyContrails standard schema (`lat`→`latitude`, `baroaltitude`→`altitude`, `vertrate`→`vertical_rate`, etc.), parses timestamps, drops NaN rows, and groups the result into one `pycontrails.Flight` object per `flight_id`. Flights with unknown or missing typecodes are bypassed.
-3. **Forward Unit Conversion (SI → Aviation)**: `pycontrails_to_traffic()` scales each PyContrails Flight from SI units to standard aviation units required by the `traffic` EKF engine (meters→feet, m/s→knots, m/s→ft/min) and renames columns to the Traffic schema (`time`→`timestamp`, `gs`→`groundspeed`, `rocd`→`vertical_rate`). The resulting `traffic.core.Flight` is filtered to airborne phases and NaN rows are dropped.
-4. **EKF Mathematical Smoothing**: Projects flight tracks onto a flat 2D Lambert Azimuthal Equal Area (`laea`) coordinate plane centered at the flight's average coordinates. Applies the Extended Kalman Filter (RTS backward pass) to smooth coordinate noise.
-5. **Resampling & Registration**: Snaps Cartesian tracks to a uniform 1-minute grid frequency. Re-injects metadata columns (callsign, typecode, etc.). `traffic_to_pycontrails()` then reverts aviation units back to SI (feet→meters, knots→m/s, ft/min→m/s), writes files to `clean/` sub-folders, and appends cleaned IDs to the central registry.
+**Step-by-step:**
+
+1. **Logger setup**: `main()` immediately calls `setup_file_logger("processing.log")`, directing all `logging` output to `data/logs/processing.log`. `logging.basicConfig()` is never called.
+2. **Route resolution**: `process_trajectories_by_route_ranks()` calls `extract_target_routes(ranks, rank_range, routes)`, which reads `master_flights_route_summary.parquet` to map rank indices or corridor strings to candidate `search_dirs`. If `--source-dir` is supplied instead, that single directory is used directly, bypassing route lookup.
+3. **Raw file enumeration**: For each resolved `search_dir`, all files matching `*_raw.parquet` are globbed. The output directory defaults to the sibling `clean/` subdirectory (i.e., `search_dir.parent / "clean"` when `search_dir.name == "raw"`), or the value of `--out-dir` if provided.
+4. **Overwrite guard**: `_process_single_raw_file()` checks whether the target `*_clean_si.parquet` already exists. If it does and `--overwrite` is not set, the file is skipped and an `INFO` log entry is written.
+5. **Ingestion**: `parquet_to_pycontrails(raw_file)` reads the raw Parquet and returns a `dict[flight_id → pycontrails.Flight]`. Each flight's `typecode` is read from `pyc_flight.attrs["aircraft_type"]`.
+6. **Rule 11 typecode gate**: `is_supported_typecode(t_code)` is called for every flight. Any record with a missing, `NaN`, or out-of-family typecode is dropped immediately. `log_skipped_aircraft(fid, t_code, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in raw parquet")` appends a tab-separated audit entry to `data/logs/skipped_aircraft.log`. Processing continues with the next flight.
+7. **Pycontrails → traffic conversion**: `clean_pycontrails_flight()` first calls `is_supported_typecode()` again (its own Rule 11 guard), then delegates to `pycontrails_to_traffic()` to produce a `traffic.core.Flight` in aviation units (`ft`, `kt`, `ft/min`).
+8. **Airborne segmentation**: `Flight.airborne()` removes ground-level ADS-B pings. If fewer than 10 airborne points remain, the flight returns `(None, 0.0, 0.0, 0.0, None)` and is skipped.
+9. **Grid injection & LAEA projection** (`_prepare_grid_and_project()`):
+   - A uniform `DatetimeIndex` is built at `CORRIDOR_TIME_GRID_SECONDS = 60` s spacing, from `floor(t_min)` to `ceil(t_max)`.
+   - Grid timestamps are concatenated with the raw flight rows, deduplicated, and sorted.
+   - `_fill_geodetic_gaps()` walks consecutive raw-measurement pairs. For gaps exceeding `GEODESIC_DISTANCE_THRESHOLD_M = 100 000 m` (great-circle distance on WGS84 ellipsoid via `pyproj.Geod`), it interpolates intermediate grid-injected rows along a geodesic path using `Geod.npts()`.
+   - All measurement columns (`latitude`, `longitude`, `altitude`, `groundspeed`, `track`, `vertical_rate`) are time-interpolated using `pandas.DataFrame.interpolate(method="time")`, followed by `ffill()`/`bfill()` for boundary rows.
+   - A per-flight LAEA Cartesian projection (`+proj=laea`) is constructed centred on the flight's mean latitude and longitude. All rows are transformed from WGS84 `(lon, lat)` to LAEA `(x, y)` in metres. The inverse `to_lonlat` `Transformer` is retained for the postprocessing step.
+10. **EKF preprocessing**: `ProcessXYZZFilterBase.preprocess()` (traffic library) converts the merged DataFrame (set as a `DatetimeIndex`) into the EKF state representation. The state vector is **[x, y, alt_baro, math_angle, velocity, vert_rate]** — 6 dimensions.
+11. **Noise matrix estimation** (`_compute_R_Q()`): This is a verbatim copy of `traffic.algorithms.filters.ekf.EKF.apply()` lines 246–326. It computes empirical measurement noise `R` and process noise `Q` matrices using a rolling window (`window_size=17`) over each state dimension. `Q = diag([0.1, 0.1, 0.01, 0.3, 1.0, 0.5]) × R`.
+12. **Forward EKF loop** (`run_6d_kinematic_ekf()`): Iterates from step `i=1` to `T−1`. At each step:
+    - **Predict**: `_ekf_predict()` — verbatim copy of traffic EKF lines 40–45. Computes Jacobian `F`, propagates state `x_pred = EKF.state_transition_function(x, dt)`, and advances covariance `P_pred = F @ P @ F.T + Q`.
+    - **Correct**: `_ekf_correct()` — verbatim copy of traffic EKF lines 47–73, **plus two extra diagnostic recording lines**. Computes innovation `v = measurement − x_pred` and innovation covariance `S = H @ P_pred @ H.T + R`. A sigma-gate (default `reject_sigma=3.0`) tests each component: if `|v_j| > 3 * sqrt(S_jj)`, that component is gated out by setting `H_jj = 0` and replacing `measurement_j` with `x_pred_j`. After gating, `S` is recomputed, the Kalman gain `K` is solved, and `x_u = x_pred + K @ v` (using the **pre-gate** innovation, per traffic verbatim logic). The **two added diagnostic lines** record `S_hist[i] = S` and `e_hist[i] = v.to_numpy()`.
+13. **RTS backward smoother**: `rts_smoother(states_df, covariances, Q, timestamps, EKF.jacobian_state_transition, EKF.state_transition_function)` is called directly from the `traffic` library. No custom backward-pass math is implemented; this is a direct call to the upstream function.
+14. **Quality metrics** (`compute_ekf_quality_metrics()`): Iterates over non-zero `e_hist` rows. For each valid step, the Normalised Innovation Squared (NIS) `= e_i^T * S_i^{-1} * e_i` is accumulated (capped at `1e5`). Final metrics: `mean_NIS`, `max_trace_P`, `ekf_quality_score = clip(NIS_factor * trace_factor, 0, 1)` where `NIS_factor = 6 / max(6, mean_NIS)` and `trace_factor = exp(-max(0, max_trace_P - 60) / 500)`.
+15. **Diagnostic export** (optional, `--save-diagnostics`): `_save_diagnostics()` creates `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` using `np.savez_compressed()` with keys `timestamps (T,)`, `e_k (T,6)`, `S_k (T,6,6)`, `P_k (T,6,6)`, `metrics (3,)`. The relative path (vs `BASE_DIR`) is stored in the registry `diag_file_path` column. When `--save-diagnostics` is not set, `diag_file_path = None`.
+16. **Postprocessing & grid resampling**: `ProcessXYZZFilterBase.postprocess(smoothed_states)` converts the smoothed EKF state back to aviation units. `to_lonlat.transform(x, y)` reprojects LAEA Cartesian back to WGS84 `(longitude, latitude)`. The full merged DataFrame is then sliced to only the rows whose timestamps are in `grid_times` (`df_out[df_out["timestamp"].isin(grid_times)]`), yielding an exactly equidistant 60 s trajectory.
+17. **Phase assignment & metadata**: `_finalize_resampled_flight()` re-injects original flight metadata (`icao24`, `callsign`, `typecode`, airport codes, `firstseen`/`lastseen`), sets `onground = False`, calls `assign_flight_phases()` (OpenAP primary, ROCD fallback), and converts to a `pycontrails.Flight` in SI units via `traffic_to_pycontrails()`.
+18. **Output write**: All successfully cleaned pycontrails flights from a single raw Parquet are collected and written together by `write_flights_to_parquet(pc_flights, out_path)` → `{out_dir}/*_clean_si.parquet`.
+19. **Registry update**: `update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)` appends all collected registry rows — `flight_id`, `file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`, `diag_file_path` — to `data/registries/global_clean_registry.parquet` using an atomic deduplication-aware write.
 
 ---
 
-## 4. CLI Usage Guide
+### 4.2 Workflow B — Programmatic In-Process Entry (`clean_pycontrails_flight` / `clean_traffic_flight`)
+
+This workflow exposes the EKF cleaning pipeline as a library call, suitable for use by the
+fetcher, corridor orchestrator, or any other pipeline stage that already holds an in-memory
+flight object without writing raw files to disk first.
+
+```mermaid
+flowchart TD
+    A["Caller holds\npycontrails.Flight in memory"] --> B["clean_pycontrails_flight(\n  pyc_flight, flight_id, typecode,\n  time_grid_seconds, save_diagnostics,\n  diag_out_path)"]
+    B --> C{"is_supported_typecode(typecode)?"}
+    C -->|No| D["log_skipped_aircraft(flight_id, typecode,\n'ERROR_FLAG: Missing, NaN, or non-target\n family aircraft typecode')\n→ data/logs/skipped_aircraft.log\nreturn (None, 0.0, 0.0, 0.0, None)"]
+    C -->|Yes| E["pycontrails_to_traffic(pyc_flight)\n→ traffic.core.Flight"]
+    E --> F{"traffic.core.Flight is None?"}
+    F -->|Yes| G["return (None, 0.0, 0.0, 0.0, None)"]
+    F -->|No| H["clean_traffic_flight(\n  traffic_flight, flight_id, typecode,\n  time_grid_seconds, save_diagnostics,\n  diag_out_path)"]
+    H --> I["Drop NaN required cols\nFlight.airborne()"]
+    I --> J{"< 10 airborne points?"}
+    J -->|Yes| K["return (None, 0.0, 0.0, 0.0, None)"]
+    J -->|No| L["_prepare_grid_and_project(f_air.data, time_grid_seconds)\n→ df_merged, grid_times, to_lonlat"]
+    L --> M["ProcessXYZZFilterBase.preprocess()\n→ measurements DataFrame [x,y,alt_baro,\n   math_angle,velocity,vert_rate]"]
+    M --> N["run_6d_kinematic_ekf(measurements)\n_compute_R_Q() — empirical R, Q\nForward: _ekf_predict + _ekf_correct\n  + record S_hist[i], e_hist[i]\nBackward: rts_smoother() [traffic lib]"]
+    N --> O["compute_ekf_quality_metrics(S_hist, P_hist, e_hist)\n→ (ekf_quality_score, ekf_mean_nis,\n    ekf_max_trace_p)"]
+    O --> P{"save_diagnostics AND\ndiag_out_path provided?"}
+    P -->|Yes| Q["_save_diagnostics(diag_out_path, …)\n→ {diag_out_path}.npz\n   keys: timestamps, e_k, S_k, P_k, metrics\nreturn relative path string"]
+    P -->|No| R["diag_saved_path = None"]
+    Q --> S["ProcessXYZZFilterBase.postprocess(smoothed_states)\nto_lonlat.transform(x,y) → lat, lon\nSlice at grid_times → df_resampled"]
+    R --> S
+    S --> T{"df_resampled empty?"}
+    T -->|Yes| U["return (None, 0.0, 0.0, 0.0, None)"]
+    T -->|No| V["_finalize_resampled_flight()\nRe-inject metadata, onground=False\nassign_flight_phases() — OpenAP / ROCD fallback\ntraffic_to_pycontrails() → SI units"]
+    V --> W["return (\n  pycontrails.Flight,\n  ekf_quality_score,\n  ekf_mean_nis,\n  ekf_max_trace_p,\n  diag_saved_path | None\n)"]
+```
+
+**Step-by-step:**
+
+1. **Entry via `clean_pycontrails_flight()`**: The caller passes a `pycontrails.Flight`, a `flight_id` string, and a `typecode` string. Two optional parameters control diagnostics: `save_diagnostics: bool` and `diag_out_path: Path | None`. The `time_grid_seconds` parameter defaults to `CORRIDOR_TIME_GRID_SECONDS` (60 s) but can be overridden programmatically.
+2. **Rule 11 typecode validation**: `is_supported_typecode(typecode)` is called immediately. If it returns `False`, `log_skipped_aircraft(flight_id, str(typecode), "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode")` appends an audit line to `data/logs/skipped_aircraft.log`, and the function returns the 5-tuple `(None, 0.0, 0.0, 0.0, None)` without raising an exception.
+3. **Format conversion**: `pycontrails_to_traffic(pyc_flight)` converts the `pycontrails.Flight` to a `traffic.core.Flight` in aviation units. If the conversion fails (returns `None`), the same null 5-tuple is returned.
+4. **Delegation to `clean_traffic_flight()`**: The validated and converted flight is passed to `clean_traffic_flight()`. Note that `clean_traffic_flight()` itself performs **no** Rule 11 typecode check — the validation contract is that callers must validate before calling it. The docstring states this explicitly: *"Rule 11 typecode validation must be performed by the caller before this function."*
+5. **Required column guard**: `clean_traffic_flight()` drops rows with `NaN` in any required column (`timestamp`, `latitude`, `longitude`, `track`, `groundspeed`, `vertical_rate`, `altitude`, `onground`). If fewer than 10 rows remain, returns null 5-tuple.
+6. **Airborne segmentation**: `Flight(f_data).airborne()` removes ground pings. If the resulting airborne `Flight` is `None` or has fewer than 10 points, returns null 5-tuple.
+7. **Grid injection & LAEA projection**: `_prepare_grid_and_project(f_air.data.copy(), time_grid_seconds)` — identical to the batch workflow (see Workflow A, step 9). Returns `df_merged`, `grid_times`, and the inverse `to_lonlat` `Transformer`.
+8. **EKF preprocessing, forward pass, backward smoother, quality metrics**: Identical to steps 10–14 of Workflow A.
+9. **Optional diagnostic save**: If both `save_diagnostics=True` and `diag_out_path` is not `None`, `_save_diagnostics()` is called to write `{diag_out_path}` (which must include the `{flight_id}_ekf_diag.npz` filename). The function creates parent directories as needed and returns a `BASE_DIR`-relative path string.
+10. **Postprocessing & slicing**: Identical to step 16 of Workflow A. If `df_resampled` is empty after the grid slice, returns null 5-tuple.
+11. **Finalisation & return**: `_finalize_resampled_flight()` re-injects metadata and assigns phases (identical to step 17 of Workflow A). The function returns the 5-tuple `(pycontrails.Flight, ekf_quality_score, ekf_mean_nis, ekf_max_trace_p, diag_saved_path | None)`. The caller is responsible for writing the output file and updating registries.
+
+> [!NOTE]
+> **Caller contract for `clean_traffic_flight()`**: If a module already holds a
+> `traffic.core.Flight` in aviation units (e.g., the corridor orchestrator), it may call
+> `clean_traffic_flight()` directly, **but must** have validated the typecode with
+> `is_supported_typecode()` beforehand and must handle registry writes itself.
+
+---
+
+## 5. CLI Usage Guide
 
 ### Bash
-```bash
-# 1. Smooth a single raw trajectory file (automatically saves to sibling 'clean/' sub-folder)
-python -m src.core.processing.kalman_filter \
-    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
 
-# 2. Batch smooth an entire directory of raw trajectories (skips already-processed files)
+```bash
+# Process specific corridor volume ranks
+python -m src.core.processing.kalman_filter --ranks 1 2 3
+
+# Process an inclusive range of volume ranks with diagnostic tensor export
+python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics
+
+# Process explicit corridor strings, custom source and output directories, force overwrite
 python -m src.core.processing.kalman_filter \
-    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw"
+    --routes EDDF-LIRF EGLL-BIKF \
+    --source-dir "data/trajectories/rank_1_EDDF-LIRF/raw" \
+    --out-dir "data/trajectories/rank_1_EDDF-LIRF/clean" \
+    --save-diagnostics \
+    --overwrite
+
+# Process all corridors by rank, saving diagnostics for later EKF audit
+python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 ```
 
 ### PowerShell
-```powershell
-# 1. Smooth a single raw trajectory file
-python -m src.core.processing.kalman_filter `
-    --input-file "data/trajectories/ranks_1-5_sample_10_seed_42_01_0430fb/raw/LEPA-LEBL_c53b3a_raw.parquet"
 
-# 2. Batch smooth an entire directory of raw trajectories
+```powershell
+# Process specific corridor volume ranks
+python -m src.core.processing.kalman_filter --ranks 1 2 3
+
+# Process an inclusive range of volume ranks with diagnostic tensor export
+python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics
+
+# Process explicit corridor strings, custom source and output directories, force overwrite
 python -m src.core.processing.kalman_filter `
-    --input-file "data\trajectories\ranks_1-2_strat_fixed_val_1.0_seed_42_format_oneway_start_2025-01-01T00-00-00_end_2025-01-31T23-59-59_198b87"
+    --routes EDDF-LIRF EGLL-BIKF `
+    --source-dir "data\trajectories\rank_1_EDDF-LIRF\raw" `
+    --out-dir "data\trajectories\rank_1_EDDF-LIRF\clean" `
+    --save-diagnostics `
+    --overwrite
+
+# Process all corridors by rank range, saving diagnostics
+python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 ```
 
-**Parameters**:
-- `--input-file`: Path to the raw trajectory Parquet file OR a directory containing multiple raw Parquet files.
-- `--out-dir`: Sliced list directory for output. (default: a sibling `clean/` folder if parent is `raw/`, otherwise parent directory).
+### Parameter Reference
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--ranks` | `int` (list) | `None` | One or more specific corridor volume rank indices to process (e.g. `1 2 3`). Looked up in `master_flights_route_summary.parquet`. |
+| `--rank-range` | `int int` | `None` | Inclusive start–end rank range to process (e.g. `1 10`). Internally passed as `tuple(args.rank_range)`. |
+| `--routes` | `str` (list) | `None` | One or more explicit corridor strings to process (e.g. `EDDF-LIRF EGLL-BIKF`). |
+| `--source-dir` | `str` | `None` | Direct path to a directory of `*_raw.parquet` files. When provided, bypasses `extract_target_routes()` entirely. |
+| `--out-dir` | `str` | `None` | Custom output directory for `*_clean_si.parquet` files. Defaults to sibling `clean/` directory relative to `raw/` when `source_dir` resolves a standard corridor layout. |
+| `--save-diagnostics` | flag | `False` | When set, writes per-flight EKF tensors `S_k (T,6,6)`, `P_k (T,6,6)`, `e_k (T,6)`, and scalar `metrics (3,)` to `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` (compressed NumPy archive). |
+| `--overwrite` | flag | `False` | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
 
 ---
 
-## 5. Prerequisites & Dependencies
+## 6. Prerequisites & Dependencies
 
 ### Python Libraries
-* `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
-* `numpy` & `scipy` (for EKF matrices and interpolation)
-* `pyproj` (for dynamic Lambert Azimuthal Equal Area coordinate projections)
-* `traffic` (for track collections, airborne filtering, and EKF algorithms)
-* `pycontrails` (for Flight container structures and temporal interpolation engines)
 
-### Input Datasets
-* Raw coordinate Parquet files (`*_raw.parquet`) generated by Loop 1.
+| Library | Role |
+| :--- | :--- |
+| `pandas`, `pyarrow` | Parquet I/O, DataFrame time-series operations, DatetimeIndex interpolation |
+| `numpy`, `numpy.typing` | Array arithmetic, diagnostic tensor construction (`S_hist`, `P_hist`, `e_hist`), `savez_compressed` |
+| `scipy.linalg` | `linalg.solve(S, H @ P_pred, assume_a="pos")` for Kalman gain; `linalg.inv(S)` for NIS computation |
+| `pyproj` (`CRS`, `Geod`, `Transformer`) | WGS84 geodesic distance (`Geod.inv`, `Geod.npts`) for gap detection and great-circle interpolation; per-flight LAEA Cartesian projection (`+proj=laea`) for state space; inverse reprojection back to WGS84 |
+| `traffic` (`Flight`, `EKF`, `ProcessXYZZFilterBase`, `rts_smoother`) | EKF Jacobians (`EKF.jacobian_state_transition`, `EKF.state_transition_function`), state preprocessing / postprocessing (`ProcessXYZZFilterBase`), RTS backward smoother (`rts_smoother`) |
+| `openap.phase.FlightPhase` | Primary aerodynamic flight phase labelling (`CL`, `CR`, `DE`, …); ROCD-threshold fallback if unavailable |
+| `pycontrails` | `pycontrails.Flight` SI containers; consumed and produced by `clean_pycontrails_flight()` |
 
-For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
+### Config Constants (`src.common.config`)
 
----
+| Constant | Value / Type | Usage |
+| :--- | :--- | :--- |
+| `BASE_DIR` | `pathlib.Path` | Workspace root; used to construct all absolute paths and compute registry-relative path strings |
+| `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Temporal resolution of the injected uniform time grid and the output clean Parquet trajectories |
+| `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file updated by `update_global_registry()` after each batch run |
+| `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 
-## Appendix A: EKF Column & Unit Mappings
+### Registry Files
 
-During the EKF post-processing workflow, units and column names shift according to the requirements of the processing algorithms:
+| File | Access | Description |
+| :--- | :--- | :--- |
+| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written** | Indexed output: one row per successfully cleaned flight, with `flight_id`, `file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`, `diag_file_path`. |
+| `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
+| `data/logs/processing.log` | **Written** | All `logging` output from batch runs (INFO progress, WARNING anomalies, ERROR per-flight failures). |
+| `data/logs/skipped_aircraft.log` | **Appended** | Tab-separated audit entries (`ISO_UTC \t flight_id \t typecode \t REASON`) for every flight rejected by the Rule 11 typecode gate. |
 
-| Raw Parquet Column | Traffic Schema (Input to EKF) | EKF State Variable (SI) | EKF Output (Aviation) | PyContrails Schema |
-| :--- | :--- | :--- | :--- | :--- |
-| `time` | `timestamp` | Index (DatetimeIndex) | Index (DatetimeIndex) | `time` |
-| `lat` / `lon` | `latitude` / `longitude` | *Not in state (kept in data)* | *Not in postprocess (kept)* | `latitude` / `longitude` |
-| `baroaltitude` | `altitude` (feet) | `alt_baro` (meters) | `altitude` (feet) | `altitude` (meters) |
-| `velocity` | `groundspeed` (knots) | `velocity` (m/s) | `groundspeed` (knots) | `gs` (m/s) |
-| `heading` | `track` (degrees) | `math_angle` (radians) | `track` (degrees) | `heading` (degrees) |
-| `vertrate` | `vertical_rate` (ft/min) | `vert_rate` (m/s) | `vertical_rate` (ft/min) | `rocd` (m/s) |
-| `onground` | `onground` | *Not in state (kept)* | `onground` | *Not in standard PyContrails schema* (forced `False`) |
-
-### Explaining `x`, `y`, and `track_unwrapped` Columns
-- **`x` and `y`** (`float64`): Standard geographic coordinates (`latitude` / `longitude`) are projected onto a 2D Cartesian plane using a Lambert Azimuthal Equal Area projection (`laea`) centered dynamically at the mean latitude/longitude of the flight. This allows the kinematic equations inside the Extended Kalman Filter (EKF) to work with flat Cartesian distances and speeds in meters/seconds, minimizing distortion.
-- **`track_unwrapped`** (`float64`): Standard heading values range between 0 and 360 degrees. If an aircraft flies close to North (crossing 359° to 0°), the EKF's state estimation will see a massive discontinuity. Unwrapping standardizes this track by making the angles continuous (e.g. crossing to 361° instead of resetting to 1°), which prevents the Kalman filter from breaking.
-- **Pruning**: The shared adapter in `src/common/adapters.py` automatically prunes the EKF's mathematical columns (`x`, `y`, `track_unwrapped`) before instantiating the final `pycontrails.Flight` objects, returning a clean dataframe conforming strictly to the physical variables expected by downstream physics simulations.
-
----
-
-## Appendix B: History of the Index Mismatch Bug (Resolved)
-
-The diagnostic analysis during the V3 pipeline refactoring identified a critical index alignment mismatch inside the EKF post-processing module of the `traffic` library that previously caused 100% of the smoothed EKF columns to be overwritten with `NaN` values:
-
-```
-=====================================================================================
- f_projected.data index: RangeIndex (0, 1, 2, ..., N)
- measurements index:     DatetimeIndex (2025-10-31 09:19:00, ...)
-=====================================================================================
-                                 |
-                                 v  [ekf.apply()]
-                      data.assign(**postprocess(filtered_states))
-                                 |
-                                 v  [Pandas Alignment Mismatch]
-  Wiped to 100% NaN: 'altitude', 'track', 'groundspeed', 'vertical_rate', 'x', 'y'
-  Untouched & Valid: 'latitude', 'longitude', 'geoaltitude', 'timestamp'
-=====================================================================================
-```
-
-### Root Cause
-1. In `kalman_filter.py`, the `Traffic` and `Flight` constructors reset the DataFrame index of the flight trajectory to a standard **`RangeIndex`** (0, 1, 2, ..., N).
-2. During `ekf.apply(f_projected.data)` execution, the internal `preprocess()` method sets the index to the `timestamp` column, creating a **`DatetimeIndex`**.
-3. After smoothing, `postprocess()` returns the smoothed variables as Series with this `DatetimeIndex`.
-4. The `traffic` library merges these Series using `.assign()`:
-   ```python
-   return data.assign(**self.postprocess(filtered_states))
-   ```
-5. Because `data` (RangeIndex) and EKF outputs (DatetimeIndex) have non-overlapping indices, pandas fails to align the rows and fills the entire columns (`altitude`, `groundspeed`, `track`, `vertical_rate`, `x`, `y`) with `NaN`.
-
-### Resolution & Exception
-To resolve the row alignment issue, the EKF engine in `kalman_filter.py` was updated to explicitly reset the index of the EKF outputs back to a `RangeIndex` using `.reset_index(drop=True)` before mapping coordinates and unit conversions, ensuring clean row alignment.
-Additionally, to prevent JSON time serialization issues from a historical fix (May 27), the index setting code immediately prior to the EKF call remains commented out. This represents an intentional exception to the standard indexing convention.
-Finally, we clear pandas custom attributes (`df.attrs = {}`) before exporting to Parquet to prevent PyArrow serialization crashes.
+For canonical naming conventions, coordinate reference system definitions, and unit
+standards, refer to **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)**.
