@@ -170,7 +170,7 @@ flowchart TD
     C --> D{"source_dir provided?"}
     D -->|Yes| E["Read *_raw.parquet files\nfrom source_dir → build task queue"]
     D -->|No| F["Query trajectory registry\nvia get_flights_for_route()\nGroup target flights by file_path → build task queue"]
-    E --> G["Determine effective_workers:\nmax_workers or os.cpu_count()"]
+    E --> G["Determine effective_workers:\nmax_workers or PROCESSING_DEFAULT_MAX_WORKERS"]
     F --> G
     G --> H{"effective_workers > 1?"}
     H -->|Yes| I["ProcessPoolExecutor(max_workers=effective_workers)\nParallel submit: _process_single_raw_file(raw_file, …)\nas_completed(futures) → collect returned entry dictionaries"]
@@ -184,7 +184,7 @@ flowchart TD
 
 1. **Logger setup**: `main()` immediately calls `setup_file_logger("processing.log")`, directing all `logging` output to `data/logs/processing.log`. `logging.basicConfig()` is never called.
 2. **Corridor resolution & task queue construction**: If `--source-dir` is provided, the pipeline collects all matching `*_raw.parquet` files into a task queue. Otherwise, it queries the trajectory registry using `get_flights_for_route(dep, arr)` for target corridors resolved by `--routes` or `--ranks`/`--rank-range`, grouping flights by raw `file_path`.
-3. **Parallel Execution via `ProcessPoolExecutor`**: If `max_workers` is greater than `1` (or defaults to `os.cpu_count()`), the task queue is dispatched across multiple independent worker processes using `concurrent.futures.ProcessPoolExecutor`. Each child process executes `_process_single_raw_file()` independently. If `max_workers == 1`, execution falls back to a clean sequential loop.
+3. **Parallel Execution via `ProcessPoolExecutor`**: If `max_workers` is greater than `1` (or defaults to `PROCESSING_DEFAULT_MAX_WORKERS` from `src.common.config`), the task queue is dispatched across multiple independent worker processes using `concurrent.futures.ProcessPoolExecutor`. Each child process executes `_process_single_raw_file()` independently. If `max_workers == 1`, execution falls back to a clean sequential loop.
 4. **Overwrite guard & Ingestion (in worker)**: Each worker checks whether `*_clean_si.parquet` already exists and skips reading if `--overwrite` is not set. Otherwise, `parquet_to_pycontrails(raw_file)` loads all flights in the file.
 5. **Rule 11 typecode gate**: `is_supported_typecode(t_code)` is called for every flight inside the worker. Missing, `NaN`, or out-of-family typecodes trigger `log_skipped_aircraft()` to `data/logs/skipped_aircraft.log` and are skipped immediately.
 7. **Pycontrails → traffic conversion**: `clean_pycontrails_flight()` first calls `is_supported_typecode()` again (its own Rule 11 guard), then delegates to `pycontrails_to_traffic()` to produce a `traffic.core.Flight` in aviation units (`ft`, `kt`, `ft/min`).
@@ -336,7 +336,7 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 | `--out-dir` | `str` | `None` | Custom output directory for `*_clean_si.parquet` files. Defaults to sibling `clean/` directory relative to `raw/` when `source_dir` resolves a standard corridor layout. |
 | `--save-diagnostics` | flag | `False` | When set, writes per-flight EKF tensors `S_k (T,6,6)`, `P_k (T,6,6)`, `e_k (T,6)`, and scalar `metrics (3,)` to `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` (compressed NumPy archive). |
 | `--overwrite` | flag | `False` | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
-| `--workers` / `--num-workers` / `--max-workers` | `int` | `None` | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `os.cpu_count()` (`all available CPUs`). If set to `1`, execution falls back to sequential loop. |
+| `--workers` / `--num-workers` / `--max-workers` | `int` | `None` | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` from `src.common.config` (currently `4`). If set to `1`, execution falls back to sequential loop. |
 
 ---
 

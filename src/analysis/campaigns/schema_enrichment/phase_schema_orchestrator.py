@@ -44,6 +44,14 @@ from src.core.corridor.stability_worker import _load_route_flights_full_phase
 
 logger = logging.getLogger(__name__)
 
+
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="calibration.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
+
+
 DEFAULT_N0_VALUES = [16, 24, 32, 48, 64]
 DEFAULT_KMAX_VALUES = [1, 2, 3, 4]
 DEFAULT_REPLICATES = 30
@@ -510,7 +518,7 @@ def _save_route_results(
 
 
 def main() -> None:
-    setup_file_logger("calibration")
+    setup_file_logger("calibration.log")
     parser = argparse.ArgumentParser(description="Phase Schema Calibration Orchestrator")
     parser.add_argument("--replicates", type=int, default=DEFAULT_REPLICATES,
                         help="Bootstrap replicates per parameter cell (default: 30)")
@@ -581,7 +589,8 @@ def main() -> None:
 
         oom_occurred = False
 
-        with ProcessPoolExecutor(max_workers=current_workers) as executor:
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=current_workers, mp_context=ctx, initializer=_worker_init) as executor:
             futures = {
                 executor.submit(
                     run_route_phase_schema_sweep,

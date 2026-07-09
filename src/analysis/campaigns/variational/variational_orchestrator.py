@@ -5,6 +5,7 @@ Sweeps across N_0, tau, and K_max iteratively for each calibration route,
 producing individual summary CSVs and multi-page PDF reports per route.
 """
 
+import multiprocessing as mp
 import os
 import argparse
 import logging
@@ -28,6 +29,13 @@ from src.core.corridor.clustering_worker import _select_medoid
 from src.core.corridor.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="calibration.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
 
 DEFAULT_N0_VALUES = [16, 24, 32, 48, 64]
 DEFAULT_TAU_VALUES = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
@@ -433,8 +441,8 @@ def main() -> None:
         print("="*95)
 
         oom_occurred = False
-
-        with ProcessPoolExecutor(max_workers=current_workers) as executor:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=current_workers, mp_context=ctx, initializer=_worker_init) as executor:
             futures = {
                 executor.submit(
                     run_route_variational_sweep,

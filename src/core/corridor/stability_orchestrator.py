@@ -65,6 +65,13 @@ from src.core.corridor.stability_worker import process_route
 logger = logging.getLogger(__name__)
 
 
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="corridor.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -208,7 +215,7 @@ def run_stability_campaign(
     # each worker so stability_worker.py must be side-effect-free at import.
     ctx = mp.get_context("spawn")
 
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as pool:
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx, initializer=_worker_init) as pool:
         futures = {
             pool.submit(
                 process_route,

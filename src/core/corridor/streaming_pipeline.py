@@ -30,12 +30,15 @@ Usage
 
 import argparse
 import logging
+import multiprocessing as mp
 import queue
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+
+
 from typing import Optional
 
 import numpy as np
@@ -74,6 +77,13 @@ from src.core.corridor.clustering_worker import (
 from src.core.corridor.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="corridor.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +293,9 @@ class StreamingCorridorOrchestrator:
         in_flight_fetches  = 0
         in_flight_computes = 0
 
+        ctx = mp.get_context("spawn")
         with ThreadPoolExecutor(max_workers=self.fetch_threads) as fetch_pool, \
-             ProcessPoolExecutor(max_workers=self.compute_workers) as compute_pool:
+             ProcessPoolExecutor(max_workers=self.compute_workers, mp_context=ctx, initializer=_worker_init) as compute_pool:
 
             # Seed Pool 1 with all initial fetch jobs
             for job in self.route_jobs:

@@ -117,6 +117,17 @@ data/logs/
 
 * `DEBUG` may be used during development but must not appear in committed code without a `--verbose` flag guarding it.
 
+### 4.4 Multiprocess Worker Logging & Initialization Policy (`ProcessPoolExecutor` / `spawn` Safety)
+
+When executing tasks across multiple processes using `concurrent.futures.ProcessPoolExecutor` or `multiprocessing.Pool`, child processes under the `spawn` start method (the default on Windows and macOS) do not inherit the parent process's memory space or root logger handlers set up inside `if __name__ == "__main__":`. By default, child worker interpreters launch with a bare root logger set at `WARNING` (`level=30`), which silently drops and ignores all `logging.info()` progress milestones during parallel execution.
+
+To guarantee 100% visibility and consistent log capture across all CPU cores, all multi-process modules must strictly follow this Worker Logging Policy:
+
+1. **Mandatory Worker Logger Initialization**: Any worker function dispatched to a process pool (`ProcessPoolExecutor` / `multiprocessing`) that emits `INFO`-level logs (`logging.info(...)`) **must** invoke `setup_file_logger(log_filename="...")` as its first action, or be launched via a `ProcessPoolExecutor(..., initializer=worker_init)` hook that initializes `setup_file_logger()` on process startup.
+2. **Idempotent Level Guarantee**: Calling `setup_file_logger("module.log")` inside child worker processes ensures `root_logger.setLevel(logging.INFO)` (`level=20`) is applied across all isolated worker interpreters and attaches the console and file handlers. `setup_file_logger()` is idempotent and safe against duplicate handlers within a single process.
+3. **Atomic File Append Safety**: All file logging handlers created by `setup_file_logger()` operate in append mode (`mode="a"` / `O_APPEND`). Because operating system append operations for standard single-line logs (< 512 bytes) are atomic across parallel child processes on modern filesystems (NTFS on Windows, ext4 on Linux), multiple workers writing to the same `data/logs/<module>.log` concurrently will never drop entries or corrupt lines.
+4. **Direct File-Append Audit Helpers (`log_skipped_aircraft`)**: Centralized audit and tracking helpers like `log_skipped_aircraft()` open target files directly (`with open(..., "a")`) and bypass the `logging` module hierarchy entirely. These helpers are intrinsically multi-process safe across all worker processes without needing root logger initialization.
+
 ---
 
 ## 5. Pre-Commit README Verification Checklist

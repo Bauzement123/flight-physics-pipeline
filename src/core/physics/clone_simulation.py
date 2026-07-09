@@ -25,7 +25,8 @@ from src.common.config import (
     GLOBAL_CORRIDOR_SIM_REGISTRY,
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, WEATHER_BOUNDS_BBOX,
-    UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
+    UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode,
+    WEATHER_IO_WORKERS
 )
 from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger, log_skipped_aircraft
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
@@ -382,8 +383,8 @@ def load_and_crop_weather(
             cachestore=disk_cache
         )
         
-    # Execute Open -> Crop -> Load concurrently in two threads
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # Execute Open -> Crop -> Load concurrently in weather I/O threads
+    with ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS) as executor:
         future_pl = executor.submit(_open_crop_and_load, era5_pl, bbox, low_mem)
         future_sl = executor.submit(_open_crop_and_load, era5_sl, bbox, low_mem)
         
@@ -688,9 +689,11 @@ def run_batch_clone_simulation(
             # Log skipped types
             for fid, typecode in skipped_types:
                 daily_skipped += 1
-                logger.warning(f"Skipping flight {fid}: Unsupported aircraft {typecode}")
-                with open(out_dir_path / "skipped_aircraft.log", "a") as f:
-                    f.write(f"{fid},{typecode}\n")
+                log_skipped_aircraft(
+                    fid,
+                    typecode,
+                    "ERROR_FLAG: Unsupported aircraft typecode during cloned simulation batch"
+                )
                     
         # D. Garbage Collect weather datasets
         met = None

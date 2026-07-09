@@ -42,7 +42,6 @@ from src.common.config import (
     SILHOUETTE_THRESHOLD,
     CHAOS_VARIANCE_THRESHOLD,
     MIN_FLIGHTS_FOR_CLUSTERING,
-    UNSUPPORTED_TYPECODE_FLAG,
     is_supported_typecode,
 )
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet, traffic_to_pycontrails
@@ -239,8 +238,14 @@ def _save_corridor(
     medoid_attrs = getattr(flight, 'attrs', {})
     tc = medoid_attrs.get('aircraft_type', medoid_attrs.get('typecode', None))
     if not is_supported_typecode(tc):
-        log_skipped_aircraft(corridor_flight_id, tc, "ERROR_FLAG: Medoid has missing, NaN, or non-target family typecode")
-        tc = UNSUPPORTED_TYPECODE_FLAG
+        log_skipped_aircraft(
+            corridor_flight_id,
+            tc,
+            "ERROR_FLAG: Medoid has missing, NaN, or non-target family typecode",
+        )
+        raise ValueError(
+            f"Cannot save corridor {corridor_flight_id}: unsupported medoid typecode {tc!r}. Aborting cluster save."
+        )
 
     attrs = {
         "flight_id": corridor_flight_id,

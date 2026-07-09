@@ -28,7 +28,7 @@ from src.common.config import (
     ERA5_GRID,
     WEATHER_BOUNDS_BBOX
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, log_skipped_aircraft
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel
 
 logger = logging.getLogger(__name__)
@@ -139,8 +139,11 @@ def run_physics_pipeline(
     # Log skipped types to output directory
     for fid, typecode in skipped_types:
         logger.warning(f"Skipping flight {fid}: Unsupported aircraft {typecode}")
-        with open(Path(out_dir) / "skipped_aircraft.log", "a") as f:
-            f.write(f"{fid},{typecode}\n")
+        log_skipped_aircraft(
+            fid,
+            typecode,
+            "ERROR_FLAG: Unsupported aircraft typecode during physics simulation"
+        )
 
     summary = (
         f"\n==================================================\n"

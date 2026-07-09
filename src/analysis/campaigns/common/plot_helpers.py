@@ -23,7 +23,16 @@ from src.common.config import (
 from src.core.corridor.stability_worker import _load_route_flights
 from src.core.corridor.pca_compressor import classify_and_normalize_cohort, vectorize_flight
 
+from src.common.utils import setup_file_logger
+from src.common.concurrency import limit_numeric_threads
+
 logger = logging.getLogger(__name__)
+
+
+def _worker_init() -> None:
+    """Initializes logging and numeric thread limits inside spawned plot extraction workers."""
+    setup_file_logger(log_filename="calibration.log")
+    limit_numeric_threads(1)
 
 
 def extract_cohort_plot_data(
@@ -451,7 +460,7 @@ def batch_generate_plots(plot_tasks: list[dict], max_workers: int = None) -> lis
             results.append(_worker_generate_plot(task))
     else:
         ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(processes=max_workers) as pool:
+        with ctx.Pool(processes=max_workers, initializer=_worker_init) as pool:
             results = pool.map(_worker_generate_plot, plot_tasks)
 
     # Render newly generated plots sequentially on the main thread

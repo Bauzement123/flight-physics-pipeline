@@ -60,6 +60,12 @@ DEFAULT_AIRPORT_PREFIXES = ["B", "E", "L"]
 MIN_DISTANCE_KM: float = 800.0          # Default minimum corridor distance filter
 DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
 
+# Pipeline Concurrency and Threading Defaults
+PROCESSING_DEFAULT_MAX_WORKERS: int = 4
+PROCESSING_NUMERIC_THREADS_PER_WORKER: int = 1
+WEATHER_IO_WORKERS: int = 2
+CORRIDOR_IO_THREADS: int = 4
+
 # Trino retry / timeout parameters (§3.3.1)
 BACKOFF_MAX_RETRIES: int = 10           # Max Trino retry attempts (exponential back-off)
 BACKOFF_INITIAL_DELAY: float = 1.0      # Initial back-off delay in seconds

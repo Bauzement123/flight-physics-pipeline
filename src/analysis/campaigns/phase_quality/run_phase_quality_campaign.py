@@ -15,6 +15,7 @@ Usage Examples:
 
 import argparse
 import logging
+import multiprocessing as mp
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
@@ -34,6 +35,13 @@ from src.analysis.campaigns.phase_quality.phase_quality_filters import apply_met
 from src.analysis.campaigns.phase_quality.phase_quality_plots import compile_route_audit_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="calibration.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
 
 
 def _worker_run_campaign_route(
@@ -244,7 +252,8 @@ def main():
     logger.info(f"Compiling PDF reports for {len(target_routes)} routes using {args.workers} workers (clean_dir={clean_dir}, use_clean={args.use_clean})...")
     
     if args.workers > 1 and len(target_routes) > 1:
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx, initializer=_worker_init) as executor:
             futures = {
                 executor.submit(
                     _worker_run_campaign_route,

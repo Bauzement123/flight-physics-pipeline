@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.common.config import BASE_DIR
+from src.common.config import BASE_DIR, CORRIDOR_IO_THREADS
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, df_to_traffic
 from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
@@ -49,7 +49,7 @@ _MIN_FLIGHTS = 3
 
 # Number of parquet files to load concurrently inside one worker process.
 # I/O-bound: threads release the GIL during file reads → genuine parallelism.
-_IO_THREADS = 4
+_IO_THREADS = CORRIDOR_IO_THREADS
 
 # Minimum rows in a loaded flight before it counts as valid
 _MIN_FLIGHT_ROWS = 10

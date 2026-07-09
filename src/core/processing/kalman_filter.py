@@ -28,6 +28,7 @@ stages without a disk round-trip:
 
 import argparse
 import logging
+import multiprocessing as mp
 import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -53,6 +54,8 @@ from src.common.config import (
     CORRIDOR_TIME_GRID_SECONDS,
     GLOBAL_CLEAN_REGISTRY,
     is_supported_typecode,
+    PROCESSING_DEFAULT_MAX_WORKERS,
+    PROCESSING_NUMERIC_THREADS_PER_WORKER,
 )
 from src.common.utils import (
     extract_target_routes,
@@ -60,6 +63,7 @@ from src.common.utils import (
     setup_file_logger,
     update_global_registry,
 )
+from src.common.concurrency import set_numeric_thread_env, limit_numeric_threads
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -311,6 +315,17 @@ def compute_ekf_quality_metrics(
 # Flight phase assignment
 # ==============================================================================
 
+def _fallback_rocd_phases(df: pd.DataFrame) -> list[str]:
+    """
+    Computes flight phases via ROCD thresholds (aviation units, ft/min):
+      CL (Climb)   : vertical_rate > +500 fpm
+      DE (Descent) : vertical_rate < -500 fpm
+      CR (Cruise)  : -500 <= vertical_rate <= +500 fpm
+    """
+    roc = df.get("vertical_rate", pd.Series(np.zeros(len(df)))).values
+    return ["CL" if r > 500 else "DE" if r < -500 else "CR" for r in roc]
+
+
 def assign_flight_phases(df: pd.DataFrame, typecode: str) -> pd.DataFrame:
     """
     Labels each 60-second grid waypoint with an OpenAP aerodynamic flight phase.
@@ -323,9 +338,10 @@ def assign_flight_phases(df: pd.DataFrame, typecode: str) -> pd.DataFrame:
 
     OpenAP FlightPhase labels: 'GN' ground, 'CL' climb, 'CR' cruise,
     'DE' descent, 'LV' level, 'NA' unclassified.
-    Falls back to a simple ROCD threshold scheme if openap is unavailable.
+    Falls back to a simple ROCD threshold scheme if openap is unavailable or
+    returns a mismatched length.
     """
-    df_out = df.copy()
+    df_out = df.copy().reset_index(drop=True)
     try:
         from openap.phase import FlightPhase
         # Elapsed seconds since flight start (OpenAP requires monotonic time axis)
@@ -336,13 +352,14 @@ def assign_flight_phases(df: pd.DataFrame, typecode: str) -> pd.DataFrame:
         fp = FlightPhase()
         fp.set_trajectory(ts, alt_ft, spd_kts, roc_fpm)
         phases = fp.phaselabel()
+        if len(phases) != len(df_out):
+            raise ValueError(f"OpenAP returned {len(phases)} labels for {len(df_out)} trajectory points.")
     except Exception as exc:
         logging.debug(f"OpenAP phase labeling failed for {typecode}: {exc}. Using ROCD fallback.")
-        # Simple ROCD fallback: climb > +500 fpm, descent < -500 fpm, else cruise
-        roc    = df_out.get("vertical_rate", pd.Series(np.zeros(len(df_out)))).values
-        phases = ["CL" if r > 500 else "DE" if r < -500 else "CR" for r in roc]
-    df_out["flight_phase"] = phases
-    df_out["phase"]        = phases
+        phases = _fallback_rocd_phases(df_out)
+    phase_list = list(phases)
+    df_out["flight_phase"] = phase_list
+    df_out["phase"]        = phase_list
     return df_out
 
 
@@ -583,6 +600,16 @@ def clean_pycontrails_flight(
     )
 
 
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers.
+
+    Called once per spawned worker process via ProcessPoolExecutor(initializer=_worker_init).
+    Guarantees INFO-level log capture and prevents N_workers × N_BLAS thread oversubscription.
+    """
+    setup_file_logger(log_filename="processing.log")
+    limit_numeric_threads(PROCESSING_NUMERIC_THREADS_PER_WORKER)
+
+
 # ==============================================================================
 # Batch file worker
 # ==============================================================================
@@ -740,14 +767,23 @@ def process_trajectories_by_route_ranks(
         logging.warning("No raw trajectory files to process.")
         return
 
-    effective_workers = max_workers if max_workers is not None else (os.cpu_count() or 1)
+    requested_workers = max_workers if max_workers is not None else PROCESSING_DEFAULT_MAX_WORKERS
+    effective_workers = max(1, min(requested_workers, len(tasks_to_run)))
     if effective_workers <= 1:
         logging.info(f"Processing {len(tasks_to_run)} files sequentially (max_workers={effective_workers})...")
+        # Allow multi-threaded BLAS inside the single process since we aren't oversubscribing
+        limit_numeric_threads(min(8, os.cpu_count() or 1))
         for rf, odir, sdiag, ow, tfids in tasks_to_run:
             all_entries.extend(_process_single_raw_file(rf, odir, sdiag, ow, tfids))
     else:
         logging.info(f"Processing {len(tasks_to_run)} files across {effective_workers} parallel workers...")
-        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        set_numeric_thread_env(PROCESSING_NUMERIC_THREADS_PER_WORKER)
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=effective_workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+        ) as executor:
             futures = [
                 executor.submit(_process_single_raw_file, rf, odir, sdiag, ow, tfids)
                 for rf, odir, sdiag, ow, tfids in tasks_to_run

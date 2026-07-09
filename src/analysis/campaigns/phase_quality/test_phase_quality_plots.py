@@ -9,7 +9,7 @@ and compiles 10-page baseline visual audit PDF reports.
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
-import multiprocessing
+import multiprocessing as mp
 import sys
 from pathlib import Path
 import pandas as pd
@@ -24,6 +24,13 @@ from src.common.utils import setup_file_logger
 from src.analysis.campaigns.phase_quality.phase_quality_plots import compile_route_audit_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_init() -> None:
+    """Initializes logging handlers and numeric thread limits inside spawned child workers."""
+    setup_file_logger(log_filename="calibration.log")
+    from src.common.concurrency import limit_numeric_threads
+    limit_numeric_threads(1)
 
 ALL_ROUTES = [
     "EDDF-LIRF",
@@ -89,7 +96,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test runner for phase quality audit plotting engine.")
     parser.add_argument("--route", default="EDDF-LIRF", help="Single route ID to test plot (default: EDDF-LIRF)")
     parser.add_argument("--all", action="store_true", help="Run across all 6 target routes")
-    parser.add_argument("--workers", type=int, default=min(4, multiprocessing.cpu_count()), help="Number of parallel worker processes")
+    parser.add_argument("--workers", type=int, default=min(4, mp.cpu_count()), help="Number of parallel worker processes")
     parser.add_argument("--format", choices=["PNG", "SVG", "png", "svg"], default="SVG", help="Plot rendering format inside PDF: PNG (rasterized plots, fast loading) or SVG (pure vector, current behavior)")
     parser.add_argument("--out-dir", type=str, default=None, help="Custom output directory for PDF reports (default: baseline_no_filter_<format>)")
     args = parser.parse_args()
@@ -118,7 +125,8 @@ def main() -> None:
             res = _worker_process_route(r, df_pool, df_map, out_dir, plot_fmt)
             logger.info(res)
     else:
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx, initializer=_worker_init) as executor:
             future_to_route = {
                 executor.submit(_worker_process_route, r, df_pool, df_map, out_dir, plot_fmt): r
                 for r in routes_to_run
