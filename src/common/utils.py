@@ -69,6 +69,80 @@ def split_route_string(route_str: str) -> tuple[str, str]:
         return 'UNK', 'UNK'
 
 
+def _filter_ranks(
+    df_summary: pd.DataFrame, lower: int | None, upper: int | None, specific_ranks: list[int] | None
+) -> pd.DataFrame:
+    """Filters RouteSummary DataFrame by specific rank indices or rank range bounds."""
+    if specific_ranks:
+        logger.info(f"Filtering by specific ranks: {specific_ranks}")
+        return df_summary[df_summary['rank'].isin(specific_ranks)].copy()
+    if lower is not None and upper is not None:
+        logger.info(f"Filtering by rank corridor: {lower} to {upper}")
+        return df_summary[(df_summary['rank'] >= lower) & (df_summary['rank'] <= upper)].copy()
+    logger.error("No valid filtering criteria provided.")
+    return pd.DataFrame()
+
+
+def _resolve_roundtrip_routes(df_summary: pd.DataFrame, filtered_df: pd.DataFrame) -> pd.DataFrame:
+    """Resolves and appends inverse return flight corridors for roundtrip format requests."""
+    logger.info("Roundtrip requested. Resolving inverse return flight paths...")
+    inv_routes = []
+    for r_str in filtered_df['route']:
+        dep, arr = split_route_string(r_str)
+        if dep != 'UNK':
+            inv_routes.append(f"{arr} -> {dep}")
+    return_df = df_summary[df_summary['route'].isin(inv_routes)].copy()
+    before_cnt = len(filtered_df)
+    res = pd.concat([filtered_df, return_df]).drop_duplicates(subset=['route'])
+    logger.info(f"Resolved {len(res) - before_cnt} return routes. Total target routes: {len(res)}")
+    return res
+
+
+def extract_target_routes(
+    summary_path: str | Path = ROUTE_SUMMARY_PARQUET,
+    lower: int | None = None,
+    upper: int | None = None,
+    specific_ranks: list[int] | None = None,
+    fetch_format: str = 'oneway',
+    min_distance: float | None = None,
+) -> pd.DataFrame:
+    """Loads RouteSummary, applies rank/distance filters, and returns target corridor codes."""
+    logger.info(f"Loading route metadata from summary: {summary_path}")
+    df_summary = load_route_summary(summary_path)
+    if df_summary.empty:
+        logger.error("RouteSummary is empty.")
+        return pd.DataFrame()
+
+    filtered_df = _filter_ranks(df_summary, lower, upper, specific_ranks)
+    if filtered_df.empty:
+        logger.warning("No routes found matching the criteria.")
+        return pd.DataFrame()
+
+    if min_distance is not None:
+        if 'distance_m' in filtered_df.columns:
+            before_cnt = len(filtered_df)
+            filtered_df = filtered_df[filtered_df['distance_m'] >= min_distance * 1000.0].copy()
+            logger.info(f"Filtered by min distance >= {min_distance} km. Excluded {before_cnt - len(filtered_df)} routes.")
+        else:
+            logger.warning("Column 'distance_m' not found in RouteSummary. Skipping distance filtering.")
+
+    if fetch_format == 'roundtrip':
+        filtered_df = _resolve_roundtrip_routes(df_summary, filtered_df)
+
+    deps, arrs = zip(*[split_route_string(r) for r in filtered_df['route']])
+    filtered_df['dep'], filtered_df['arr'] = deps, arrs
+
+    if 'no_of_flights' not in filtered_df.columns:
+        cnt_cols = [c for c in filtered_df.columns if 'count' in c.lower() or 'flight' in c.lower()]
+        if cnt_cols:
+            filtered_df.rename(columns={cnt_cols[0]: 'no_of_flights'}, inplace=True)
+        else:
+            logger.error("Could not locate flight count column in RouteSummary!")
+            return pd.DataFrame()
+
+    return filtered_df[['rank', 'dep', 'arr', 'no_of_flights']]
+
+
 def generate_dataset_name(
     ranks=None,
     lower_rank=None,

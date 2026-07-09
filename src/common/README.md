@@ -36,10 +36,11 @@ Module Objectives
       │         ├── pycontrails_to_traffic(): Translates pycontrails.Flight to traffic.core.Flight (converting SI units → aviation units: m→ft, m/s→kt, m/s→ft/min)
       │         └── traffic_to_pycontrails(): Translates traffic.core.Flight or DataFrame back to pycontrails.Flight (converting aviation units → SI units), with optional drop_kinematics flag to strip kinematic columns for corridor templates
       │
-      └── Sub-objective 3: Index trajectory files to accelerate local caching
-           └── Solution: build_global_manifest.py & utils.py (update_global_registry)
-                ├── Inputs: Raw, clean, and simulated parquet outputs on disk
-                └── Outputs: Parquet registries mapping flight_ids to relative file paths
+      └── Sub-objective 3: Index trajectory files and query target corridor metadata
+           └── Solution: build_global_manifest.py & utils.py
+                ├── build_global_manifest.py: Rebuilds global Parquet registries mapping flight_ids to paths
+                ├── update_global_registry(): Atomically inserts new trajectory records into Parquet registries
+                └── extract_target_routes(): Queries `ROUTE_SUMMARY_PARQUET` to resolve RouteSummary ranks into target `(dep, arr)` airport codes
 ```
 
 ---

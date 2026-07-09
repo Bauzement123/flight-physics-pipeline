@@ -87,7 +87,7 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │         └── Safety behavior: Deduplicates against existing flight_ids before appending and writing atomically
  │
  ├── Sub-objective: Extract target routes and calculate sample quotas
- │    └── Solution: fetcher_orchestrator.py::extract_target_routes() & compute_fetch_targets()
+ │    └── Solution: src.common.utils::extract_target_routes() & fetcher_orchestrator.py::compute_fetch_targets()
  │         ├── Inputs: RouteSummary parquet, rank bounds/list, strategy, value, date/typecode filters
  │         ├── Outputs: Execution plan list containing per-corridor sample targets and flight_source paths
  │         ├── Config constants: ROUTE_SUMMARY_PARQUET, MIN_DISTANCE_KM, MASTER_FLIGHTS_FILE
@@ -212,7 +212,7 @@ flowchart TD
     Init --> Validate["Validate mutually exclusive rank args & seed range"]
     Validate --> RunID["generate_dataset_name(): Create dynamic run_id"]
 
-    RunID --> LoadSummary["extract_target_routes(): Load ROUTE_SUMMARY_PARQUET"]
+    RunID --> LoadSummary["src.common.utils::extract_target_routes(): Load ROUTE_SUMMARY_PARQUET"]
     LoadSummary --> RankFilter["Filter by explicit --ranks or --lower-rank/--upper-rank"]
     RankFilter --> DistFilter["Filter by --min-distance (default: 800 km)"]
     DistFilter --> FormatCheck{"--format roundtrip?"}
@@ -262,8 +262,8 @@ flowchart TD
 **Step-by-step Walkthrough:**
 1. **Entrypoint & Initialization**: Calls `init_runtime()` then `setup_file_logger("fetching.log")`. Validates mutually exclusive CLI options (`--ranks` vs `--lower-rank`/`--upper-rank`) and seed bounds.
 2. **Dynamic Namespace Generation**: Generates a standardized dataset identifier using `generate_dataset_name()`, which serves as the aggregate `run_id` for checkpoints and directory structures.
-3. **Route Extraction**: `extract_target_routes()` reads `ROUTE_SUMMARY_PARQUET`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 800 km).
-4. **Roundtrip Resolution**: If `--format roundtrip` is requested, `_resolve_roundtrip_routes()` identifies all inverse return paths (`ARR -> DEP`) in the master summary and appends them to the target corridor list without duplication.
+3. **Route Extraction**: `src.common.utils::extract_target_routes()` reads `ROUTE_SUMMARY_PARQUET`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 800 km).
+4. **Roundtrip Resolution**: If `--format roundtrip` is requested, `_resolve_roundtrip_routes()` (in `src.common.utils`) identifies all inverse return paths (`ARR -> DEP`) in the master summary and appends them to the target corridor list without duplication.
 5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` loads flights directly from `--flight-source` into memory and applies date and aircraft typecode filters. This in-memory evaluation ensures that sample quotas are calculated against actual post-filter capacity rather than raw pre-filter totals.
 6. **Strategy Application**: `_calculate_target_quota()` computes the sample target based on `--strategy`: `fixed` → `min(int(value), capacity)`, `percent` → `min(ceil(capacity * value / 100.0), capacity)`, `all` → `capacity`.
 7. **Plan Display**: `print_batch_plan()` outputs a clean table to the console detailing every planned corridor, its rank, requested sample size, and total available capacity.
