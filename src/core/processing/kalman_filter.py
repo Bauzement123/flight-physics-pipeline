@@ -28,7 +28,9 @@ stages without a disk round-trip:
 
 import argparse
 import logging
+import os
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -488,6 +490,15 @@ def clean_traffic_flight(
     Rule 11 typecode validation must be performed by the caller (clean_pycontrails_flight
     does this; direct callers must call is_supported_typecode() themselves).
 
+    Inter-Process / External Dataflow Synchronization Contract:
+    -----------------------------------------------------------
+    This function is completely decoupled from global registry mutations. It performs pure
+    in-memory trajectory cleaning and metric computation without writing to disk registries.
+    If external dataflows or custom orchestrators invoke this function across multiple
+    ProcessPoolExecutor worker processes, the caller is strictly responsible for collecting
+    the returned metrics and invoking `update_global_registry(new_entries)` in the main process
+    after the worker pool finishes (or invoking a rebuild of `GLOBAL_CLEAN_REGISTRY`).
+
     Returns
     -------
     pc_out          : pycontrails.Flight | None  — cleaned flight in SI units, or None on failure
@@ -554,6 +565,12 @@ def clean_pycontrails_flight(
     Suitable for in-process injection from the fetcher or any other pipeline stage
     that holds a pycontrails flight without writing to disk first.
     Enforces Rule 11: typecode is validated before any processing begins.
+
+    Inter-Process / External Dataflow Synchronization Contract:
+    -----------------------------------------------------------
+    This function never mutates `GLOBAL_CLEAN_REGISTRY` or holds file locks. If invoked by an
+    external dataflow inside a multiprocessing worker pool, the external orchestrator must collect
+    returned flight entries and call `update_global_registry(new_entries)` in the main process.
     """
     if not is_supported_typecode(typecode):
         log_skipped_aircraft(flight_id, str(typecode), "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode")
@@ -577,7 +594,19 @@ def _process_single_raw_file(
     overwrite: bool,
     target_flight_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Loads one raw Parquet, cleans each flight via clean_pycontrails_flight, writes output."""
+    """
+    Loads one raw Parquet, cleans each flight via clean_pycontrails_flight, writes output.
+
+    Inter-Process / External Dataflow Synchronization Contract:
+    -----------------------------------------------------------
+    This worker function is explicitly safe for concurrent execution across child processes in a
+    `ProcessPoolExecutor`. It writes clean SI trajectory Parquet files to `out_dir_path` but **never**
+    reads, modifies, or locks the shared `GLOBAL_CLEAN_REGISTRY`. Instead, it returns a list of
+    dictionary entries representing clean flights processed in this file.
+    When external dataflows or custom pipelines invoke `_process_single_raw_file` across worker
+    pools, the parent orchestrator must aggregate these returned dictionaries and call
+    `update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)` exactly once after all workers finish.
+    """
     out_path = out_dir_path / raw_file.name.replace("_raw.parquet", "_clean_si.parquet")
     if out_path.exists() and not overwrite:
         logging.info(f"Already exists, skipping: {out_path.name}")
@@ -635,9 +664,11 @@ def process_trajectories_by_route_ranks(
     out_dir: str | Path | None = None,
     save_diagnostics: bool = False,
     overwrite: bool = False,
+    max_workers: int | None = None,
 ) -> None:
-    """Resolves target corridors by rank/route, processes all raw Parquet files, updates registry."""
+    """Resolves target corridors by rank/route, processes all raw Parquet files (in parallel), updates registry."""
     all_entries: list[dict[str, Any]] = []
+    tasks_to_run: list[tuple[Path, Path, bool, bool, set[str] | None]] = []
 
     if source_dir is not None:
         s_dir = Path(source_dir)
@@ -647,7 +678,7 @@ def process_trajectories_by_route_ranks(
         o_dir = Path(out_dir) if out_dir else (s_dir.parent / "clean" if s_dir.name == "raw" else s_dir)
         o_dir.mkdir(parents=True, exist_ok=True)
         for rf in s_dir.glob("*_raw.parquet"):
-            all_entries.extend(_process_single_raw_file(rf, o_dir, save_diagnostics, overwrite))
+            tasks_to_run.append((rf, o_dir, save_diagnostics, overwrite, None))
     else:
         from src.common.registry_utils import get_flights_for_route
 
@@ -703,16 +734,30 @@ def process_trajectories_by_route_ranks(
             else:
                 o_dir = raw_file.parent.parent / "clean" if raw_file.parent.name == "raw" else raw_file.parent
             o_dir.mkdir(parents=True, exist_ok=True)
+            tasks_to_run.append((raw_file, o_dir, save_diagnostics, overwrite, fids))
 
-            all_entries.extend(
-                _process_single_raw_file(
-                    raw_file=raw_file,
-                    out_dir_path=o_dir,
-                    save_diagnostics=save_diagnostics,
-                    overwrite=overwrite,
-                    target_flight_ids=fids,
-                )
-            )
+    if not tasks_to_run:
+        logging.warning("No raw trajectory files to process.")
+        return
+
+    effective_workers = max_workers if max_workers is not None else (os.cpu_count() or 1)
+    if effective_workers <= 1:
+        logging.info(f"Processing {len(tasks_to_run)} files sequentially (max_workers={effective_workers})...")
+        for rf, odir, sdiag, ow, tfids in tasks_to_run:
+            all_entries.extend(_process_single_raw_file(rf, odir, sdiag, ow, tfids))
+    else:
+        logging.info(f"Processing {len(tasks_to_run)} files across {effective_workers} parallel workers...")
+        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            futures = [
+                executor.submit(_process_single_raw_file, rf, odir, sdiag, ow, tfids)
+                for rf, odir, sdiag, ow, tfids in tasks_to_run
+            ]
+            for fut in as_completed(futures):
+                try:
+                    entries = fut.result()
+                    all_entries.extend(entries)
+                except Exception as exc:
+                    logging.error(f"Worker process failed: {exc}")
 
     if all_entries:
         update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)
@@ -733,6 +778,7 @@ def main() -> None:
     parser.add_argument("--out-dir",          type=str,            help="Output directory for clean Parquet files.")
     parser.add_argument("--save-diagnostics", action="store_true", help="Save S_k, P_k, e_k tensors to .npz per flight.")
     parser.add_argument("--overwrite",        action="store_true", help="Re-process and overwrite existing clean files.")
+    parser.add_argument("--workers", "--num-workers", "--max-workers", dest="max_workers", type=int, default=None, help="Maximum number of parallel worker processes to spawn.")
     args = parser.parse_args()
 
     rank_range_tuple = tuple(args.rank_range) if args.rank_range else None
@@ -744,6 +790,7 @@ def main() -> None:
         out_dir=args.out_dir,
         save_diagnostics=args.save_diagnostics,
         overwrite=args.overwrite,
+        max_workers=args.max_workers,
     )
 
 

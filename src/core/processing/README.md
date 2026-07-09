@@ -160,49 +160,33 @@ Module Objective
 ### 4.1 Workflow A — Batch File Processing (`kalman_filter.py` CLI)
 
 This is the primary batch execution path. It is invoked from the command line to process
-all raw Parquet files for one or more corridor directories, writing clean SI Parquet files
-and updating `GLOBAL_CLEAN_REGISTRY`.
+all raw Parquet files for one or more corridor directories across multiple CPU cores,
+writing clean SI Parquet files and updating `GLOBAL_CLEAN_REGISTRY` in the main process.
 
 ```mermaid
 flowchart TD
-    A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
+    A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir\n--max-workers N"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
     B --> C["process_trajectories_by_route_ranks()\nResolve targets via ranks/routes"]
     C --> D{"source_dir provided?"}
-    D -->|Yes| E["Read *_raw.parquet files\nfrom source_dir"]
-    D -->|No| F["Query trajectory registry\nvia get_flights_for_route()\nGroup target flights by file_path"]
-    E --> G["For each raw file:\n_process_single_raw_file()"]
+    D -->|Yes| E["Read *_raw.parquet files\nfrom source_dir → build task queue"]
+    D -->|No| F["Query trajectory registry\nvia get_flights_for_route()\nGroup target flights by file_path → build task queue"]
+    E --> G["Determine effective_workers:\nmax_workers or os.cpu_count()"]
     F --> G
-    G --> H{"*_clean_si.parquet exists\nAND --overwrite not set?"}
-    H -->|Yes| I["LOG INFO: skip file"]
-    H -->|No| J["parquet_to_pycontrails(raw_file)\n→ dict[flight_id → pycontrails.Flight]"]
-    J --> K{"is_supported_typecode(t_code)?"}
-    K -->|No| L["log_skipped_aircraft(fid, t_code,\n'ERROR_FLAG: …')\n→ data/logs/skipped_aircraft.log"]
-    K -->|Yes| M["clean_pycontrails_flight(\n  pyc_flight, fid, t_code,\n  CORRIDOR_TIME_GRID_SECONDS,\n  save_diagnostics, diag_path)"]
-    M --> N["pycontrails_to_traffic()\n→ traffic.core.Flight"]
-    N --> O["Flight.airborne() — drop ground segments\nDrop if < 10 points"]
-    O --> P["_prepare_grid_and_project()\n1 Build uniform 60 s DatetimeIndex grid\n2 Merge raw + grid timestamps\n3 _fill_geodetic_gaps() — great-circle interp\n   for gaps > 100 000 m (WGS84)\n4 Time-interpolate all columns; ffill/bfill\n5 LAEA Cartesian projection (+proj=laea)\n   centred on flight mean lat/lon"]
-    P --> Q["ProcessXYZZFilterBase.preprocess()\nState vector: [x, y, alt_baro, math_angle,\n               velocity, vert_rate]"]
-    Q --> R["run_6d_kinematic_ekf()\n_compute_R_Q() — empirical R, Q\nForward loop (verbatim traffic EKF + 2 diag lines):\n  _ekf_predict() → x_pred, P_pred\n  _ekf_correct() → x_u, P_u, S_hist[i], e_hist[i]"]
-    R --> S["rts_smoother()\n[traffic lib — no custom math]\n→ smoothed_states (T,6)"]
-    S --> T["compute_ekf_quality_metrics(S_hist, P_hist, e_hist)\n→ ekf_quality_score ∈ [0,1]\n   ekf_mean_nis, ekf_max_trace_p"]
-    T --> U{"--save-diagnostics?"}
-    U -->|Yes| V["_save_diagnostics()\n→ {out_dir}/diagnostics/{fid}_ekf_diag.npz\n  keys: timestamps, e_k (T,6),\n        S_k (T,6,6), P_k (T,6,6), metrics"]
-    U -->|No| W["diag_rel = None"]
-    V --> X["ProcessXYZZFilterBase.postprocess()\nto_lonlat.transform(x,y) → lat/lon WGS84\nSlice at grid_times → df_resampled"]
-    W --> X
-    X --> Y["_finalize_resampled_flight()\nRe-inject metadata, onground=False\nassign_flight_phases() — OpenAP primary,\nROCD fallback (>500→CL, <−500→DE, else CR)\ntraffic_to_pycontrails() → SI units"]
-    Y --> Z["write_flights_to_parquet(pc_flights)\n→ {out_dir}/*_clean_si.parquet"]
-    Z --> AA["update_global_registry(GLOBAL_CLEAN_REGISTRY, entries)\nColumns: flight_id, file_path,\n  ekf_quality_score, ekf_mean_nis,\n  ekf_max_trace_p, diag_file_path\n→ data/registries/global_clean_registry.parquet"]
+    G --> H{"effective_workers > 1?"}
+    H -->|Yes| I["ProcessPoolExecutor(max_workers=effective_workers)\nParallel submit: _process_single_raw_file(raw_file, …)\nas_completed(futures) → collect returned entry dictionaries"]
+    H -->|No| J["Sequential loop over tasks:\n_process_single_raw_file(raw_file, …)"]
+    I --> K["_process_single_raw_file() [Worker Safe]\nCheck overwrite guard → read Parquet →\nclean flights via clean_pycontrails_flight() →\nwrite *_clean_si.parquet to disk → return entries dict"]
+    J --> K
+    K --> L["Main Process: aggregate all returned entry dicts\nupdate_global_registry(GLOBAL_CLEAN_REGISTRY, entries)\n→ data/registries/global_clean_registry.parquet"]
 ```
 
 **Step-by-step:**
 
 1. **Logger setup**: `main()` immediately calls `setup_file_logger("processing.log")`, directing all `logging` output to `data/logs/processing.log`. `logging.basicConfig()` is never called.
-2. **Corridor resolution**: If `--source-dir` is provided, the pipeline processes files directly from that directory. Otherwise, it resolves target departure/arrival corridor pairs using `--routes` and/or by calling `extract_target_routes` with the provided `--ranks`/`--rank-range`.
-3. **Registry-based file query**: For the resolved corridors, it queries the trajectory registry using `get_flights_for_route(dep, arr)` to obtain matching `flight_id`s and their registered relative `file_path`s. The matching flight IDs are grouped by raw `file_path` so that each raw Parquet file is processed exactly once, filtering in-memory to target flights only.
-4. **Overwrite guard**: `_process_single_raw_file()` checks whether the target `*_clean_si.parquet` already exists. If it does and `--overwrite` is not set, the file is skipped and an `INFO` log entry is written.
-5. **Ingestion**: `parquet_to_pycontrails(raw_file)` reads the raw Parquet and returns a `dict[flight_id → pycontrails.Flight]`. Each flight's `typecode` is read from `pyc_flight.attrs["aircraft_type"]`.
-6. **Rule 11 typecode gate**: `is_supported_typecode(t_code)` is called for every flight. Any record with a missing, `NaN`, or out-of-family typecode is dropped immediately. `log_skipped_aircraft(fid, t_code, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in raw parquet")` appends a tab-separated audit entry to `data/logs/skipped_aircraft.log`. Processing continues with the next flight.
+2. **Corridor resolution & task queue construction**: If `--source-dir` is provided, the pipeline collects all matching `*_raw.parquet` files into a task queue. Otherwise, it queries the trajectory registry using `get_flights_for_route(dep, arr)` for target corridors resolved by `--routes` or `--ranks`/`--rank-range`, grouping flights by raw `file_path`.
+3. **Parallel Execution via `ProcessPoolExecutor`**: If `max_workers` is greater than `1` (or defaults to `os.cpu_count()`), the task queue is dispatched across multiple independent worker processes using `concurrent.futures.ProcessPoolExecutor`. Each child process executes `_process_single_raw_file()` independently. If `max_workers == 1`, execution falls back to a clean sequential loop.
+4. **Overwrite guard & Ingestion (in worker)**: Each worker checks whether `*_clean_si.parquet` already exists and skips reading if `--overwrite` is not set. Otherwise, `parquet_to_pycontrails(raw_file)` loads all flights in the file.
+5. **Rule 11 typecode gate**: `is_supported_typecode(t_code)` is called for every flight inside the worker. Missing, `NaN`, or out-of-family typecodes trigger `log_skipped_aircraft()` to `data/logs/skipped_aircraft.log` and are skipped immediately.
 7. **Pycontrails → traffic conversion**: `clean_pycontrails_flight()` first calls `is_supported_typecode()` again (its own Rule 11 guard), then delegates to `pycontrails_to_traffic()` to produce a `traffic.core.Flight` in aviation units (`ft`, `kt`, `ft/min`).
 8. **Airborne segmentation**: `Flight.airborne()` removes ground-level ADS-B pings. If fewer than 10 airborne points remain, the flight returns `(None, 0.0, 0.0, 0.0, None)` and is skipped.
 9. **Grid injection & LAEA projection** (`_prepare_grid_and_project()`):
@@ -281,16 +265,30 @@ flowchart TD
 
 ---
 
+### 4.3 Multi-Process & External Dataflow Synchronization Contract
+
+To ensure that `kalman_filter.py` can be seamlessly embedded within both standalone CLI invocations and external multi-process dataflows (such as custom corridor simulation orchestrators or batch campaign executors), all core workers strictly adhere to a decoupled memory and disk synchronization contract:
+
+1. **Decoupled Worker Functions (`_process_single_raw_file`, `clean_pycontrails_flight`, `clean_traffic_flight`)**:
+   - None of these functions open, modify, or lock `GLOBAL_CLEAN_REGISTRY` (`data/registries/global_clean_registry.parquet`).
+   - `_process_single_raw_file()` writes individual `*_clean_si.parquet` files to the target directory and returns a clean Python list of metadata dictionaries (`list[dict[str, Any]]`) representing the processed flights.
+2. **Safe Concurrent Execution (`ProcessPoolExecutor`)**:
+   - Because workers do not touch global shared registries, `_process_single_raw_file()` can be safely scheduled across arbitrary parallel process pools (`concurrent.futures.ProcessPoolExecutor`).
+3. **External Orchestrator Responsibilities**:
+   - If an external pipeline or custom dataflow executes these functions across its own multi-process worker pool, that external orchestrator is strictly responsible for collecting all returned entry dictionaries from its futures and calling `update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)` in its parent main process exactly once after the pool shuts down (or triggering a global clean registry rebuild).
+
+---
+
 ## 5. CLI Usage Guide
 
 ### Bash
 
 ```bash
-# Process specific corridor volume ranks
-python -m src.core.processing.kalman_filter --ranks 1 2 3
+# Process specific corridor volume ranks across 8 parallel CPU cores
+python -m src.core.processing.kalman_filter --ranks 1 2 3 --max-workers 8
 
-# Process an inclusive range of volume ranks with diagnostic tensor export
-python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics
+# Process an inclusive range of volume ranks with diagnostic tensor export across all CPUs
+python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics --max-workers 4
 
 # Process explicit corridor strings, custom source and output directories, force overwrite
 python -m src.core.processing.kalman_filter \
@@ -298,7 +296,8 @@ python -m src.core.processing.kalman_filter \
     --source-dir "data/trajectories/rank_1_EDDF-LIRF/raw" \
     --out-dir "data/trajectories/rank_1_EDDF-LIRF/clean" \
     --save-diagnostics \
-    --overwrite
+    --overwrite \
+    --max-workers 6
 
 # Process all corridors by rank, saving diagnostics for later EKF audit
 python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
@@ -307,11 +306,11 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 ### PowerShell
 
 ```powershell
-# Process specific corridor volume ranks
-python -m src.core.processing.kalman_filter --ranks 1 2 3
+# Process specific corridor volume ranks across 8 parallel CPU cores
+python -m src.core.processing.kalman_filter --ranks 1 2 3 --max-workers 8
 
-# Process an inclusive range of volume ranks with diagnostic tensor export
-python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics
+# Process an inclusive range of volume ranks with diagnostic tensor export across all CPUs
+python -m src.core.processing.kalman_filter --rank-range 1 10 --save-diagnostics --max-workers 4
 
 # Process explicit corridor strings, custom source and output directories, force overwrite
 python -m src.core.processing.kalman_filter `
@@ -319,7 +318,8 @@ python -m src.core.processing.kalman_filter `
     --source-dir "data\trajectories\rank_1_EDDF-LIRF\raw" `
     --out-dir "data\trajectories\rank_1_EDDF-LIRF\clean" `
     --save-diagnostics `
-    --overwrite
+    --overwrite `
+    --max-workers 6
 
 # Process all corridors by rank range, saving diagnostics
 python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
@@ -336,6 +336,7 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 | `--out-dir` | `str` | `None` | Custom output directory for `*_clean_si.parquet` files. Defaults to sibling `clean/` directory relative to `raw/` when `source_dir` resolves a standard corridor layout. |
 | `--save-diagnostics` | flag | `False` | When set, writes per-flight EKF tensors `S_k (T,6,6)`, `P_k (T,6,6)`, `e_k (T,6)`, and scalar `metrics (3,)` to `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` (compressed NumPy archive). |
 | `--overwrite` | flag | `False` | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
+| `--workers` / `--num-workers` / `--max-workers` | `int` | `None` | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `os.cpu_count()` (`all available CPUs`). If set to `1`, execution falls back to sequential loop. |
 
 ---
 
