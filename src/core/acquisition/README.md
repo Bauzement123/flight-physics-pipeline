@@ -43,6 +43,7 @@ Acquisition Module
 │   ├── Auto-resolve or load specific flight population and enriched fleet files
 │   ├── Clean/normalize icao24 merge keys
 │   ├── Perform Inner Join on 'icao24' to align flights with fleet metadata
+│   ├── Validate typecodes against target families (`ALL_TARGET_FAMILIES`); drop and log invalid/NaN typecodes to `data/logs/skipped_aircraft.log`
 │   ├── Align and order schema with the target 14 columns
 │   └── Export final merged dataset (default: master_flights.parquet)
 └── Enrich Route Summary (enrich_route_summary.py)

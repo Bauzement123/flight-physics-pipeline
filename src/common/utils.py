@@ -13,10 +13,31 @@ import logging
 from src.common.config import (
     ROUTE_SUMMARY_PARQUET, TRAJECTORIES_DIR, BASE_DIR, LOGS_DIR,
     BACKOFF_MAX_RETRIES, BACKOFF_INITIAL_DELAY, BACKOFF_FACTOR, BACKOFF_MAX_DELAY,
+    UNSUPPORTED_TYPECODE_FLAG,
 )
 from src.common.exceptions import RetryError
 
 logger = logging.getLogger(__name__)
+
+
+def log_skipped_aircraft(
+    flight_or_icao_id: str,
+    typecode: Any,
+    reason: str = "ERROR_FLAG: NaN/Missing or outside ALL_TARGET_FAMILIES"
+) -> None:
+    """
+    Appends an entry to data/logs/skipped_aircraft.log when an aircraft or flight is skipped
+    due to a NaN, missing, or non-target family typecode.
+    Conforms to the global audit log format: id \\t typecode \\t reason.
+    """
+    skipped_log = LOGS_DIR / "skipped_aircraft.log"
+    tc_str = str(typecode) if pd.notna(typecode) and typecode is not None and str(typecode).strip() != "" else UNSUPPORTED_TYPECODE_FLAG
+    try:
+        skipped_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(skipped_log, "a", encoding="utf-8") as f:
+            f.write(f"{flight_or_icao_id}\t{tc_str}\t{reason}\n")
+    except Exception as e:
+        logger.error(f"Failed to append to skipped_aircraft.log for {flight_or_icao_id}: {e}")
 
 
 def load_route_summary(summary_path: str | Path | None = None) -> pd.DataFrame:
@@ -289,11 +310,11 @@ def setup_file_logger(
                 pass
 
 
-def update_global_registry(registry_file: Path, new_entries: list[dict[str, str]]) -> None:
+def update_global_registry(registry_file: Path, new_entries: list[dict[str, Any]]) -> None:
     """
     Appends new mapping entries to a global registry Parquet file.
-    Deduplicates on flight_id to keep only the latest path.
-    new_entries: list of dicts: [{"flight_id": str, "file_path": str}, ...]
+    Deduplicates on flight_id to keep only the latest path and metrics.
+    new_entries: list of dicts: [{"flight_id": str, "file_path": str, ...}, ...]
     """
     if not new_entries:
         return

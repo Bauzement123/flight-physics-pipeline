@@ -24,10 +24,11 @@ from openap.phase import FlightPhase
 from src.common.config import (
     BASE_DIR, CORRIDOR_PATHS_DIR,
     GLOBAL_MODEL_REGISTRY, GLOBAL_TRAJECTORY_REGISTRY,
-    GLOBAL_FLIGHT_CLUSTER_MAP
+    GLOBAL_FLIGHT_CLUSTER_MAP,
+    UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
 )
 from src.core.corridor.pca_compressor import classify_and_normalize_cohort
-from src.common.utils import load_route_summary, split_route_string, setup_file_logger
+from src.common.utils import load_route_summary, split_route_string, setup_file_logger, log_skipped_aircraft
 from src.common.adapters import (
     parquet_to_pycontrails,
     pycontrails_to_traffic,
@@ -309,8 +310,12 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
                     trf_flight = pycontrails_to_traffic(fl)
                     airborne_flight = trf_flight.airborne()
                     if airborne_flight is not None and len(airborne_flight) >= 10:
-                        raw_flights.append(airborne_flight)
-                        typecodes.append(fl.attrs.get('aircraft_type', 'B738'))
+                        tc = fl.attrs.get('aircraft_type', None)
+                        if is_supported_typecode(tc):
+                            raw_flights.append(airborne_flight)
+                            typecodes.append(tc)
+                        else:
+                            log_skipped_aircraft(fl.attrs.get('flight_id', 'UNK'), tc, "ERROR_FLAG: Path generator input flight has invalid/missing typecode")
         except Exception as e:
             logger.error(f"Failed to load flights from {abs_path}: {e}")
             
@@ -359,7 +364,11 @@ def create_synthesized_trajectory(rank: int, output_parquet: str, time_grid_seco
     out_dir = base_out_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    representative_typecode = Counter(typecodes).most_common(1)[0][0] if typecodes else "B738"
+    if not typecodes:
+        log_skipped_aircraft(f"{dep}-{arr}", None, "ERROR_FLAG: No supported typecodes found across cohort for corridor synthesis")
+        representative_typecode = UNSUPPORTED_TYPECODE_FLAG
+    else:
+        representative_typecode = Counter(typecodes).most_common(1)[0][0]
     
     # Process each cluster
     for cluster_id, flights_list in sub_cohorts.items():

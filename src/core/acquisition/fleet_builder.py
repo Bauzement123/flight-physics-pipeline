@@ -7,8 +7,8 @@ import pandas as pd
 
 
 
-from src.common.config import AIRCRAFT_DB_DIR, ALL_TARGET_FAMILIES, DEFAULT_AIRCRAFT_DB_PATH, DEFAULT_OPENAIRFRAMES_PATH
-from src.common.utils import setup_file_logger
+from src.common.config import AIRCRAFT_DB_DIR, ALL_TARGET_FAMILIES, DEFAULT_AIRCRAFT_DB_PATH, DEFAULT_OPENAIRFRAMES_PATH, is_supported_typecode
+from src.common.utils import setup_file_logger, log_skipped_aircraft
 
 # Renaming maps for unifying database schemas
 OPENAIRFRAMES_RENAME_MAP = {
@@ -260,6 +260,12 @@ def main():
 
     # 3. Combine Databases
     df_final = merge_and_enrich_fleets(df_openairframes, df_opensky)
+    if not df_final.empty and 'typecode' in df_final.columns:
+        valid_mask = df_final['typecode'].apply(is_supported_typecode)
+        if not valid_mask.all():
+            for _, bad_row in df_final[~valid_mask].iterrows():
+                log_skipped_aircraft(str(bad_row.get('icao24', 'UNK')), bad_row.get('typecode'), "ERROR_FLAG: Dropped airframe in fleet_builder due to missing or non-target family typecode after merge")
+            df_final = df_final[valid_mask].copy()
 
     # 4. Save Output
     if not df_final.empty:

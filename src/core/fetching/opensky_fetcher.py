@@ -22,9 +22,10 @@ from src.common.config import (
     MIN_DISTANCE_KM,
     RAW_CONCAT_SUFFIX,
     RAW_TRAJECTORY_DIRNAME,
+    is_supported_typecode,
 )
 from src.common.registry_utils import load_trajectory_registry
-from src.common.utils import retry_backoff, setup_file_logger, update_global_registry
+from src.common.utils import retry_backoff, setup_file_logger, update_global_registry, log_skipped_aircraft
 from src.core.fetching.helpers import (
     all_individual_files_exist,
     apply_flight_filters,
@@ -59,8 +60,14 @@ def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
         if 'flight_phase' not in df.columns:
             df['flight_phase'] = None
         return df
-    icao24 = str(df.get('icao24', pd.Series([None])).iloc[0]) if 'icao24' in df.columns else 'unknown'
-    typecode = str(df.get('typecode', pd.Series([None])).iloc[0]) if 'typecode' in df.columns else 'unknown'
+    icao24 = str(df.get('icao24', pd.Series([None])).iloc[0]) if 'icao24' in df.columns and not df.empty else 'UNK'
+    typecode = str(df.get('typecode', pd.Series([None])).iloc[0]) if 'typecode' in df.columns and not df.empty else None
+    if not is_supported_typecode(typecode):
+        log_skipped_aircraft(icao24, typecode, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in fetcher phase labeling")
+        if 'flight_phase' not in df.columns:
+            df['flight_phase'] = None
+        return df
+
     try:
         from openap.phase import FlightPhase
         from src.common.adapters import df_si_to_df_nautic
@@ -83,13 +90,7 @@ def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         logger.debug(f"OpenAP phase labeling failed for {icao24} ({typecode}): {e}")
         df['flight_phase'] = None
-        # Append to skipped aircraft audit log
-        try:
-            skipped_log = LOGS_DIR / "skipped_aircraft.log"
-            with open(skipped_log, 'a', encoding='utf-8') as f:
-                f.write(f"{icao24}\t{typecode}\t{e}\n")
-        except Exception:
-            pass
+        log_skipped_aircraft(icao24, typecode, f"ERROR_FLAG: Phase labeling failed: {e}")
     return df
 
 

@@ -17,8 +17,9 @@ from src.common.config import (
     MASTER_FLIGHTS_FILE,
     RAW_TRAJECTORY_DIRNAME,
     RAW_TRAJECTORY_SUFFIX,
+    is_supported_typecode,
 )
-from src.common.utils import to_project_relative, write_json_dataclass
+from src.common.utils import to_project_relative, write_json_dataclass, log_skipped_aircraft
 from src.core.fetching.models import FetchResult, FetchRunParams
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,12 @@ def apply_flight_filters(
             res = res[res['typecode'].str.upper() == str(typecode).upper()]
         else:
             logger.warning("Column 'typecode' not in DataFrame; skipping typecode filter.")
+    elif 'typecode' in res.columns:
+        supported_mask = res['typecode'].apply(is_supported_typecode)
+        if not supported_mask.all():
+            for _, bad_row in res[~supported_mask].iterrows():
+                log_skipped_aircraft(build_flight_id(bad_row) or str(bad_row.get('icao24', 'UNK')), bad_row.get('typecode'), "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in apply_flight_filters")
+            res = res[supported_mask]
 
     return res
 
@@ -176,6 +183,10 @@ def prepare_flight_records(df: pd.DataFrame, route_dir: Path) -> list[dict[str, 
     for _, row in df.iterrows():
         fid = build_flight_id(row)
         if not fid:
+            continue
+        tc = row.get('typecode', None)
+        if not is_supported_typecode(tc):
+            log_skipped_aircraft(fid, tc, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in prepare_flight_records")
             continue
         tb = parse_time_bounds(row.get('firstseen'), row.get('lastseen'))
         if not tb:

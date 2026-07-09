@@ -46,12 +46,12 @@ Module Objectives
       ├── Sub-objective 2: Trajectory Clustering & Medoid Selection (Stage 3)
       │    └── Solution: clustering_orchestrator.py + clustering_worker.py
       │         ├── Inputs: converged routes list, trajectory registry, maximum cluster size (CLUSTERING_MAX_K)
-      │         └── Outputs: Medoid parquet files saved to corridor_paths, updates global_model_registry.parquet
+      │         └── Outputs: Medoid parquet files saved to corridor_paths, updates global_model_registry.parquet and logs invalid/NaN medoid typecodes to skipped_aircraft.log
       │
       ├── Sub-objective 3: Consolidated Batch Trajectory Synthesis (Option A)
       │    └── Solution: corridor_orchestrator.py + path_generator.py
       │         ├── Inputs: route rank, target output directory, temporal grid resolution (grid-seconds)
-      │         └── Outputs: Synthesized reference parquets, updates global_model_registry.parquet
+      │         └── Outputs: Synthesized reference parquets, updates global_model_registry.parquet and logs unsupported cohort typecodes to skipped_aircraft.log
       │
       ├── Sub-objective 4: Unified Streaming Pipeline Execution (Option B)
       │    └── Solution: streaming_pipeline.py

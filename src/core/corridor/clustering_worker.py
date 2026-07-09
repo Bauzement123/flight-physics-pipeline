@@ -42,8 +42,11 @@ from src.common.config import (
     SILHOUETTE_THRESHOLD,
     CHAOS_VARIANCE_THRESHOLD,
     MIN_FLIGHTS_FOR_CLUSTERING,
+    UNSUPPORTED_TYPECODE_FLAG,
+    is_supported_typecode,
 )
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, pycontrails_to_parquet, traffic_to_pycontrails
+from src.common.utils import log_skipped_aircraft
 from src.core.corridor.pca_compressor import (
     classify_and_normalize_cohort,
     vectorize_cohort,
@@ -232,9 +235,16 @@ def _save_corridor(
     out_path = CORRIDOR_PATHS_DIR / f"{dep}-{arr}_corridor_c{cluster_id}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a minimal pycontrails Flight from the TrafficFlight data using the unified adapter
+    # Extract aircraft_type from the medoid TrafficFlight or validate
+    medoid_attrs = getattr(flight, 'attrs', {})
+    tc = medoid_attrs.get('aircraft_type', medoid_attrs.get('typecode', None))
+    if not is_supported_typecode(tc):
+        log_skipped_aircraft(corridor_flight_id, tc, "ERROR_FLAG: Medoid has missing, NaN, or non-target family typecode")
+        tc = UNSUPPORTED_TYPECODE_FLAG
+
     attrs = {
         "flight_id": corridor_flight_id,
+        "aircraft_type": tc,
         "icao24": "MEDOID",
         "callsign": "MEDOID",
         "route_class": route_class,
@@ -243,7 +253,7 @@ def _save_corridor(
     }
 
     try:
-        pyc_flight = traffic_to_pycontrails(flight, typecode="B738", drop_kinematics=True, **attrs)
+        pyc_flight = traffic_to_pycontrails(flight, typecode=tc, drop_kinematics=True, **attrs)
         resampled = pyc_flight.resample_and_fill(freq=f"{time_grid_seconds}s")
 
         # Timeline normalisation: shift start to 2025-01-01 00:00:00 UTC

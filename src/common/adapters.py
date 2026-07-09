@@ -8,11 +8,12 @@ import pandas as pd
 import logging
 from pathlib import Path
 from pycontrails import Flight
-from src.common.config import M_TO_FT, MPS_TO_KT, MPS_TO_FPM
+from src.common.config import M_TO_FT, MPS_TO_KT, MPS_TO_FPM, UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
+from src.common.utils import log_skipped_aircraft
 
 logger = logging.getLogger(__name__)
 
-def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str = "UNKNOWN") -> Flight:
+def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str | None = None) -> Flight | None:
     """
     Transforms a single cleaned flight DataFrame into a pycontrails Flight object.
     
@@ -36,9 +37,13 @@ def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str = "UNKNOWN")
     dep = df_flight['estdepartureairport'].iloc[0] if 'estdepartureairport' in df_flight.columns else None
     arr = df_flight['estarrivalairport'].iloc[0] if 'estarrivalairport' in df_flight.columns else None
 
-    # Resolve typecode if not passed or "UNKNOWN"
-    if typecode == "UNKNOWN" and 'typecode' in df_flight.columns:
-        typecode = df_flight['typecode'].iloc[0]
+    # Resolve typecode if not passed or not supported
+    if not is_supported_typecode(typecode):
+        if 'typecode' in df_flight.columns:
+            typecode = df_flight['typecode'].iloc[0]
+        if not is_supported_typecode(typecode):
+            log_skipped_aircraft(flight_id, typecode, "ERROR_FLAG: dataframe_to_pycontrails received NaN or unsupported typecode")
+            return None
 
     # 1. Map columns back to Pycontrails API
     rename_map = {
@@ -204,7 +209,10 @@ def parquet_to_pycontrails(path: str) -> dict:
         if group_df.empty or len(group_df) < 5:
             continue
             
-        typecode = group_df['typecode'].iloc[0] if 'typecode' in group_df.columns else 'B738'
+        typecode = group_df['typecode'].iloc[0] if 'typecode' in group_df.columns else None
+        if not is_supported_typecode(typecode):
+            log_skipped_aircraft(flight_id, typecode, "ERROR_FLAG: Parquet trajectory has NaN or unsupported typecode")
+            continue
         
         fl = dataframe_to_pycontrails(group_df, typecode=typecode)
         if fl is not None:
@@ -376,7 +384,7 @@ def pycontrails_to_parquet(flight: Flight, out_path: Path):
     """
     write_flights_to_parquet([flight], out_path)
 
-def traffic_to_pycontrails(flight_or_df, typecode: str = "B738", drop_kinematics: bool = False, **attrs) -> Flight:
+def traffic_to_pycontrails(flight_or_df, typecode: str | None = None, drop_kinematics: bool = False, **attrs) -> Flight:
     """
     Transforms a traffic.core.Flight object or standard aviation DataFrame 
     back into a pycontrails.Flight object, re-scaling standard aviation units 
@@ -414,6 +422,11 @@ def traffic_to_pycontrails(flight_or_df, typecode: str = "B738", drop_kinematics
     icao24 = flight_attrs.get('icao24', df_pc['icao24'].iloc[0] if 'icao24' in df_pc.columns else 'UNK')
     callsign = flight_attrs.get('callsign', df_pc['callsign'].iloc[0] if 'callsign' in df_pc.columns else 'UNK')
     
+    if not is_supported_typecode(typecode):
+        typecode = flight_attrs.get('aircraft_type', attrs.get('aircraft_type', None))
+    if not is_supported_typecode(typecode):
+        typecode = UNSUPPORTED_TYPECODE_FLAG
+
     final_attrs = {
         "flight_id": flight_id,
         "aircraft_type": typecode,

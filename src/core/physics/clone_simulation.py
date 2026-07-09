@@ -24,9 +24,10 @@ from src.common.config import (
     BASE_DIR, WEATHER_DIR, RESULTS_DIR, MASTER_FLIGHTS_FILE,
     GLOBAL_CORRIDOR_SIM_REGISTRY,
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
-    ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, WEATHER_BOUNDS_BBOX
+    ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, WEATHER_BOUNDS_BBOX,
+    UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
 )
-from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger
+from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger, log_skipped_aircraft
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel, create_simulation_models
 
@@ -36,7 +37,7 @@ def prepare_cloned_flight(
     flight_row: pd.Series,
     base_flight: Flight,
     flight_id: str
-) -> Flight:
+) -> Flight | None:
     """Clones the base flight path, shifts to match schedule, and maps metadata."""
     df_cloned = base_flight.to_dataframe().copy()
     
@@ -61,8 +62,9 @@ def prepare_cloned_flight(
     icao24 = flight_row['icao24']
     callsign = flight_row.get('callsign', 'UNK')
     typecode = flight_row.get('typecode')
-    if pd.isna(typecode) or not typecode:
-        typecode = "UNKNOWN"
+    if not is_supported_typecode(typecode):
+        log_skipped_aircraft(flight_id, typecode, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode")
+        return None
     
     attrs = {
         "flight_id": flight_id,
@@ -167,6 +169,8 @@ def simulate_single_flight(
 ) -> Flight:
     """Clones base flight, shifts times, and simulates. Maintained for backward compatibility."""
     fl_cloned = prepare_cloned_flight(flight_row, base_flight, flight_id)
+    if fl_cloned is None:
+        return None
     return simulate_cloned_flight(
         fl_cloned=fl_cloned,
         cache_dir=weather_cache_dir,
@@ -644,6 +648,10 @@ def run_batch_clone_simulation(
                         base_flight=base_flight,
                         flight_id=flight_id
                     )
+                    if fl_cloned is None:
+                        daily_failed += 1
+                        daily_trajectories += 1
+                        continue
                     flights_to_simulate.append(fl_cloned)
                     flight_to_meta_map[flight_id] = (row, out_file, cluster_id, route_key)
                     daily_trajectories += 1

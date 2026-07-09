@@ -4,8 +4,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
-from src.common.config import MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, ALL_TARGET_FAMILIES
-from src.common.utils import setup_file_logger
+from src.common.config import MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, ALL_TARGET_FAMILIES, is_supported_typecode
+from src.common.utils import setup_file_logger, log_skipped_aircraft
 
 def find_latest_file(directory: Path, pattern: str) -> Path:
     """
@@ -105,7 +105,11 @@ def main():
         typecode_filter = [t.strip().upper() for t in args.fleet_filter_typecodes.split(",") if t.strip()]
         if typecode_filter:
             initial_len = len(df_merged)
-            df_merged = df_merged[df_merged['typecode'].astype(str).str.strip().str.upper().isin(typecode_filter)].copy()
+            valid_mask = df_merged['typecode'].apply(is_supported_typecode)
+            if not valid_mask.all():
+                for _, bad_row in df_merged[~valid_mask].iterrows():
+                    log_skipped_aircraft(str(bad_row.get('icao24', 'UNK')), bad_row.get('typecode'), "ERROR_FLAG: Dropped flight in master_merger due to NaN or non-target family typecode")
+            df_merged = df_merged[valid_mask].copy()
             logging.info(f"Filtered by typecode: kept {len(df_merged):,} of {initial_len:,} flights matching typecodes.")
     
     # 7. Select & Order exactly the 16 columns matching master_flights.parquet
@@ -127,7 +131,13 @@ def main():
             df_merged[c] = None
             
     df_final = df_merged[desired_cols]
-    
+    if not args.skip_fleet_join:
+        valid_mask = df_final['typecode'].apply(is_supported_typecode)
+        if not valid_mask.all():
+            for _, bad_row in df_final[~valid_mask].iterrows():
+                log_skipped_aircraft(str(bad_row.get('icao24', 'UNK')), bad_row.get('typecode'), "ERROR_FLAG: Final safety check in master_merger dropped NaN or non-target typecode")
+            df_final = df_final[valid_mask].copy()
+
     logging.info(f"Merge completed. Output contains {len(df_final):,} flights.")
     
     # 8. Save Output

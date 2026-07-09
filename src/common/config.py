@@ -1,6 +1,7 @@
 """Centralized Flight Pipeline Configurations"""
 import os
 from pathlib import Path
+from typing import Any
 
 # Project root directory (resolved dynamically based on config.py location)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -79,6 +80,25 @@ B737_NG_FAMILY = ["B733", "B734", "B735", "B736", "B737", "B738", "B739"]
 B737_MAX_FAMILY = ["B37M", "B38M", "B39M"]
 
 ALL_TARGET_FAMILIES = A320_NEO_FAMILY + A320_CEO_FAMILY + B737_NG_FAMILY + B737_MAX_FAMILY
+
+# Sentinel indicating an explicitly missing, NaN, or unassigned/unsupported aircraft typecode
+UNSUPPORTED_TYPECODE_FLAG = "NaN_OR_UNSUPPORTED"
+
+
+def is_supported_typecode(typecode: Any) -> bool:
+    """
+    Validates whether a given aircraft typecode belongs strictly to ALL_TARGET_FAMILIES.
+    Returns False for None, NaN, empty strings, 'UNKNOWN', or any model outside the target families.
+    """
+    from typing import Any
+    import pandas as pd
+    if typecode is None or pd.isna(typecode):
+        return False
+    tc_str = str(typecode).strip().upper()
+    if not tc_str or tc_str in ("NAN", "NONE", "UNKNOWN", "UNK", UNSUPPORTED_TYPECODE_FLAG):
+        return False
+    return tc_str in ALL_TARGET_FAMILIES
+
 
 # Geographic filtering limits (Padded European Bounding Box)
 # Recomputed from custom airport extent (LLRM, LTCF, ENAS, LPAZ/LPPD) with 5.0 degree padding

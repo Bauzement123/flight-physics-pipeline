@@ -90,16 +90,24 @@ def _save_oracle_corridor(
     optimal_k: int,
     time_grid_seconds: int = 60,
 ) -> Path:
-    from src.common.config import CORRIDOR_PATHS_DIR
+    from src.common.config import CORRIDOR_PATHS_DIR, UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
     from src.common.adapters import traffic_to_pycontrails, pycontrails_to_parquet
+    from src.common.utils import log_skipped_aircraft
     from pycontrails import Flight
 
+    medoid_attrs = getattr(flight, 'attrs', {})
+    tc = medoid_attrs.get('aircraft_type', medoid_attrs.get('typecode', None))
     corridor_flight_id = f"oracle_{dep}-{arr}_corridor_c{cluster_id}"
+    if not is_supported_typecode(tc):
+        log_skipped_aircraft(corridor_flight_id, tc, "ERROR_FLAG: Oracle medoid has missing, NaN, or non-target family typecode")
+        tc = UNSUPPORTED_TYPECODE_FLAG
+
     out_path = CORRIDOR_PATHS_DIR / f"oracle_{dep}-{arr}_corridor_c{cluster_id}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     attrs = {
         "flight_id": corridor_flight_id,
+        "aircraft_type": tc,
         "icao24": "ORACLE",
         "callsign": "ORACLE",
         "route_class": route_class,
@@ -107,7 +115,7 @@ def _save_oracle_corridor(
         "optimal_k": optimal_k,
     }
 
-    pyc_flight = traffic_to_pycontrails(flight, typecode="B738", drop_kinematics=True, **attrs)
+    pyc_flight = traffic_to_pycontrails(flight, typecode=tc, drop_kinematics=True, **attrs)
     resampled = pyc_flight.resample_and_fill(freq=f"{time_grid_seconds}s")
 
     df_final = resampled.to_dataframe()

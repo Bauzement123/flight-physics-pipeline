@@ -248,3 +248,28 @@ To maximize engineering velocity while keeping token consumption economical, the
 ### 10.3 Standalone Rules & Copy-Pasteable Templates
 For full execution templates, copy-pasteable PowerShell blocks, and standalone guidelines on delegating to local open-source models via Claw Code (`gpt-oss-120b`), consult [.agents/rules/claw_delegation_rules.md](file:///G:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/.agents/rules/claw_delegation_rules.md).
 
+---
+
+## 11. Strict Aircraft Typecode Verification & Anti-Default Policy
+
+To preserve data integrity, aerodynamic validity, and simulation correctness across the entire pipeline, all modules must adhere to the **Strict Aircraft Typecode Verification & Anti-Default Policy**:
+
+### 11.1 Absolute Prohibition of Default Typecode Injections (Anti-Default Rule)
+* **Never inject, assign, or fall back to default or placeholder aircraft typecodes** (e.g., `typecode = typecode or 'B738'`, `typecode.fillna('UNKNOWN')`, `'unknown'`, `DEFAULT_B738`, or hardcoded family strings like `'A320'`) anywhere in the pipeline—whether during fetching (`Track A`), fleet building (`Track B`), ingestion (`adapters`), trajectory cleaning (`kalman_filter`), medoid clustering (`clustering_worker`), batch path synthesis (`path_generator`), or physical simulation (`engine` / `PSFlight`).
+* If an incoming flight record, airframe row, parquet trajectory, or medoid has a missing (`None`, `np.nan`), empty, or unassigned `typecode`, **do not guess or fill it in**.
+
+### 11.2 Mandatory Central Typecode Validation
+* All modules that inspect, filter, or ingest aircraft typecodes must import and call `is_supported_typecode(typecode)` from `src.common.config`.
+* `is_supported_typecode(typecode)` verifies that the typecode belongs strictly to `ALL_TARGET_FAMILIES` (`A320_NEO_FAMILY + A320_CEO_FAMILY + B737_NG_FAMILY + B737_MAX_FAMILY`). Any typecode outside these exact target families (`A19N`, `A20N`, `A21N`, `A318`, `A319`, `A320`, `A321`, `B733`, `B734`, `B735`, `B736`, `B737`, `B738`, `B739`, `B37M`, `B38M`, `B39M`) is considered unsupported and invalid.
+
+### 11.3 Mandatory Error Flagging & Logging to `skipped_aircraft.log`
+* When any pipeline stage encounters a record, flight, or medoid whose typecode is missing (`NaN`), `None`, empty, or unsupported (`not is_supported_typecode(typecode)`), the module **must** immediately drop/skip the record and log an error.
+* All skipped aircraft error logging **must** use the centralized helper function `log_skipped_aircraft(flight_or_icao_id, typecode, reason)` imported from `src.common.utils`.
+* The `reason` string passed to `log_skipped_aircraft()` **must** start with `ERROR_FLAG:` (for example: `"ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode"` or `"ERROR_FLAG: Parquet trajectory has NaN or unsupported typecode"`).
+* This ensures every skipped/dropped airframe or trajectory across every stage accumulates in `data/logs/skipped_aircraft.log` (`LOGS_DIR / "skipped_aircraft.log"`) as tab-separated audit entries (`ISO_UTC \t ID \t TYPECODE \t REASON`).
+
+### 11.4 Verification & Regression Testing Gate
+* Before committing changes to any core processing, ingestion, corridor, or simulation script, agents must verify that no fallback defaults exist (`grep -n "or 'B738'" src/...` must return nothing).
+* Run the developer verification suite `python -m src.devtools.verify_typecode_validation` to confirm that all modules correctly reject `NaN`/unsupported typecodes without assigning defaults and verify that `skipped_aircraft.log` receives exact `ERROR_FLAG:` entries.
+
+

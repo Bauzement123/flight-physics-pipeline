@@ -11,6 +11,8 @@ from pycontrails import Flight, MetDataset, Fleet
 from pycontrails.models.ps_model import PSFlight
 from pycontrails.models.cocip import Cocip
 from pycontrails.models.humidity_scaling import ConstantHumidityScaling
+from src.common.config import UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
+from src.common.utils import log_skipped_aircraft
 
 logger = logging.getLogger(__name__)
 
@@ -139,14 +141,16 @@ def simulate_flight_batch(
     
     for fl in flights:
         flight_id = fl.attrs.get('flight_id', 'UNK')
-        typecode = fl.attrs.get('aircraft_type', 'B738')
-        if not typecode or pd.isna(typecode) or typecode == "UNKNOWN":
-            logger.warning(f"Skipping flight {flight_id}: Missing or unknown aircraft typecode")
-            skipped_flights.append((flight_id, typecode))
+        typecode = fl.attrs.get('aircraft_type', None)
+        if not is_supported_typecode(typecode):
+            logger.warning(f"Skipping flight {flight_id}: Missing, NaN, or non-target family aircraft typecode '{typecode}'")
+            log_skipped_aircraft(flight_id, typecode, "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode")
+            skipped_flights.append((flight_id, typecode if typecode is not None else UNSUPPORTED_TYPECODE_FLAG))
             continue
             
         if typecode not in ps_supported_types:
             logger.warning(f"Skipping flight {flight_id}: Aircraft type {typecode} not supported by PSFlight")
+            log_skipped_aircraft(flight_id, typecode, f"ERROR_FLAG: Aircraft type {typecode} not supported by PSFlight")
             skipped_flights.append((flight_id, typecode))
             continue
             
@@ -180,7 +184,11 @@ def simulate_flight_batch(
                 simulated_flights.append(fl_sim)
             except Exception as inner_err:
                 logger.error(f"Failed to simulate flight {flight_id} sequentially: {inner_err}")
-                skipped_flights.append((flight_id, fl.attrs.get('aircraft_type', 'UNKNOWN')))
+                tc = fl.attrs.get('aircraft_type', None)
+                if not is_supported_typecode(tc):
+                    tc = UNSUPPORTED_TYPECODE_FLAG
+                skipped_flights.append((flight_id, tc))
+                log_skipped_aircraft(flight_id, tc, f"ERROR_FLAG: Sequential simulation failed: {inner_err}")
                 
         return simulated_flights, skipped_flights
 
@@ -238,6 +246,11 @@ def simulate_flights_parallel(
                 except Exception as e:
                     logger.error(f"Task raised exception for batch containing {len(batch)} flights: {e}")
                     for fl in batch:
-                        all_skipped.append((fl.attrs.get('flight_id', 'UNK'), fl.attrs.get('aircraft_type', 'UNKNOWN')))
+                        fid = fl.attrs.get('flight_id', 'UNK')
+                        tc = fl.attrs.get('aircraft_type', None)
+                        if not is_supported_typecode(tc):
+                            tc = UNSUPPORTED_TYPECODE_FLAG
+                        all_skipped.append((fid, tc))
+                        log_skipped_aircraft(fid, tc, f"ERROR_FLAG: Parallel task raised exception: {e}")
                         
     return all_simulated, all_skipped
