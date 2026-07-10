@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -51,8 +53,12 @@ def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
     logger.debug("  -> [After Loading/Sorting] col='%s', dtype=%s, min=%s, max=%s",
                  time_col, df_sorted[time_col].dtype, df_sorted[time_col].min(), df_sorted[time_col].max())
 
-    # 2. Check if already in nautical units vs SI units (OpenSky/Traffic names)
-    if "baroaltitude" in df_sorted.columns or "velocity" in df_sorted.columns or "vertrate" in df_sorted.columns:
+    # 2. Normalize to nautical/OpenAP units.
+    # Raw OpenSky SI columns: baroaltitude, velocity, vertrate
+    # Clean pycontrails SI columns: altitude, gs, rocd
+    # Existing traffic/aviation columns: altitude, groundspeed, vertical_rate
+    si_schema_markers = {"baroaltitude", "velocity", "vertrate", "gs", "rocd"}
+    if any(col in df_sorted.columns for col in si_schema_markers):
         df_nautic = df_si_to_df_nautic(df_sorted)
     else:
         df_nautic = df_sorted.copy()
@@ -109,20 +115,24 @@ def label_flight_phase(df: pd.DataFrame) -> pd.DataFrame:
 
     # 6. Assign directly to column array (avoiding .loc index alignment) and reset index
     df_sorted["flight_phase"] = labels
+    df_sorted["phase"] = labels
     return df_sorted.reset_index(drop=True)
 
 
 def write_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
-    """
-    Writes a DataFrame to Parquet atomically, safe for Windows / Google Drive FUSE environments.
-    Unlinks destination path first to prevent FUSE lock/permission errors.
-    """
-    if path.exists():
-        try:
-            path.unlink()
-        except Exception as e:
-            logger.warning("Could not unlink %s before writing: %s", path, e)
-    df.to_parquet(path, index=False)
+    """Writes a DataFrame to Parquet via temp file + os.replace()."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}.parquet")
+    try:
+        df.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def label_file(raw_file_path: Path, force: bool = False) -> bool:
@@ -148,6 +158,62 @@ def label_file(raw_file_path: Path, force: bool = False) -> bool:
     except Exception as e:
         logger.error("Failed to label file %s: %s", raw_file_path, e, exc_info=True)
         return False
+
+
+def label_files_from_manifest(manifest_path: Path, force: bool = False) -> pd.DataFrame:
+    """Relabels files listed in repacking_clean_move_manifest.tsv."""
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    df_manifest = pd.read_csv(manifest_path, sep="\t")
+    if "source_path" not in df_manifest.columns:
+        raise ValueError(f"Manifest must contain a source_path column: {manifest_path}")
+
+    records = []
+    for _, row in df_manifest.iterrows():
+        source_path = Path(str(row["source_path"]))
+        status = "OK"
+        reason = ""
+        n_rows = 0
+        had_phase_before = False
+        has_phase_after = False
+
+        try:
+            if not source_path.exists():
+                raise FileNotFoundError(f"Missing source file: {source_path}")
+
+            schema = pq.read_schema(source_path)
+            had_phase_before = "flight_phase" in schema.names or "phase" in schema.names
+
+            if had_phase_before and not force:
+                status = "SKIPPED"
+                reason = "already has phase labels"
+            else:
+                df = pd.read_parquet(source_path)
+                n_rows = len(df)
+                df_labeled = label_flight_phase(df)
+                has_phase_after = "flight_phase" in df_labeled.columns and df_labeled["flight_phase"].notna().any()
+                write_parquet_atomic(df_labeled, source_path)
+                reason = "labeled"
+
+        except Exception as exc:
+            status = "ERROR"
+            reason = str(exc)
+
+        records.append({
+            "source_path": str(source_path),
+            "target_path": row.get("target_path", ""),
+            "filename": row.get("filename", source_path.name),
+            "route": row.get("route", ""),
+            "status": status,
+            "reason": reason,
+            "n_rows": n_rows,
+            "had_phase_before": had_phase_before,
+            "has_phase_after": has_phase_after,
+        })
+
+    return pd.DataFrame(records)
 
 
 def label_corridor_files(corridor_dir: Path, force: bool = False) -> bool:
@@ -221,7 +287,42 @@ def main():
                         help="Glob pattern for corridor directories in TRAJECTORIES_DIR (default: 'rank_*')")
     parser.add_argument("--force", action="store_true",
                         help="Force re-labeling even if flight_phase column already exists")
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="Optional TSV move manifest. If provided, relabel only files listed in source_path.",
+    )
+    parser.add_argument(
+        "--report",
+        type=str,
+        default="data/temp/plans/repacking_phase_relabel_report.tsv",
+        help="Output TSV report for manifest-based relabeling.",
+    )
     args = parser.parse_args()
+
+    if args.manifest:
+        logger.info("Running manifest-based repacking phase relabeling.")
+        report_df = label_files_from_manifest(Path(args.manifest), force=args.force)
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_df.to_csv(report_path, sep="\t", index=False)
+
+        ok_count = int((report_df["status"] == "OK").sum())
+        skipped_count = int((report_df["status"] == "SKIPPED").sum())
+        error_count = int((report_df["status"] == "ERROR").sum())
+
+        logger.info(
+            "Manifest relabeling complete. OK=%d | SKIPPED=%d | ERROR=%d | report=%s",
+            ok_count,
+            skipped_count,
+            error_count,
+            report_path,
+        )
+
+        if error_count > 0:
+            sys.exit(1)
+        return
 
     corridors = sorted(TRAJECTORIES_DIR.glob(args.rank_pattern))
     if not corridors:
