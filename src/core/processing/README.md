@@ -3,7 +3,7 @@
 This module is **Step 2.1** of the Flight Physics Pipeline. It consumes raw, noisy ADS-B
 trajectories produced by the fetching stage, applies a **6-Dimensional Kinematic Extended
 Kalman Filter (EKF)** derived from the `traffic` library's mathematics, resamples every
-flight to a canonical equidistant time grid (`CORRIDOR_TIME_GRID_SECONDS = 60 s`), assigns
+flight to a uniform equidistant time grid (defaulting to `CORRIDOR_TIME_GRID_SECONDS = 60 s` but configurable via CLI/API), assigns
 OpenAP aerodynamic flight phases, and writes clean SI Parquet trajectories — optionally
 augmented with per-step EKF diagnostic tensors — to the `clean/` corridor subdirectory.
 It also exposes two **programmatic in-process entry points** (`clean_traffic_flight` and
@@ -39,7 +39,7 @@ src/core/processing/
 
 ```text
 Module Objective
- └── Apply 6D Kinematic EKF smoothing, resample to 60 s grid, assign aerodynamic phases,
+ └── Apply 6D Kinematic EKF smoothing, resample to uniform grid (default 60 s), assign aerodynamic phases,
      write clean SI Parquet trajectories, and optionally export diagnostic tensors.
       │
       ├── Sub-objective 1 — Typecode validation & early rejection
@@ -54,7 +54,7 @@ Module Objective
       │    ├── Input : traffic.core.Flight in aviation units (ft, kt, ft/min)
       │    ├── Solution : Flight.airborne() → drop < 10 points
       │    │   _prepare_grid_and_project():
-      │    │     • Build uniform DatetimeIndex at CORRIDOR_TIME_GRID_SECONDS spacing
+      │    │     • Build uniform DatetimeIndex at time_grid_seconds spacing (default CORRIDOR_TIME_GRID_SECONDS)
       │    │     • Merge raw + grid timestamps; deduplicate; sort
       │    │     • _fill_geodetic_gaps(): great-circle lat/lon interpolation (WGS84 Geod)
       │    │       for ADS-B gaps > GEODESIC_DISTANCE_THRESHOLD_M (100 000 m)
@@ -121,7 +121,7 @@ Module Objective
       │    │   → back-converts EKF state to aviation units (alt_ft, gs_kts, vr_fpm)
       │    │   to_lonlat.transform(x, y) → (longitude, latitude) in WGS84
       │    │   df_out sliced at grid_times → df_resampled
-      │    └── Output : df_resampled (exact 60 s grid points only)
+      │    └── Output : df_resampled (exact grid points only, default 60 s spacing)
       │
       ├── Sub-objective 9 — Flight phase assignment
       │    ├── Input : df_resampled in aviation units (altitude ft, groundspeed kts,
@@ -142,7 +142,7 @@ Module Objective
       │    └── Output : pycontrails.Flight object in SI units
       │
       └── Sub-objective 11 — Batch orchestration & registry update
-           ├── Input : raw *_raw.parquet files resolved via registry
+           ├── Input : raw *_raw.parquet files resolved via registry, time_grid_seconds
            ├── Solution : process_trajectories_by_route_ranks()
            │   get_flights_for_route() / extract_target_routes() → query registry for files
            │   _process_single_raw_file() per unique registered Parquet file
@@ -165,7 +165,7 @@ writing clean SI Parquet files and updating `GLOBAL_CLEAN_REGISTRY` in the main 
 
 ```mermaid
 flowchart TD
-    A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir\n--max-workers N"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
+    A["CLI: python -m src.core.processing.kalman_filter\n--ranks / --rank-range / --routes / --source-dir\n--max-workers N --time-grid T"] --> B["setup_file_logger('processing.log')\n→ data/logs/processing.log"]
     B --> C["process_trajectories_by_route_ranks()\nResolve targets via ranks/routes"]
     C --> D{"source_dir provided?"}
     D -->|Yes| E["Read *_raw.parquet files\nfrom source_dir → build task queue"]
@@ -190,7 +190,7 @@ flowchart TD
 7. **Pycontrails → traffic conversion**: `clean_pycontrails_flight()` first calls `is_supported_typecode()` again (its own Rule 11 guard), then delegates to `pycontrails_to_traffic()` to produce a `traffic.core.Flight` in aviation units (`ft`, `kt`, `ft/min`).
 8. **Airborne segmentation**: `Flight.airborne()` removes ground-level ADS-B pings. If fewer than 10 airborne points remain, the flight returns `(None, 0.0, 0.0, 0.0, None)` and is skipped.
 9. **Grid injection & LAEA projection** (`_prepare_grid_and_project()`):
-   - A uniform `DatetimeIndex` is built at `CORRIDOR_TIME_GRID_SECONDS = 60` s spacing, from `floor(t_min)` to `ceil(t_max)`.
+   - A uniform `DatetimeIndex` is built at `time_grid_seconds` spacing (defaulting to `CORRIDOR_TIME_GRID_SECONDS = 60` s), from `floor(t_min)` to `ceil(t_max)`.
    - Grid timestamps are concatenated with the raw flight rows, deduplicated, and sorted.
    - `_fill_geodetic_gaps()` walks consecutive raw-measurement pairs. For gaps exceeding `GEODESIC_DISTANCE_THRESHOLD_M = 100 000 m` (great-circle distance on WGS84 ellipsoid via `pyproj.Geod`), it interpolates intermediate grid-injected rows along a geodesic path using `Geod.npts()`.
    - All measurement columns (`latitude`, `longitude`, `altitude`, `groundspeed`, `track`, `vertical_rate`) are time-interpolated using `pandas.DataFrame.interpolate(method="time")`, followed by `ffill()`/`bfill()` for boundary rows.
@@ -203,7 +203,7 @@ flowchart TD
 13. **RTS backward smoother**: `rts_smoother(states_df, covariances, Q, timestamps, EKF.jacobian_state_transition, EKF.state_transition_function)` is called directly from the `traffic` library. No custom backward-pass math is implemented; this is a direct call to the upstream function.
 14. **Quality metrics** (`compute_ekf_quality_metrics()`): Iterates over non-zero `e_hist` rows. For each valid step, the Normalised Innovation Squared (NIS) `= e_i^T * S_i^{-1} * e_i` is accumulated (capped at `1e5`). Final metrics: `mean_NIS`, `max_trace_P`, `ekf_quality_score = clip(NIS_factor * trace_factor, 0, 1)` where `NIS_factor = 6 / max(6, mean_NIS)` and `trace_factor = exp(-max(0, max_trace_P - 60) / 500)`.
 15. **Diagnostic export** (optional, `--save-diagnostics`): `_save_diagnostics()` creates `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` using `np.savez_compressed()` with keys `timestamps (T,)`, `e_k (T,6)`, `S_k (T,6,6)`, `P_k (T,6,6)`, `metrics (3,)`. The relative path (vs `BASE_DIR`) is stored in the registry `diag_file_path` column. When `--save-diagnostics` is not set, `diag_file_path = None`.
-16. **Postprocessing & grid resampling**: `ProcessXYZZFilterBase.postprocess(smoothed_states)` converts the smoothed EKF state back to aviation units. `to_lonlat.transform(x, y)` reprojects LAEA Cartesian back to WGS84 `(longitude, latitude)`. The full merged DataFrame is then sliced to only the rows whose timestamps are in `grid_times` (`df_out[df_out["timestamp"].isin(grid_times)]`), yielding an exactly equidistant 60 s trajectory.
+16. **Postprocessing & grid resampling**: `ProcessXYZZFilterBase.postprocess(smoothed_states)` converts the smoothed EKF state back to aviation units. `to_lonlat.transform(x, y)` reprojects LAEA Cartesian back to WGS84 `(longitude, latitude)`. The full merged DataFrame is then sliced to only the rows whose timestamps are in `grid_times` (`df_out[df_out["timestamp"].isin(grid_times)]`), yielding an exactly equidistant trajectory of spacing `time_grid_seconds`.
 17. **Phase assignment & metadata**: `_finalize_resampled_flight()` re-injects original flight metadata (`icao24`, `callsign`, `typecode`, airport codes, `firstseen`/`lastseen`), sets `onground = False`, calls `assign_flight_phases()` (OpenAP primary, ROCD fallback), and converts to a `pycontrails.Flight` in SI units via `traffic_to_pycontrails()`.
 18. **Output write**: All successfully cleaned pycontrails flights from a single raw Parquet are collected and written together by `write_flights_to_parquet(pc_flights, out_path)` → `{out_dir}/*_clean_si.parquet`.
 19. **Registry update**: `update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)` appends all collected registry rows — `flight_id`, `file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`, `diag_file_path` — to `data/registries/global_clean_registry.parquet` using an atomic deduplication-aware write.
@@ -301,6 +301,9 @@ python -m src.core.processing.kalman_filter \
 
 # Process all corridors by rank, saving diagnostics for later EKF audit
 python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
+
+# Override the EKF time-grid resolution to 30 seconds for a specific route
+python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --overwrite --workers 1
 ```
 
 ### PowerShell
@@ -323,20 +326,24 @@ python -m src.core.processing.kalman_filter `
 
 # Process all corridors by rank range, saving diagnostics
 python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
+
+# Override the EKF time-grid resolution to 30 seconds for a specific route
+python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --overwrite --workers 1
 ```
 
 ### Parameter Reference
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--ranks` | `int` (list) | `None` | One or more specific corridor volume rank indices to process (e.g. `1 2 3`). Looked up in `master_flights_route_summary.parquet`. |
-| `--rank-range` | `int int` | `None` | Inclusive start–end rank range to process (e.g. `1 10`). Internally passed as `tuple(args.rank_range)`. |
-| `--routes` | `str` (list) | `None` | One or more explicit corridor strings to process (e.g. `EDDF-LIRF EGLL-BIKF`). |
-| `--source-dir` | `str` | `None` | Direct path to a directory of `*_raw.parquet` files. When provided, bypasses `extract_target_routes()` entirely. |
-| `--out-dir` | `str` | `None` | Custom output directory for `*_clean_si.parquet` files. Defaults to sibling `clean/` directory relative to `raw/` when `source_dir` resolves a standard corridor layout. |
-| `--save-diagnostics` | flag | `False` | When set, writes per-flight EKF tensors `S_k (T,6,6)`, `P_k (T,6,6)`, `e_k (T,6)`, and scalar `metrics (3,)` to `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` (compressed NumPy archive). |
-| `--overwrite` | flag | `False` | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
-| `--workers` / `--num-workers` / `--max-workers` | `int` | `None` | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` from `src.common.config` (currently `4`). If set to `1`, execution falls back to sequential loop. |
+| Option | Type | Default | Required | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `--ranks` | `int` (list) | `None` | No | One or more specific corridor volume rank indices to process (e.g. `1 2 3`). Looked up in `master_flights_route_summary.parquet`. |
+| `--rank-range` | `int int` | `None` | No | Inclusive start–end rank range to process (e.g. `1 10`). Internally passed as `tuple(args.rank_range)`. |
+| `--routes` | `str` (list) | `None` | No | One or more explicit corridor strings to process (e.g. `EDDF-LIRF EGLL-BIKF`). |
+| `--source-dir` | `str` | `None` | No | Direct path to a directory of `*_raw.parquet` files. When provided, bypasses `extract_target_routes()` entirely. |
+| `--out-dir` | `str` | `None` | No | Custom output directory for `*_clean_si.parquet` files. Defaults to sibling `clean/` directory relative to `raw/` when `source_dir` resolves a standard corridor layout. |
+| `--save-diagnostics` | flag | `False` | No | When set, writes per-flight EKF tensors `S_k (T,6,6)`, `P_k (T,6,6)`, `e_k (T,6)`, and scalar `metrics (3,)` to `{out_dir}/diagnostics/{flight_id}_ekf_diag.npz` (compressed NumPy archive). |
+| `--overwrite` | flag | `False` | No | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
+| `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` from `src.common.config` (currently `4`). If set to `1`, execution falls back to sequential loop. |
+| `--time-grid`, `--time-grid-seconds` | `int` | `CORRIDOR_TIME_GRID_SECONDS` / `60` | No | Uniform time grid spacing in seconds for EKF resampling. |
 
 ---
 
@@ -359,7 +366,7 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 | Constant | Value / Type | Usage |
 | :--- | :--- | :--- |
 | `BASE_DIR` | `pathlib.Path` | Workspace root; used to construct all absolute paths and compute registry-relative path strings |
-| `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Temporal resolution of the injected uniform time grid and the output clean Parquet trajectories |
+| `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Default temporal resolution of the injected uniform time grid when no CLI or programmatic override is specified |
 | `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file updated by `update_global_registry()` after each batch run |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 

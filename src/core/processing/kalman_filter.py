@@ -8,7 +8,7 @@ Processing pipeline per flight
 ------------------------------
   raw parquet  →  pycontrails.Flight  →  traffic.Flight
   → .airborne()                          (strip ground data)
-  → grid injection                       (uniform CORRIDOR_TIME_GRID_SECONDS grid)
+  → grid injection                       (uniform time_grid_seconds grid; default CORRIDOR_TIME_GRID_SECONDS)
   → geodetic gap filling                 (great-circle lat/lon for gaps >100 km)
   → time interpolation                   (scalar columns)
   → LAEA Cartesian projection            (pyproj: lat/lon → x, y in metres)
@@ -328,7 +328,7 @@ def _fallback_rocd_phases(df: pd.DataFrame) -> list[str]:
 
 def assign_flight_phases(df: pd.DataFrame, typecode: str) -> pd.DataFrame:
     """
-    Labels each 60-second grid waypoint with an OpenAP aerodynamic flight phase.
+    Labels each resampled grid waypoint with an OpenAP aerodynamic flight phase.
 
     Input df is expected to be in aviation units after ProcessXYZZFilterBase.postprocess():
       altitude      — feet
@@ -620,6 +620,7 @@ def _process_single_raw_file(
     save_diagnostics: bool,
     overwrite: bool,
     target_flight_ids: set[str] | None = None,
+    time_grid_seconds: int = CORRIDOR_TIME_GRID_SECONDS,
 ) -> list[dict[str, Any]]:
     """
     Loads one raw Parquet, cleans each flight via clean_pycontrails_flight, writes output.
@@ -657,7 +658,7 @@ def _process_single_raw_file(
         diag_path = (out_dir_path / "diagnostics" / f"{fid}_ekf_diag.npz") if save_diagnostics else None
         pc_out, q, nis, tr, diag_rel = clean_pycontrails_flight(
             pyc_flight, fid, t_code,
-            time_grid_seconds=CORRIDOR_TIME_GRID_SECONDS,
+            time_grid_seconds=time_grid_seconds,
             save_diagnostics=save_diagnostics,
             diag_out_path=diag_path,
         )
@@ -692,10 +693,14 @@ def process_trajectories_by_route_ranks(
     save_diagnostics: bool = False,
     overwrite: bool = False,
     max_workers: int | None = None,
+    time_grid_seconds: int = CORRIDOR_TIME_GRID_SECONDS,
 ) -> None:
     """Resolves target corridors by rank/route, processes all raw Parquet files (in parallel), updates registry."""
+    if time_grid_seconds <= 0:
+        raise ValueError("time_grid_seconds must be a positive integer number of seconds.")
+
     all_entries: list[dict[str, Any]] = []
-    tasks_to_run: list[tuple[Path, Path, bool, bool, set[str] | None]] = []
+    tasks_to_run: list[tuple[Path, Path, bool, bool, set[str] | None, int]] = []
 
     if source_dir is not None:
         s_dir = Path(source_dir)
@@ -705,7 +710,7 @@ def process_trajectories_by_route_ranks(
         o_dir = Path(out_dir) if out_dir else (s_dir.parent / "clean" if s_dir.name == "raw" else s_dir)
         o_dir.mkdir(parents=True, exist_ok=True)
         for rf in s_dir.glob("*_raw.parquet"):
-            tasks_to_run.append((rf, o_dir, save_diagnostics, overwrite, None))
+            tasks_to_run.append((rf, o_dir, save_diagnostics, overwrite, None, time_grid_seconds))
     else:
         from src.common.registry_utils import get_flights_for_route
 
@@ -761,7 +766,7 @@ def process_trajectories_by_route_ranks(
             else:
                 o_dir = raw_file.parent.parent / "clean" if raw_file.parent.name == "raw" else raw_file.parent
             o_dir.mkdir(parents=True, exist_ok=True)
-            tasks_to_run.append((raw_file, o_dir, save_diagnostics, overwrite, fids))
+            tasks_to_run.append((raw_file, o_dir, save_diagnostics, overwrite, fids, time_grid_seconds))
 
     if not tasks_to_run:
         logging.warning("No raw trajectory files to process.")
@@ -773,8 +778,8 @@ def process_trajectories_by_route_ranks(
         logging.info(f"Processing {len(tasks_to_run)} files sequentially (max_workers={effective_workers})...")
         # Allow multi-threaded BLAS inside the single process since we aren't oversubscribing
         limit_numeric_threads(min(8, os.cpu_count() or 1))
-        for rf, odir, sdiag, ow, tfids in tasks_to_run:
-            all_entries.extend(_process_single_raw_file(rf, odir, sdiag, ow, tfids))
+        for rf, odir, sdiag, ow, tfids, tg_sec in tasks_to_run:
+            all_entries.extend(_process_single_raw_file(rf, odir, sdiag, ow, tfids, time_grid_seconds=tg_sec))
     else:
         logging.info(f"Processing {len(tasks_to_run)} files across {effective_workers} parallel workers...")
         set_numeric_thread_env(PROCESSING_NUMERIC_THREADS_PER_WORKER)
@@ -785,8 +790,8 @@ def process_trajectories_by_route_ranks(
             initializer=_worker_init,
         ) as executor:
             futures = [
-                executor.submit(_process_single_raw_file, rf, odir, sdiag, ow, tfids)
-                for rf, odir, sdiag, ow, tfids in tasks_to_run
+                executor.submit(_process_single_raw_file, rf, odir, sdiag, ow, tfids, time_grid_seconds=tg_sec)
+                for rf, odir, sdiag, ow, tfids, tg_sec in tasks_to_run
             ]
             for fut in as_completed(futures):
                 try:
@@ -815,7 +820,21 @@ def main() -> None:
     parser.add_argument("--save-diagnostics", action="store_true", help="Save S_k, P_k, e_k tensors to .npz per flight.")
     parser.add_argument("--overwrite",        action="store_true", help="Re-process and overwrite existing clean files.")
     parser.add_argument("--workers", "--num-workers", "--max-workers", dest="max_workers", type=int, default=None, help="Maximum number of parallel worker processes to spawn.")
+    parser.add_argument(
+        "--time-grid",
+        "--time-grid-seconds",
+        dest="time_grid_seconds",
+        type=int,
+        default=CORRIDOR_TIME_GRID_SECONDS,
+        help=(
+            "Uniform time grid spacing in seconds for EKF resampling "
+            f"(default: {CORRIDOR_TIME_GRID_SECONDS}s)."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.time_grid_seconds <= 0:
+        parser.error("--time-grid must be a positive integer number of seconds.")
 
     rank_range_tuple = tuple(args.rank_range) if args.rank_range else None
     process_trajectories_by_route_ranks(
@@ -827,6 +846,7 @@ def main() -> None:
         save_diagnostics=args.save_diagnostics,
         overwrite=args.overwrite,
         max_workers=args.max_workers,
+        time_grid_seconds=args.time_grid_seconds,
     )
 
 
