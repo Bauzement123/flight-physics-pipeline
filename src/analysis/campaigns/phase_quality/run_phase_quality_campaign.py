@@ -54,8 +54,8 @@ def _worker_run_campaign_route(
     show_rejected: bool = False,
     clean_dir: Path | None = None,
     use_clean: bool = False,
-) -> str:
-    """Worker target to load trajectories and compile PDF report for a single route."""
+) -> tuple[str, dict]:
+    """Worker target to load trajectories, run post-filters, and compile PDF report for a route."""
     setup_file_logger("calibration.log")
     try:
         df_route = df_pool[df_pool["route_id"] == route_id].copy()
@@ -145,7 +145,82 @@ def _worker_run_campaign_route(
                     logger.debug(f"[{route_id}] Clean trajectory not found for {fid} (checked registry and sibling dirs)")
 
         if not trajectories:
-            return f"[{route_id}] FAILED: No trajectories loaded."
+            return f"[{route_id}] FAILED: No trajectories loaded.", {}
+            
+        # Run post-filters for flights that passed pre-filtering
+        df_eval_updated = df_eval.copy()
+        flight_updates = {}
+        df_route_eval = df_eval_updated[df_eval_updated["route_id"] == route_id]
+        
+        from src.analysis.campaigns.phase_quality.phase_quality_filters import (
+            apply_trajectory_postfilters,
+            get_airport_coords,
+            recompute_airport_distances,
+        )
+        from src.common.config import DEFAULT_POSTFILTER_THRESHOLDS, RECOMPUTE_AIRPORT_DISTANCES
+        
+        for idx, row in df_route_eval.iterrows():
+            fid = row["flight_id"]
+            status = row["status"]
+            
+            if status != "PASSED":
+                continue
+                
+            df_raw = trajectories.get(fid)
+            df_clean = trajectories_clean.get(fid) if trajectories_clean else None
+            
+            # If load_clean is True but clean trajectory is missing, reject it
+            if load_clean and df_clean is None:
+                df_eval_updated.loc[df_eval_updated["flight_id"] == fid, ["status", "fail_stage", "reject_reason"]] = [
+                    "REJECTED", "POSTFILTER", "MISSING_CLEAN_TRAJECTORY"
+                ]
+                flight_updates[fid] = {
+                    "status": "REJECTED",
+                    "fail_stage": "POSTFILTER",
+                    "reject_reason": "MISSING_CLEAN_TRAJECTORY"
+                }
+                continue
+                
+            if df_clean is None or df_raw is None or df_clean.empty or df_raw.empty:
+                continue
+                
+            try:
+                # Optionally recompute airport distances
+                if RECOMPUTE_AIRPORT_DISTANCES:
+                    dep_col = "estdepartureairport"
+                    arr_col = "estarrivalairport"
+                    if dep_col in df_clean.columns and arr_col in df_clean.columns:
+                        dep_icao = df_clean[dep_col].iloc[0]
+                        arr_icao = df_clean[arr_col].iloc[0]
+                        if not pd.isna(dep_icao) and not pd.isna(arr_icao):
+                            coords = get_airport_coords(dep_icao, arr_icao)
+                            df_clean = recompute_airport_distances(df_clean, coords)
+                            trajectories_clean[fid] = df_clean
+                            
+                # Run the post-filters
+                rejected, reason, metrics = apply_trajectory_postfilters(
+                    df_clean, df_raw, DEFAULT_POSTFILTER_THRESHOLDS
+                )
+                
+                if rejected:
+                    df_eval_updated.loc[df_eval_updated["flight_id"] == fid, ["status", "fail_stage", "reject_reason"]] = [
+                        "REJECTED", "POSTFILTER", reason
+                    ]
+                    flight_updates[fid] = {
+                        "status": "REJECTED",
+                        "fail_stage": "POSTFILTER",
+                        "reject_reason": reason
+                    }
+                    
+            except Exception as e:
+                logger.error(f"[{route_id}] Exception running post-filter for flight {fid}: {e}", exc_info=True)
+                
+        n_postfilter_rejected = len(flight_updates)
+        n_postfilter_passed = sum(1 for _, row in df_route_eval.iterrows() if row["status"] == "PASSED") - n_postfilter_rejected
+        logger.info(
+            f"[{route_id}] Post-filter results: {n_postfilter_passed} PASSED, {n_postfilter_rejected} REJECTED "
+            f"(reasons: {', '.join(set(v['reject_reason'] for v in flight_updates.values())) or 'none'})"
+        )
             
         out_pdf = out_dir / f"{route_id}_audit_report.pdf"
         compile_route_audit_pdf(
@@ -153,15 +228,15 @@ def _worker_run_campaign_route(
             cohort_map_df=df_map,
             trajectories=trajectories,
             out_pdf_path=out_pdf,
-            eval_df=df_eval,
+            eval_df=df_eval_updated,
             show_rejected=show_rejected,
             plot_format=plot_format,
             trajectories_clean=trajectories_clean if (trajectories_clean and len(trajectories_clean) > 0) else None,
         )
-        return f"[{route_id}] Successfully generated {out_pdf.name}"
+        return f"[{route_id}] Successfully generated {out_pdf.name}", flight_updates
     except Exception as e:
         logger.error(f"[{route_id}] Error in worker: {e}", exc_info=True)
-        return f"[{route_id}] ERROR: {e}"
+        return f"[{route_id}] ERROR: {e}", {}
 
 
 def parse_args():
@@ -251,6 +326,8 @@ def main():
     clean_dir = Path(args.clean_dir) if args.clean_dir else None
     logger.info(f"Compiling PDF reports for {len(target_routes)} routes using {args.workers} workers (clean_dir={clean_dir}, use_clean={args.use_clean})...")
     
+    all_flight_updates = {}
+    
     if args.workers > 1 and len(target_routes) > 1:
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx, initializer=_worker_init) as executor:
@@ -270,11 +347,12 @@ def main():
                 for route in target_routes
             }
             for future in as_completed(futures):
-                res = future.result()
-                logger.info(res)
+                msg, flight_updates = future.result()
+                logger.info(msg)
+                all_flight_updates.update(flight_updates)
     else:
         for route in target_routes:
-            res = _worker_run_campaign_route(
+            msg, flight_updates = _worker_run_campaign_route(
                 route,
                 df_pool,
                 df_map,
@@ -285,7 +363,18 @@ def main():
                 clean_dir,
                 args.use_clean,
             )
-            logger.info(res)
+            logger.info(msg)
+            all_flight_updates.update(flight_updates)
+            
+    # Merge updates and rewrite final filter evaluation
+    if all_flight_updates:
+        logger.info(f"Applying post-filtering rejections to {len(all_flight_updates)} flights...")
+        for fid, updates in all_flight_updates.items():
+            df_eval.loc[df_eval["flight_id"] == fid, ["status", "fail_stage", "reject_reason"]] = [
+                updates["status"], updates["fail_stage"], updates["reject_reason"]
+            ]
+        df_eval.to_csv(eval_csv_path, index=False)
+        logger.info(f"Updated final evaluation table ({len(df_eval)} flights) saved to {eval_csv_path}")
             
     logger.info("=== Phase Quality Campaign Completed Successfully ===")
 

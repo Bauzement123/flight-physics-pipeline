@@ -192,13 +192,18 @@ def plot_cohort_audit_page(
     trajectories_clean: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[plt.Figure, dict[str, int]]:
     """
-    Renders a cohort audit page. If trajectories_clean is provided, renders 4 plots
-    in a 2x2 grid (Top: Raw, Bottom: Clean). Otherwise renders 2 plots in a 1x2 grid.
+    Renders a cohort audit page. If trajectories_clean is provided, renders 6 subplots
+    in a 3x2 grid:
+      - Row 1: Raw + Prefilter (Map left, Profile right)
+      - Row 2: Those But Clean (Map left, Profile right, ignoring post-filter rejections)
+      - Row 3: Clean + Postfilter (Map left, Profile right, full rejections)
+    Otherwise, renders 2 subplots in a 1x2 grid (Map left, Profile right).
     """
-    is_four_plot = trajectories_clean is not None
-    fig = plt.figure(figsize=(13, 10.2 if is_four_plot else 5.2))
-    ax1 = fig.add_subplot(2 if is_four_plot else 1, 2, 1, projection=ccrs.PlateCarree())
-    ax2 = fig.add_subplot(2 if is_four_plot else 1, 2, 2)
+    is_three_row = trajectories_clean is not None
+    fig = plt.figure(figsize=(13, 15.2 if is_three_row else 5.2))
+    
+    ax1 = fig.add_subplot(3 if is_three_row else 1, 2, 1, projection=ccrs.PlateCarree())
+    ax2 = fig.add_subplot(3 if is_three_row else 1, 2, 2)
 
     if plot_format.upper() == "PNG":
         ax1.set_rasterization_zorder(10)
@@ -207,16 +212,50 @@ def plot_cohort_audit_page(
     map_cache = EuropeanMapCache().initialize()
     map_cache.add_features_to_axes(ax1)
 
-    stats = _render_trajectory_pair_on_axes(ax1, ax2, candidate_flight_ids, trajectories, eval_records, show_rejected, map_cache, route_id, crop_padding, label_prefix="Raw" if is_four_plot else "")
+    # Row 1: Raw + Prefilter (uses full eval_records)
+    stats = _render_trajectory_pair_on_axes(
+        ax1, ax2, candidate_flight_ids, trajectories, eval_records, 
+        show_rejected, map_cache, route_id, crop_padding, 
+        label_prefix="Raw + Prefilter" if is_three_row else ""
+    )
 
-    if is_four_plot:
-        ax3 = fig.add_subplot(2, 2, 3, projection=ccrs.PlateCarree())
-        ax4 = fig.add_subplot(2, 2, 4)
+    if is_three_row:
+        # Row 2: Those But Clean (uses eval_records ignoring POSTFILTER rejections)
+        eval_records_pre = None
+        if eval_records:
+            eval_records_pre = {}
+            for fid, rec in eval_records.items():
+                if rec.get("fail_stage") == "POSTFILTER":
+                    eval_records_pre[fid] = {
+                        "status": "PASSED",
+                        "fail_stage": "NONE",
+                        "reject_reason": "PASSED"
+                    }
+                else:
+                    eval_records_pre[fid] = rec
+                    
+        ax3 = fig.add_subplot(3, 2, 3, projection=ccrs.PlateCarree())
+        ax4 = fig.add_subplot(3, 2, 4)
         if plot_format.upper() == "PNG":
             ax3.set_rasterization_zorder(10)
             ax4.set_rasterization_zorder(10)
         map_cache.add_features_to_axes(ax3)
-        _render_trajectory_pair_on_axes(ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records, show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean")
+        _render_trajectory_pair_on_axes(
+            ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records_pre, 
+            show_rejected, map_cache, route_id, crop_padding, label_prefix="Those But Clean"
+        )
+        
+        # Row 3: Clean + Postfilter (uses full eval_records)
+        ax5 = fig.add_subplot(3, 2, 5, projection=ccrs.PlateCarree())
+        ax6 = fig.add_subplot(3, 2, 6)
+        if plot_format.upper() == "PNG":
+            ax5.set_rasterization_zorder(10)
+            ax6.set_rasterization_zorder(10)
+        map_cache.add_features_to_axes(ax5)
+        _render_trajectory_pair_on_axes(
+            ax5, ax6, candidate_flight_ids, trajectories_clean, eval_records, 
+            show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean + Postfilter"
+        )
 
     na_pct = (stats["na_points"] / stats["total_points"] * 100.0) if stats["total_points"] > 0 else 0.0
     summary_str = f"Route: {route_id} | Cohort {cohort_idx} ({len(candidate_flight_ids)} Candidates)\n"

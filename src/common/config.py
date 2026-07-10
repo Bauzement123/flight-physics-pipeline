@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass
 
 # Project root directory (resolved dynamically based on config.py location)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -33,6 +34,7 @@ GLOBAL_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
 GLOBAL_CORRIDOR_SIM_REGISTRY = REGISTRIES_DIR / "global_corridor_simulation_registry.parquet"
 GLOBAL_STABILITY_REGISTRY = REGISTRIES_DIR / "global_stability_registry.parquet"
 GLOBAL_FLIGHT_CLUSTER_MAP = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
+GLOBAL_EKF_DIAG_REGISTRY = REGISTRIES_DIR / "global_ekf_diag_registry.parquet"
 CALIBRATION_FLIGHT_CLUSTER_MAP = DATA_DIR / "calibration" / "calibration_flight_cluster_map.parquet"
 CALIBRATION_PLOT_REGISTRY = REGISTRIES_DIR / "calibration_plot_registry.parquet"
 CALIBRATION_PLOTS_DIR = DATA_DIR / "calibration" / "plots"
@@ -198,14 +200,23 @@ CORRIDOR_SIMULATIONS_DIR = RESULTS_DIR / "corridor_simulations"
 # Default metadata pre-filter thresholds (None = check is ignored/pass-through unless overridden via CLI)
 DEFAULT_PREFILTER_THRESHOLDS = {
     "max_dep_horiz_dist": None,          # meters
-    "max_dep_vert_dist": None,           # meters
+    "max_dep_vert_dist": 1000,           # meters
     "max_arr_horiz_dist": None,          # meters
-    "max_arr_vert_dist": None,           # meters
+    "max_arr_vert_dist": 1000,           # meters
     "max_dep_candidates": None,          # count
     "max_arr_candidates": None,          # count
-    "max_duration_pct_above_median": None, # % above route median
-    "min_duration_pct_below_median": None, # % below route median
+    "max_duration_pct_above_median": 20, # % above route median
+    "min_duration_pct_below_median": 20, # % below route median
 }
+
+# Default post-filter thresholds
+DEFAULT_POSTFILTER_THRESHOLDS = {
+    "max_velocity_kt": 650.0,            # max 3D velocity (knots)
+    "max_acceleration_mps2": 340.29,     # max 3D acceleration (m/s^2), corresponds to Mach 1
+}
+
+# Flag to force a re-computation of airport distance metrics before filtering
+RECOMPUTE_AIRPORT_DISTANCES = True
 
 # Physical unit conversion factors
 M_TO_FT = 3.280839895
@@ -239,3 +250,13 @@ def init_runtime() -> None:
         directory.mkdir(parents=True, exist_ok=True)
     for env_var in ["TEMP", "TMP", "TMPDIR"]:
         os.environ[env_var] = str(TEMP_DIR)
+
+
+@dataclass(frozen=True)
+class PhaseControl:
+    ENABLE_NIS          : bool = True
+    ENABLE_RESIDUALS    : bool = True
+    ENABLE_CONDITION    : bool = True
+    ENABLE_REPORTING    : bool = True   # PDF/PNG generation
+    ENABLE_TENSOR_SAVE  : bool = True   # Save .npz per route
+    ENABLE_FLAT_TABLE   : bool = True   # Write flat parquet & CSV
