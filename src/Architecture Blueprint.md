@@ -143,6 +143,20 @@ All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `l
 * `calibration.log`: Phase quality and variational calibration campaigns.
 * `skipped_aircraft.log`: Global append-only log recording skipped airframes across all pipeline stages.
 
+### 3.6 Concurrency & Thread-Limiting Policy
+
+To maximize pipeline performance and prevent CPU oversubscription (thrashing) when executing parallel tasks, the pipeline strictly separates process-level task concurrency from low-level thread-level parallelism:
+
+* **Multi-Process Concurrency (CPU-Bound)**: Employs `ProcessPoolExecutor` or `multiprocessing.Pool` initialized with a `spawn` start context. Child workers initialize their own logging handlers and restrict underlying C-libraries (OpenBLAS, MKL, NumExpr, BLIS) to exactly **1 thread** using `limit_numeric_threads(1)` from `src.common.concurrency`.
+* **Multi-Threaded Concurrency (I/O-Bound / Shared Memory)**: Employs `ThreadPoolExecutor` for workflows requiring zero-copy access to large shared-memory datasets (e.g., Copernicus ERA5 NetCDF grid objects in physics simulations) or running GIL-releasing C-routines.
+
+| Pipeline Stage / Module | Concurrency Engine | Memory / Resource Behavior | Numeric Thread Limit | Strategy Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **EKF Cleaning (`kalman_filter.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker; processes individual flight files. | `limit_numeric_threads(1)` | Prevents CPU oversubscription across \(N\) parallel workers; small per-flight data arrays do not benefit from C-library thread scaling. |
+| **Corridor Medoid / Clustering** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker; processes route clusters independently. | `limit_numeric_threads(1)` | Maximizes multi-core throughput when hundreds of routes are processed concurrently. |
+| **Weather I/O & Preloading** | `ThreadPoolExecutor` | Shared RAM; concurrent disk reads and NetCDF parsing. | OS / C-library default | NetCDF/HDF5 compression routines release the GIL during file I/O, allowing fast parallel loading. |
+| **Flight Simulation (`engine.py` / `clone_simulation.py`)** | `ThreadPoolExecutor` | **Zero-Copy Shared Memory**; threads read from the same `met` & `rad` weather grids in RAM. | `1` per thread | Avoids massive RAM duplication of multi-gigabyte weather data; underlying physics routines release the GIL for safe multi-threaded execution. |
+
 ---
 
 ## 4. Module Specifications & FAST Mapping

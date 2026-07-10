@@ -10,6 +10,7 @@ The `common` module provides shared configurations, database and object adapters
 src/common/
 ├── README.md                     # This documentation file
 ├── config.py                     # Centralized settings, path definitions, and weather parameters
+├── concurrency.py                # CPU-level and C-library thread-limiting utilities
 ├── adapters.py                   # Data serialization and conversion between Pandas, PyContrails, and Traffic
 ├── build_global_manifest.py      # Rebuilds and updates registries for raw, clean, and simulated flight files
 └── utils.py                      # Centralized helper utilities (file loggers, dataset name generators)
@@ -23,10 +24,13 @@ src/common/
 Module Objectives
  └── Standardize configuration, data models, logging, and registries across the pipeline
       │
-      ├── Sub-objective 1: Centralize path resolution and environmental constants
-      │    └── Solution: config.py
-      │         ├── Inputs: Environmental variables, relative directory lookups
-      │         └── Outputs: Base directories, weather variables, and grid definitions
+      ├── Sub-objective 1: Centralize path resolution, environmental constants, and concurrency limits
+      │    ├── Solution A: config.py
+      │    │    ├── Inputs: Environmental variables, relative directory lookups
+      │    │    └── Outputs: Base directories, weather variables, grid definitions, and concurrency limits
+      │    └── Solution B: concurrency.py
+      │         ├── limit_numeric_threads(): Sets CPU/C-library thread bounds via environment variables and threadpoolctl
+      │         └── set_numeric_thread_env(): Directly restricts BLAS/OpenMP/NumExpr C-library thread counts
       │
       ├── Sub-objective 2: Convert trajectories between third-party library objects and handle Parquet I/O
       │    └── Solution: adapters.py
