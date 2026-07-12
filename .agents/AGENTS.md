@@ -204,6 +204,7 @@ For each module, systematically inspect:
 ## 8. Git, Workspace Hygiene & Scratch Policy
 
 * **Artifact Isolation**: Never commit generated files, recovered chat histories, local scratch folders, or OS artifacts (`.DS_Store`, `Thumbs.db`, `desktop.ini`).
+* **Root Directory Pollution**: Absolutely **no new files** should be placed at the project root. Temporary, test, or experimental scripts must be placed in appropriate directories (`scratch/`, `src/scratchpad/`, `data/temp/`, or `src/devtools/`).
 * **Broken Ref Hygiene**: If `git log --all` fails due to corrupted `.git/refs/**/desktop.ini` files, clean only those invalid ref files before executing historical git audits.
 * **Directory Policy**:
   ```text
