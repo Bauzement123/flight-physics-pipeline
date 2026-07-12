@@ -246,7 +246,7 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker processes for PDF compilation")
     parser.add_argument("--format", type=str, choices=["SVG", "PNG"], default="SVG", help="Plot rendering format (default: SVG)")
     parser.add_argument("--out-dir", type=str, default=None, help="Custom output directory for evaluation results and PDFs")
-    parser.add_argument("--show-rejected", action="store_true", help="Plot rejected trajectories on audit pages (default: hidden)")
+    parser.add_argument("--show-rejected", type=bool, default=True, help="Plot rejected trajectories on audit pages (default: hidden)")
     parser.add_argument("--clean-dir", type=str, default=None, help="Directory containing cleaned/post-processed trajectory parquet files for 4-plot comparison")
     parser.add_argument("--use-clean", action="store_true", help="Automatically resolve and load clean trajectories from normal directories and GLOBAL_CLEAN_REGISTRY for 4-plot comparison")
     

@@ -41,9 +41,10 @@ PHASE_COLORS = {
     5: "#9467bd",
 }
 DEFAULT_COLOR = "#bcbd22"  # Olive / Yellow-Green for NA or unknown phase
+REJECTED_COLOR = "#ff0000" # Red for rejected trajectories
 
 # Hardcoded DPI for PDF rasterization and rendering
-DEFAULT_DPI = 150
+DEFAULT_DPI = 300
 
 
 def _get_phase_color(val: Any) -> str:
@@ -137,8 +138,8 @@ def _render_trajectory_pair_on_axes(
         min_alt, max_alt = min(min_alt, np.nanmin(alts)), max(max_alt, np.nanmax(alts))
 
         if status == "REJECTED" and show_rejected:
-            ax_map.plot(lons, lats, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
-            ax_prof.plot(t_norm, alts, color="#a0a0a0", linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
+            ax_map.plot(lons, lats, color=REJECTED_COLOR, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
+            ax_prof.plot(t_norm, alts, color=REJECTED_COLOR, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
         else:
             stats["plotted"] += 1
             pts_xy = np.array([lons, lats]).T.reshape(-1, 1, 2)
@@ -186,7 +187,7 @@ def plot_cohort_audit_page(
     candidate_flight_ids: list[str],
     trajectories: dict[str, pd.DataFrame],
     eval_records: dict[str, dict] | None = None,
-    show_rejected: bool = False,
+    show_rejected: bool = True,
     crop_padding: float = 1.5,
     plot_format: str = "SVG",
     trajectories_clean: dict[str, pd.DataFrame] | None = None,
@@ -201,7 +202,26 @@ def plot_cohort_audit_page(
     """
     is_three_row = trajectories_clean is not None
     fig = plt.figure(figsize=(13, 15.2 if is_three_row else 5.2))
-    
+
+    map_cache = EuropeanMapCache().initialize()
+
+    # generate prefilter mask
+    eval_records_pre = eval_records
+    if is_three_row and eval_records:
+        eval_records_pre = {}
+        for fid, rec in eval_records.items():
+            if rec.get("fail_stage") == "POSTFILTER":
+                # Note: Using **rec safely preserves other keys while overwriting the status
+                eval_records_pre[fid] = {
+                    **rec,
+                    "status": "PASSED",
+                    "fail_stage": "NONE",
+                    "reject_reason": "PASSED"
+                }
+            else:
+                eval_records_pre[fid] = rec
+
+    # Row 1: Raw + Prefilter (uses full eval_records)
     ax1 = fig.add_subplot(3 if is_three_row else 1, 2, 1, projection=ccrs.PlateCarree())
     ax2 = fig.add_subplot(3 if is_three_row else 1, 2, 2)
 
@@ -209,51 +229,50 @@ def plot_cohort_audit_page(
         ax1.set_rasterization_zorder(10)
         ax2.set_rasterization_zorder(10)
 
-    map_cache = EuropeanMapCache().initialize()
     map_cache.add_features_to_axes(ax1)
 
-    # Row 1: Raw + Prefilter (uses full eval_records)
     stats = _render_trajectory_pair_on_axes(
-        ax1, ax2, candidate_flight_ids, trajectories, eval_records, 
-        show_rejected, map_cache, route_id, crop_padding, 
+        ax1, ax2, candidate_flight_ids, trajectories, eval_records,
+        show_rejected, map_cache, route_id, crop_padding,
         label_prefix="Raw + Prefilter" if is_three_row else ""
     )
 
+    #If there are clean trajectories, render the additional rows
     if is_three_row:
         # Row 2: Those But Clean (uses eval_records ignoring POSTFILTER rejections)
-        eval_records_pre = None
-        if eval_records:
-            eval_records_pre = {}
-            for fid, rec in eval_records.items():
-                if rec.get("fail_stage") == "POSTFILTER":
-                    eval_records_pre[fid] = {
-                        "status": "PASSED",
-                        "fail_stage": "NONE",
-                        "reject_reason": "PASSED"
-                    }
-                else:
-                    eval_records_pre[fid] = rec
-                    
         ax3 = fig.add_subplot(3, 2, 3, projection=ccrs.PlateCarree())
         ax4 = fig.add_subplot(3, 2, 4)
+
         if plot_format.upper() == "PNG":
             ax3.set_rasterization_zorder(10)
             ax4.set_rasterization_zorder(10)
+
         map_cache.add_features_to_axes(ax3)
+
+        # When show_rejected is enabled, backfill any prefilter-rejected flight IDs
+        # that are absent from trajectories_clean with their raw DataFrame so the
+        # renderer can draw them as red dashed lines in Row 2.
+        if show_rejected:
+            for fid, df in trajectories.items():
+                trajectories_clean.setdefault(fid, df)
+
         _render_trajectory_pair_on_axes(
-            ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records_pre, 
+            ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records_pre,
             show_rejected, map_cache, route_id, crop_padding, label_prefix="Those But Clean"
         )
-        
+
         # Row 3: Clean + Postfilter (uses full eval_records)
         ax5 = fig.add_subplot(3, 2, 5, projection=ccrs.PlateCarree())
         ax6 = fig.add_subplot(3, 2, 6)
+
         if plot_format.upper() == "PNG":
             ax5.set_rasterization_zorder(10)
             ax6.set_rasterization_zorder(10)
+
         map_cache.add_features_to_axes(ax5)
+
         _render_trajectory_pair_on_axes(
-            ax5, ax6, candidate_flight_ids, trajectories_clean, eval_records, 
+            ax5, ax6, candidate_flight_ids, trajectories_clean, eval_records,
             show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean + Postfilter"
         )
 
@@ -271,6 +290,18 @@ def plot_cohort_audit_page(
         mlines.Line2D([], [], color=PHASE_COLORS["LVL"], label="LVL (Level)", linewidth=2),
         mlines.Line2D([], [], color=DEFAULT_COLOR, label="NA / Unlabeled", linewidth=2),
     ]
+
+    if show_rejected:
+        rejected_handle = mlines.Line2D(
+            [], [],
+            color=REJECTED_COLOR,
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.4,
+            label="REJECTED (prefilter/postfilter)",
+        )
+        legend_handles.append(rejected_handle)
+
     ax2.legend(handles=legend_handles, loc="upper right", fontsize=7.5, framealpha=0.85)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     return fig, stats

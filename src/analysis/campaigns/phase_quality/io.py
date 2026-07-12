@@ -79,9 +79,11 @@ def generate_route_report(
 ) -> None:
     """Generates the 4-page Route Autopsy PDF report and high-res PNG plots.
 
-    # TODO: fix plotting bug - currently only flights passing all filters are plotted;
-    # include filtered-out flights in future revision to allow visual comparison of
-    # rejected vs. accepted flight EKF characteristics within the same corridor PDF.
+    Note: The EKF autopsy report is built from flights that have been successfully
+    processed through the autopsy pipeline (i.e., those with valid diagnostic NPZ
+    archives). The companion plotting bug where prefilter-rejected flights were absent
+    from Row 2 of the 3-row audit PDF was resolved in phase_quality_plots.py via
+    backfilling trajectories_clean with raw DataFrames when show_rejected=True.
     """
     logger.info(f"[{route_id}] Loading tensor arrays for plotting and executive summary...")
     

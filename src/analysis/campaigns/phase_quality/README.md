@@ -137,7 +137,7 @@ flowchart TD
    - **Step 2 — Acceleration**: `filter_max_acceleration()` rejects if max step-to-step 3D acceleration exceeds `max_acceleration_mps2` (≈ Mach 1).
    - **Step 3 — Distance prefilters**: `passes_distance_prefilters()` checks re-computed waypoint-to-airport distances. The chain stops at the first rejection.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
-11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**: Row 1 (Raw + Prefilter), Row 2 (Those But Clean — ignoring POSTFILTER rejections), Row 3 (Clean + Postfilter — full combined rejection view).
+11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**: Row 1 (Raw + Prefilter), Row 2 (Those But Clean — ignoring POSTFILTER rejections), Row 3 (Clean + Postfilter — full combined rejection view). When `show_rejected=True` (the default), any prefilter-rejected flight whose clean trajectory is absent from the registry is backfilled with its raw DataFrame so it is still rendered as a **red dashed line** (`REJECTED_COLOR = "#ff0000"`) in Row 2. A matching red-dashed entry is appended to the figure legend automatically.
 12. Each worker returns a `flight_updates` dict mapping `flight_id → {status, fail_stage, reject_reason}` for all POSTFILTER rejections back to the main process.
 13. The main process merges all worker updates into the global `df_eval`, overwrites `filter_evaluation.csv` with the final post-filtered statuses, and logs the total count of POSTFILTER rejections applied.
 
@@ -177,7 +177,7 @@ flowchart TD
 ---
 
 ### 3.4 Optimization & Memory Modes
-- **Rasterized PNG Mode**: When `--format PNG` is selected in Script 2, trajectory lines are rasterized at 150 DPI while text and axes remain vector graphics. This prevents severe PDF rendering lag on standard laptops when viewing 2,400 dense flight paths.
+- **Rasterized PNG Mode**: When `--format PNG` is selected in Script 2, trajectory lines are rasterized at 300 DPI while text and axes remain vector graphics. This prevents severe PDF rendering lag on standard laptops when viewing 2,400 dense flight paths.
 - **Row-by-Row Pre-Filtering**: Metadata pre-filters are evaluated directly on the summary DataFrame before any trajectory parquet files are loaded from disk, saving significant memory and I/O bandwidth.
 - **Clean Registry Indexing**: When `--use-clean` is passed, `run_phase_quality_campaign.py` pre-loads `GLOBAL_CLEAN_REGISTRY` into a hash map ($O(1)$ lookup) to resolve clean trajectory file paths without crawling directories.
 - **EKF Telemetry Subsampling**: For storage efficiency, time-series arrays such as Normalized Innovation Squared ($\epsilon_k$) and covariance condition numbers are subsampled to 150 points for archiving inside the `.npz` files.
@@ -245,7 +245,7 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
 | `--workers` | Integer | `4` | Number of parallel worker processes for PDF compilation. |
 | `--format` | String | `SVG` | Plot rendering format (`SVG` vector vs `PNG` rasterized). |
 | `--out-dir` | String | *Optional* | Custom output directory for evaluation results and PDFs. |
-| `--show-rejected` | Flag | `False` | Plot rejected trajectories on audit pages. |
+| `--show-rejected` | `bool` | `True` | When `True`, prefilter- and postfilter-rejected trajectories are overlaid as red dashed lines (`REJECTED_COLOR`) on all audit pages and a legend entry is added. Pass `False` to hide them. |
 | `--clean-dir` | String | *Optional* | Directory containing cleaned/post-processed trajectory parquet files for 4-plot comparison. |
 | `--use-clean` | Flag | `False` | Automatically resolve and load clean trajectories from normal directories and `GLOBAL_CLEAN_REGISTRY` for 4-plot comparison. |
 | `--max-dep-horiz-dist` | Float | `None` | Max departure horizontal distance to airport center (meters). |
@@ -310,7 +310,16 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 - `src.common.config.RECOMPUTE_AIRPORT_DISTANCES`: Boolean flag. When `True`, worker processes call `recompute_airport_distances()` on each clean trajectory before running post-filters.
 - For global project naming conventions, see [conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/conventions.md).
 
-### 5.3 Known Issues & TODOs
+### 5.3 Change Log — Hotfixes
 
 > [!NOTE]
-> **Plotting Bug (tracked)**: `io.generate_route_report()` currently renders only flights that passed all post-filters into the corridor PDF. Filtered-out flights are not plotted alongside passing flights, which limits visual comparison. A future revision should include all flights with rejection annotations so their EKF diagnostic characteristics can be contrasted directly.
+> **Plotting Bug (resolved — 2026-07-12)**: `plot_cohort_audit_page()` previously dropped prefilter-rejected flights from Row 2 of the 3-row PDF layout when their clean trajectory was absent from the registry. Fixed by backfilling `trajectories_clean` with each flight's raw DataFrame when `show_rejected=True`, ensuring all flights are visible. Rejected trajectories are now rendered as red dashed lines (`REJECTED_COLOR = "#ff0000"`) and annotated in the figure legend.
+
+> [!NOTE]
+> **`--show-rejected` default changed**: Was `store_true` (default `False`). Changed to `type=bool, default=True` so rejected trajectories are always visible unless explicitly suppressed.
+
+> [!NOTE]
+> **`max_velocity_kt` corrected**: `DEFAULT_POSTFILTER_THRESHOLDS["max_velocity_kt"]` was `700.0` kt — changed to `650.0` kt to match the documented threshold and the value already referenced throughout the README.
+
+> [!NOTE]
+> **PDF rasterization DPI raised**: `DEFAULT_DPI` increased from `150` to `300` for higher-fidelity PNG rasterization in audit PDFs.
