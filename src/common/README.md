@@ -24,10 +24,11 @@ src/common/
 Module Objectives
  └── Standardize configuration, data models, logging, and registries across the pipeline
       │
-      ├── Sub-objective 1: Centralize path resolution, environmental constants, and concurrency limits
+            ├── Sub-objective 1: Centralize path resolution, environmental constants, and filtering/concurrency limits
       │    ├── Solution A: config.py
-      │    │    ├── Inputs: Environmental variables, relative directory lookups
-      │    │    └── Outputs: Base directories, weather variables, grid definitions, and concurrency limits
+      │    │    ├── Inputs: Environmental variables, relative directory lookups, calibrated defaults
+      │    │    ├── Outputs: Base directories, weather variables, grid definitions, metadata filter thresholds, and concurrency limits
+      │    │    └── Shared thresholds: DEFAULT_PREFILTER_THRESHOLDS and DEFAULT_POSTFILTER_THRESHOLDS centralize pre/post trajectory quality gates
       │    └── Solution B: concurrency.py
       │         ├── limit_numeric_threads(): Sets CPU/C-library thread bounds via environment variables and threadpoolctl
       │         └── set_numeric_thread_env(): Directly restricts BLAS/OpenMP/NumExpr C-library thread counts
@@ -161,7 +162,9 @@ python -m src.common.build_global_manifest --diag-only --recompute-ekf-metrics -
 
 ## 5. Prerequisites & Dependencies
 
-### Config registries referenced:
+### Config constants and registries referenced:
+- `DEFAULT_PREFILTER_THRESHOLDS`: Centralized metadata prefilter thresholds used by fetching helpers before sampling/quota computation.
+- `DEFAULT_POSTFILTER_THRESHOLDS`: Centralized post-filter thresholds used by downstream quality filtering.
 - `GLOBAL_TRAJECTORY_REGISTRY` (`data/registries/global_trajectory_registry.parquet`)
 - `GLOBAL_CLEAN_REGISTRY` (`data/registries/global_clean_registry.parquet`)
 - `GLOBAL_SIMULATION_REGISTRY` (`data/registries/global_simulation_registry.parquet`)

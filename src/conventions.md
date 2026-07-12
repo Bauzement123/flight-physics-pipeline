@@ -81,6 +81,32 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 * **Time Zone**: Datetime columns can be timezone-aware UTC (e.g., with `+00:00` offset or `'UTC'`) or timezone-naive UTC, consistently used within each module to ensure seamless comparisons. Standard fetched data from Trino/OpenSky outputs timezone-aware UTC. Enforce timezone-naive UTC for internal simulation engine processing if required by third-party packages (e.g., PyContrails).
 * **OpenSky Coordinates/Units**: Raw OpenSky coordinates (WGS84 lat/lon) are kept as degrees. OpenSky data fetched directly from the Trino database is already stored in SI units (meters, meters per second) upon ingestion. If raw OpenSky data is loaded from non-Trino sources in aviation units (altitude in feet, velocity in knots, vertical rate in ft/min), they must be standardized into SI units upon ingestion.
 
+### 3.1 Golden Schema for OpenSky/PyContrails trajectory files
+
+Raw Trino/PyOpenSky query outputs must be converted to the canonical PyContrails-compatible **Golden Schema** before being persisted as individual raw trajectory Parquet files. The canonical trajectory columns are:
+
+| Canonical column | Meaning | Unit / convention |
+|---|---|---|
+| `time` | UTC timestamp | timezone-naive UTC after ingestion |
+| `latitude` | WGS84 latitude | degrees |
+| `longitude` | WGS84 longitude | degrees |
+| `altitude` | Barometric altitude | meters |
+| `gs` | Ground speed | meters per second |
+| `heading` | Track / heading angle | degrees |
+| `rocd` | Rate of climb/descent | meters per second |
+
+The OpenSky alias map applied by `src.common.adapters.PyOpenSky_df_to_PyContrails_df()` is:
+
+| OpenSky/PyOpenSky alias | Golden Schema column |
+|---|---|
+| `lat` | `latitude` |
+| `lon` | `longitude` |
+| `baroaltitude` | `altitude` |
+| `velocity` | `gs` |
+| `vertrate` | `rocd` |
+
+`time` and `heading` already match the Golden Schema names. Generic Parquet writes must use `src.core.fetching.helpers.write_parquet_atomic()`, which does not enforce or rename columns. Only raw Trino/PyOpenSky outputs that require this alias conversion should use `write_parquet_atomic_PyOpenSky()`.
+
 ---
 
 ## 4. Coding Standards and Paradigms

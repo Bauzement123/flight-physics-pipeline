@@ -46,12 +46,8 @@ def dataframe_to_pycontrails(df_flight: pd.DataFrame, typecode: str | None = Non
             return None
 
     # 1. Map columns back to Pycontrails API
-    rename_map = {
-        'timestamp': 'time',
-        'groundspeed': 'gs',
-        'track': 'heading',
-        'vertical_rate': 'rocd',
-    }
+    # Input is already Golden Schema, no mapping needed, but variable kept for compliance
+    rename_map = {}
     
     df_pc = df_flight.rename(columns=rename_map).copy()
     if 'time' in df_pc.columns:
@@ -171,9 +167,8 @@ def parquet_to_pycontrails(path: str) -> dict:
         'lat': 'latitude',
         'lon': 'longitude',
         'baroaltitude': 'altitude',
-        'heading': 'track',
-        'velocity': 'groundspeed',
-        'vertrate': 'vertical_rate'
+        'velocity': 'gs',
+        'vertrate': 'rocd'
     }
     
     # Check if raw columns exist and rename
@@ -227,17 +222,10 @@ def df_si_to_df_nautic(df_si: pd.DataFrame) -> pd.DataFrame:
     """
     df = df_si.copy()
     
-    # 1. Normalize column spelling variants to standard traffic/OpenAP names
     rename_map = {
         'time': 'timestamp',
-        'lat': 'latitude',
-        'lon': 'longitude',
-        'baroaltitude': 'altitude',
-        'geoaltitude': 'geoaltitude_nautic',
-        'velocity': 'groundspeed',
         'gs': 'groundspeed',
         'heading': 'track',
-        'vertrate': 'vertical_rate',
         'rocd': 'vertical_rate'
     }
     
@@ -273,15 +261,12 @@ def df_nautic_to_df_si(df_nautic: pd.DataFrame) -> pd.DataFrame:
     """
     df = df_nautic.copy()
     
-    # 1. Normalize spelling variants back to standard SI names
+    # 1. Normalize column spelling variants to standard traffic/OpenAP names
     rename_map = {
         'timestamp': 'time',
-        'latitude': 'lat',
-        'longitude': 'lon',
-        'altitude': 'baroaltitude',
-        'groundspeed': 'velocity',
+        'groundspeed': 'gs',
         'track': 'heading',
-        'vertical_rate': 'vertrate',
+        'vertical_rate': 'rocd'
     }
     
     # Filter mapping to only rename columns that actually exist
@@ -290,12 +275,12 @@ def df_nautic_to_df_si(df_nautic: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns=rename_cols)
         
     # 2. Scale physical parameters from standard aviation units back to SI units
-    if 'baroaltitude' in df.columns:
-        df['baroaltitude'] = df['baroaltitude'] / M_TO_FT
-    if 'velocity' in df.columns:
-        df['velocity'] = df['velocity'] / MPS_TO_KT
-    if 'vertrate' in df.columns:
-        df['vertrate'] = df['vertrate'] / MPS_TO_FPM
+    if 'altitude' in df.columns:
+        df['altitude'] = df['altitude'] / M_TO_FT
+    if 'gs' in df.columns:
+        df['gs'] = df['gs'] / MPS_TO_KT
+    if 'rocd' in df.columns:
+        df['rocd'] = df['rocd'] / MPS_TO_FPM
         
     return df
 
@@ -326,6 +311,31 @@ def df_to_traffic(df: pd.DataFrame, is_si: bool = True) -> "traffic.core.Flight"
             df_copy['timestamp'] = df_copy['timestamp'].dt.tz_localize(None)
             
     return TrafficFlight(df_copy)
+
+import pandas as pd
+
+def PyOpenSky_df_to_PyContrails_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adapter to convert raw PyOpenSky DataFrame schemas to the unified
+    Golden Schema (PyContrails SI standard) before saving to disk.
+    """
+    df_out = df.copy()
+
+    # 1. Map OpenSky columns to Golden Schema
+    rename_map = {
+        'lat': 'latitude',
+        'lon': 'longitude',
+        'baroaltitude': 'altitude',
+        'velocity': 'gs',
+        'vertrate': 'rocd'
+        # 'heading' and 'time' are already correct in OpenSky
+    }
+    df_out.rename(columns=rename_map, inplace=True)
+
+    # 2. Enforce standard PyContrails timestamp formatting (naive UTC)
+    if 'time' in df_out.columns:
+        df_out['time'] = pd.to_datetime(df_out['time'], utc=True).dt.tz_localize(None)
+    return df_out
 
 def traffic_to_df(flight: "traffic.core.Flight", to_si: bool = True) -> pd.DataFrame:
     """
@@ -358,12 +368,8 @@ def pycontrails_to_traffic(pyc_flight: Flight) -> "traffic.core.Flight":
     df_si = pyc_flight.to_dataframe().copy()
     
     # Map pyc column names to standard SI names
-    rename_pyc = {
-        'gs': 'velocity',
-        'heading': 'heading',
-        'rocd': 'vertrate',
-        'time': 'time'
-    }
+    # Input is already Golden Schema, no mapping needed, but variable kept for compliance
+    rename_pyc = {}
     df_si = df_si.rename(columns=rename_pyc)
     
     # Re-inject attributes from pyc_flight
@@ -402,13 +408,8 @@ def traffic_to_pycontrails(flight_or_df, typecode: str | None = None, drop_kinem
     df_si = df_nautic_to_df_si(df_nautic)
 
     # Map back to Pycontrails standard columns (time, latitude, longitude, altitude, gs, heading, rocd)
-    rename_to_pyc = {
-        'lat': 'latitude',
-        'lon': 'longitude',
-        'baroaltitude': 'altitude',
-        'velocity': 'gs',
-        'vertrate': 'rocd',
-    }
+    # df_nautic_to_df_si already outputs Golden Schema, no mapping needed, but variable kept for compliance
+    rename_to_pyc = {}
     df_pc = df_si.rename(columns=rename_to_pyc).copy()
     
     # Drop derived/outdated columns
@@ -441,5 +442,3 @@ def traffic_to_pycontrails(flight_or_df, typecode: str | None = None, drop_kinem
         final_attrs[k] = v
         
     return Flight(data=df_pc, crs="EPSG:4326", drop_duplicated_times=True, **final_attrs)
-
-

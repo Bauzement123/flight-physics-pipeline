@@ -34,12 +34,14 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │         ├── Outputs: Typed dataclasses replacing loose tuples and dictionaries
  │         └── Safety behavior: Default field initialization and structured summary serialization
  │
- ├── Sub-objective: Prepare and filter flight cohorts in memory
- │    └── Solution: helpers.py::load_master_flights_for_route() & apply_flight_filters()
+  ├── Sub-objective: Prepare and filter flight cohorts in memory
+ │    └── Solution: helpers.py::load_master_flights_for_route(), apply_flight_filters(), _apply_metadata_prefilters()
  │         ├── Inputs: dep, arr, flight_source (default: MASTER_FLIGHTS_FILE), start_date, end_date, typecode
  │         ├── Outputs: Filtered pd.DataFrame of candidate flight records
- │         ├── Config constants: MASTER_FLIGHTS_FILE
- │         └── Safety behavior: Returns empty DataFrame if source is missing or no flights match criteria
+ │         ├── Config constants: MASTER_FLIGHTS_FILE, DEFAULT_PREFILTER_THRESHOLDS, ROUTE_SUMMARY_PARQUET
+ │         ├── Metadata prefilters: airport candidate distances/counts and route-duration deviation thresholds
+ │         └── Safety behavior: Returns empty DataFrame if source is missing or no flights match criteria; logs skipped unsupported typecodes to skipped_aircraft.log
+
  │
  ├── Sub-objective: Execute Trino queries safely with exponential backoff
  │    └── Solution: opensky_fetcher.py::_query_trino_trajectory() via utils.py::retry_backoff()
@@ -58,14 +60,19 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │         │               causing OpenAP to loop max(ts)//60 > 37 billion times and freeze the CPU.
  │         └── Safety behavior: Sets flight_phase=None and appends icao24/typecode to
  │                               data/logs/skipped_aircraft.log if OpenAP phase calculation fails
- │
+  │
  ├── Sub-objective: Write Parquet files safely on FUSE mounts (Windows Google Drive)
- │    └── Solution: helpers.py::write_parquet_atomic()
- │         ├── Inputs: pd.DataFrame, target Path
- │         ├── Outputs: Parquet file written at target Path
- │         ├── Pattern: Unlinks existing file first (prevents FUSE lock contention and footer truncation),
- │         │            writes to a UUID-named temp file, then os.replace() atomically swaps into place
- │         └── Safety behavior: Cleans up temp file on exception; propagates to caller
+ │    ├── Solution A: helpers.py::write_parquet_atomic()
+ │    │    ├── Inputs: Any pd.DataFrame, target Path
+ │    │    ├── Outputs: Parquet file written at target Path without schema coercion
+ │    │    ├── Pattern: Generic atomic writer; unlinks existing file first, writes to a UUID-named temp file,
+ │    │    │            then os.replace() atomically swaps into place
+ │    │    └── Safety behavior: Does not enforce Golden Schema; cleans up temp file on exception
+ │    └── Solution B: helpers.py::write_parquet_atomic_PyOpenSky()
+ │         ├── Inputs: Raw PyOpenSky/OpenSky Trino pd.DataFrame, target Path
+ │         ├── Outputs: Golden Schema raw trajectory Parquet (`time`, `latitude`, `longitude`, `altitude`, `gs`, `heading`, `rocd`)
+ │         ├── Pattern: Converts OpenSky aliases through adapters.PyOpenSky_df_to_PyContrails_df(), then writes atomically
+  │         └── Safety behavior: Used only for newly fetched raw Trino/OpenSky outputs that require schema normalization
  │
  ├── Sub-objective: Resolve individual flight trajectories against a 3-step cache hierarchy
  │    └── Solution: opensky_fetcher.py::resolve_flight()
@@ -121,7 +128,8 @@ Both execution workflows rely on centralized configuration from [`src/common/con
 * **`RAW_TRAJECTORY_DIRNAME`**: Subdirectory name for individual raw flight files (`raw`).
 * **`FETCH_RUNS_DIRNAME`**: Subdirectory name for checkpoint and manifest storage (`runs`).
 * **`RAW_CONCAT_SUFFIX`**: Filename suffix for route-level consolidated backups (`_all_raw.parquet`).
-* **`MIN_DISTANCE_KM`**: Default minimum route distance threshold (800.0 km).
+* **`MIN_DISTANCE_KM`**: Default minimum route distance threshold (`0` km; no route-distance exclusion unless a positive `--min-distance` is supplied).
+* **`DEFAULT_PREFILTER_THRESHOLDS`**: Centralized metadata prefilter thresholds applied inside `helpers.py::_apply_metadata_prefilters()` before sampling and target quota calculations.
 * **`BACKOFF_MAX_RETRIES`** / **`BACKOFF_INITIAL_DELAY`** / **`BACKOFF_FACTOR`** / **`BACKOFF_MAX_DELAY`** / **`TRINO_QUERY_TIMEOUT_SECS`**: Network retry and timeout parameters for Trino queries.
 
 ### 3.2 Unified Logging Policy
@@ -132,6 +140,34 @@ All scripts invoke `setup_file_logger(log_filename="fetching.log")` from `src.co
 
 ### 3.3 Runtime Initialization
 Every `__main__` entrypoint calls `init_runtime()` from `src.common.config` before any filesystem I/O. `init_runtime()` creates required data directories and redirects `TEMP`/`TMP`/`TMPDIR` environment variables to `data/temp/`. This function must NOT be called at import time.
+
+### 3.4 Write Parquet helpers: generic vs. OpenSky Golden Schema
+
+The fetching module intentionally exposes two atomic Parquet writers with different contracts:
+
+| Helper | Scope | Schema behavior | Main call sites |
+|---|---|---|---|
+| `helpers.py::write_parquet_atomic()` | Generic DataFrame writer for already-normalized data, concat rebuilds, registries, campaign tables, and cache restorations. | **Generic atomic writer – does not enforce Golden Schema.** It writes the input columns as provided. | Registry/disk cache refresh, concat backup rebuilds, recovered cache slices, and non-OpenSky DataFrame outputs. |
+| `helpers.py::write_parquet_atomic_PyOpenSky()` | OpenSky-specific writer for newly fetched raw Trino/PyOpenSky state vectors. | Converts OpenSky aliases through `adapters.PyOpenSky_df_to_PyContrails_df()` before writing canonical Golden Schema columns: `time`, `latitude`, `longitude`, `altitude`, `gs`, `heading`, `rocd`. | `opensky_fetcher.py::_fetch_from_trino()` after successful OpenSky query and phase labeling. |
+
+This split prevents generic pipeline writes from silently renaming user-provided columns while still guaranteeing that direct OpenSky query outputs enter downstream processing in the PyContrails-compatible Golden Schema.
+
+### 3.5 Metadata prefilter thresholds
+
+`helpers.py::apply_flight_filters()` now applies `_apply_metadata_prefilters()` after date/typecode filtering. Active thresholds are read from `DEFAULT_PREFILTER_THRESHOLDS`; keys with `None` values are ignored. The current supported filters are:
+
+| Threshold key | Applied when column exists | Behavior |
+|---|---|---|
+| `max_dep_horiz_dist` | `estdepartureairporthorizdistance` | Keeps rows whose departure horizontal distance is missing or below/equal to threshold. |
+| `max_dep_vert_dist` | `estdepartureairportvertdistance` | Keeps rows whose absolute departure vertical distance is missing or below/equal to threshold. |
+| `max_arr_horiz_dist` | `estarrivalairporthorizdistance` | Keeps rows whose arrival horizontal distance is missing or below/equal to threshold. |
+| `max_arr_vert_dist` | `estarrivalairportvertdistance` | Keeps rows whose absolute arrival vertical distance is missing or below/equal to threshold. |
+| `max_dep_candidates` | `departureairportcandidatescount` | Keeps rows whose departure airport candidate count is missing or below/equal to threshold. |
+| `max_arr_candidates` | `arrivalairportcandidatescount` | Keeps rows whose arrival airport candidate count is missing or below/equal to threshold. |
+| `max_duration_pct_above_median` | `firstseen`, `lastseen`, and `ROUTE_SUMMARY_PARQUET.route_duration_median` | Removes flights whose duration exceeds the route median by more than the configured percentage. |
+| `min_duration_pct_below_median` | `firstseen`, `lastseen`, and `ROUTE_SUMMARY_PARQUET.route_duration_median` | Removes flights whose duration is shorter than the route median by more than the configured percentage. |
+
+If the route summary cannot be loaded or a route median is unavailable, duration-based checks fall back to keeping the affected rows and logging a warning.
 
 ---
 
@@ -144,8 +180,9 @@ flowchart TD
     CLI["CLI: python -m src.core.fetching.opensky_fetcher"] --> Init["init_runtime() + setup_file_logger('fetching.log')"]
     Init --> Cohort["_prepare_cohort(): Load master flights from --flight-source"]
     Cohort --> Filter["apply_flight_filters(): start_date, end_date, typecode"]
-    Filter --> Sample["sample_flights(): sample_size, seed"]
-    Sample --> Recs["prepare_flight_records(): Build target flight record dicts"]
+    Filter --> MetaFilter["_apply_metadata_prefilters(): DEFAULT_PREFILTER_THRESHOLDS"]
+    MetaFilter --> Sample["sample_flights(): sample_size, seed"]
+        Sample --> Recs["prepare_flight_records(): Build target flight record dicts"]
 
     Recs --> EmptyCheck{"Any valid records?"}
     EmptyCheck -->|No| ExitEmpty["Write empty FetchResult manifest to runs/ and return"]
@@ -166,7 +203,7 @@ flowchart TD
 
     Step3 --> Query["_query_trino_trajectory() via retry_backoff()"]
     Query --> QuerySuccess{"Waypoints returned?"}
-    QuerySuccess -->|Yes| SaveTrino["Inject metadata + firstseen/lastseen;\nlabel_flight_phase();\nwrite_parquet_atomic() to raw/"]
+    QuerySuccess -->|Yes| SaveTrino["Inject metadata + firstseen/lastseen;\nlabel_flight_phase();\nwrite_parquet_atomic_PyOpenSky() to raw/"]
     QuerySuccess -->|No| MarkFail["Record failed flight_id; log ERROR"]
 
     ReadDisk --> Accum["Append DataFrame & track registry entry"]
@@ -188,14 +225,14 @@ flowchart TD
 **Step-by-step Walkthrough:**
 1. **Entrypoint & Initialization**: The script calls `init_runtime()` to create required directories, then `setup_file_logger("fetching.log")` for idempotent centralized logging.
 2. **Cohort Preparation**: `_prepare_cohort()` loads candidate flights for the specified `--dep` and `--arr` airports from `--flight-source` (defaulting to `MASTER_FLIGHTS_FILE` = `data/databases/master_flights/master_flights.parquet`).
-3. **Filtering & Sampling**: `apply_flight_filters()` filters records by `--start-date`, `--end-date`, and `--typecode`. `sample_flights()` deterministically selects up to `--sample-size` records using `--seed`.
+3. **Filtering, Metadata Prefiltering & Sampling**: `apply_flight_filters()` filters records by `--start-date`, `--end-date`, and `--typecode`, then `_apply_metadata_prefilters()` applies active `DEFAULT_PREFILTER_THRESHOLDS` for airport distance/candidate and duration sanity checks. `sample_flights()` deterministically selects up to `--sample-size` records using `--seed`.
 4. **Record Preparation**: `prepare_flight_records()` builds structured dictionary records containing ICAO24, callsign, time bounds, and target file paths. If no records exist, an empty manifest is written and execution ends.
 5. **Fast Exit Check**: Checks if all target files already exist in `raw/` and the consolidated backup exists. If so, logs a fast cache hit, writes a completion manifest, and returns immediately without querying Trino.
 6. **Cache Index Loading**: Loads `GLOBAL_TRAJECTORY_REGISTRY` into an in-memory dictionary mapping `flight_id` to relative file paths, and reads any existing route-level concat backup (`<route>_all_raw.parquet`).
 7. **3-Step Cache Resolution Loop**: For each flight record, `resolve_flight()` executes the lookup hierarchy:
    - **Step 1 (Registry / Disk Check)**: Checks if the flight is registered in `cached_flights` or already exists at `raw/<flight_id>_raw.parquet`. If found, reads the file from disk and **slices by `flight_id`** (guards against multi-flight or concat files misregistered in the global index). Applies `label_flight_phase()` if phase labels were missing, then saves via `write_parquet_atomic()`.
    - **Step 2 (Concat Backup Recovery)**: If missing from disk, checks if `flight_id` exists in the loaded `concat_df`. If found, extracts the flight's waypoints, applies phase labeling, restores the individual file to `raw/` via `write_parquet_atomic()`.
-   - **Step 3 (OpenSky Trino Query)**: If absent from all local caches, lazily initializes the `pyopensky` Trino client and executes `_query_trino_trajectory()` using `retry_backoff()`. If waypoints are retrieved, enriches them with metadata (including `firstseen` and `lastseen` schedule columns), applies phase labeling, saves via `write_parquet_atomic()`.
+   - **Step 3 (OpenSky Trino Query)**: If absent from all local caches, lazily initializes the `pyopensky` Trino client and executes `_query_trino_trajectory()` using `retry_backoff()`. If waypoints are retrieved, enriches them with metadata (including `firstseen` and `lastseen` schedule columns), applies phase labeling, and saves via `write_parquet_atomic_PyOpenSky()` so OpenSky aliases are converted to Golden Schema columns before persistence.
 8. **PyArrow Nanosecond Safety in `label_flight_phase()`**: Before calling `fp.set_trajectory()`, timestamps are normalized: `ts_series.dt.total_seconds().values` if a `.dt` accessor is available, or `.values` otherwise. All arrays (`ts`, `alt`, `spd`, `roc`) are explicitly cast to `np.asarray(..., dtype=float)` to strip PyArrow extension types. Without this normalization, PyArrow-typed timestamps produce raw nanosecond integers ($10^9$/second), causing `max(ts)//60 > 37 billion` iterations and freezing the CPU.
 9. **Failure Handling**: If Step 3 yields no waypoints or fails after exponential backoff, the flight is marked as failed, logged at ERROR level, and skipped.
 10. **Global Registry Update**: All newly fetched or recovered trajectories are atomically appended to `GLOBAL_TRAJECTORY_REGISTRY` via `update_global_registry()`.
@@ -214,7 +251,7 @@ flowchart TD
 
     RunID --> LoadSummary["src.common.utils::extract_target_routes(): Load ROUTE_SUMMARY_PARQUET"]
     LoadSummary --> RankFilter["Filter by explicit --ranks or --lower-rank/--upper-rank"]
-    RankFilter --> DistFilter["Filter by --min-distance (default: 800 km)"]
+    RankFilter --> DistFilter["Filter by --min-distance (default: MIN_DISTANCE_KM = 0 km)"]
     DistFilter --> FormatCheck{"--format roundtrip?"}
 
     FormatCheck -->|Yes| ResolveReturn["_resolve_roundtrip_routes(): Append inverse ARR->DEP routes"]
@@ -227,7 +264,7 @@ flowchart TD
 
     Targets --> PerRoute["For each target route corridor"]
     PerRoute --> LoadRouteFlights["load_master_flights_for_route() from --flight-source"]
-    LoadRouteFlights --> MemFilter["apply_flight_filters(): start_date, end_date, typecode"]
+        LoadRouteFlights --> MemFilter["apply_flight_filters(): date/typecode + DEFAULT_PREFILTER_THRESHOLDS"]
     MemFilter --> CapCheck{"Post-filter capacity > 0?"}
 
     CapCheck -->|No| SkipRoute["Log WARNING and skip corridor"]
@@ -262,9 +299,9 @@ flowchart TD
 **Step-by-step Walkthrough:**
 1. **Entrypoint & Initialization**: Calls `init_runtime()` then `setup_file_logger("fetching.log")`. Validates mutually exclusive CLI options (`--ranks` vs `--lower-rank`/`--upper-rank`) and seed bounds.
 2. **Dynamic Namespace Generation**: Generates a standardized dataset identifier using `generate_dataset_name()`, which serves as the aggregate `run_id` for checkpoints and directory structures.
-3. **Route Extraction**: `src.common.utils::extract_target_routes()` reads `ROUTE_SUMMARY_PARQUET`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 800 km).
+3. **Route Extraction**: `src.common.utils::extract_target_routes()` reads `ROUTE_SUMMARY_PARQUET`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 0 km).
 4. **Roundtrip Resolution**: If `--format roundtrip` is requested, `_resolve_roundtrip_routes()` (in `src.common.utils`) identifies all inverse return paths (`ARR -> DEP`) in the master summary and appends them to the target corridor list without duplication.
-5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` loads flights directly from `--flight-source` into memory and applies date and aircraft typecode filters. This in-memory evaluation ensures that sample quotas are calculated against actual post-filter capacity rather than raw pre-filter totals.
+5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` loads flights directly from `--flight-source` into memory and applies date, aircraft typecode, and `DEFAULT_PREFILTER_THRESHOLDS` metadata filters. This in-memory evaluation ensures that sample quotas are calculated against actual post-filter capacity rather than raw pre-filter totals.
 6. **Strategy Application**: `_calculate_target_quota()` computes the sample target based on `--strategy`: `fixed` → `min(int(value), capacity)`, `percent` → `min(ceil(capacity * value / 100.0), capacity)`, `all` → `capacity`.
 7. **Plan Display**: `print_batch_plan()` outputs a clean table to the console detailing every planned corridor, its rank, requested sample size, and total available capacity.
 8. **Pass 1 — Sequential Batch Execution**: `run_batch()` iterates through the execution plan sequentially, calling `fetch_trajectories(..., update_concat=False)` for each corridor. Workers save only individual raw files to `raw/` without touching route concat files. FUSE lock contention is avoided because no file is immediately re-read after being written.
@@ -278,9 +315,10 @@ flowchart TD
 ### 4.3 Performance Profiles & Memory / FUSE Safety Modes
 
 * **Standard Memory Mode (Default)**: During batch orchestration, master flight lists are loaded per-corridor rather than globally, keeping RAM consumption manageable even when processing thousands of corridors.
+* **Config-Driven Metadata Prefiltering**: `DEFAULT_PREFILTER_THRESHOLDS` is applied consistently before sampling and quota computation. Columns that are absent in a specific source DataFrame simply skip the corresponding filter, preserving compatibility with older master-flight schemas.
 * **Incremental Concat Recovery (Low-Disk Mode)**: If individual trajectory files in `raw/` are deleted to save disk space, Step 2 of `resolve_flight()` automatically reconstructs them on-demand from the route-level `<route>_all_raw.parquet` consolidated file without querying Trino over the network.
 * **Lazy Database Initialization**: The `pyopensky` Trino client is initialized lazily only when a cache miss forces a Step 3 network query. Entirely cached runs execute in milliseconds with zero network overhead.
-* **FUSE-Safe Atomic Parquet Writes**: All Parquet files (individual raw trajectories and route-level concat files) are written via `write_parquet_atomic()` in `helpers.py`. This helper unlinks any existing file first (preventing FUSE lock contention on `G:\`), writes to a UUID-named temp file in the same directory, then calls `os.replace()` to atomically swap the target. JSON manifests use the analogous `write_json_dataclass()` from `src/common/utils.py`.
+* **FUSE-Safe Atomic Parquet Writes**: Generic Parquet files (route-level concat files, recovered cache slices, registry-like tables, and already-normalized outputs) are written via `write_parquet_atomic()` in `helpers.py`, which does not enforce Golden Schema. Newly fetched OpenSky Trino outputs are written via `write_parquet_atomic_PyOpenSky()`, which first converts OpenSky aliases to Golden Schema and then uses the same temp-file plus `os.replace()` pattern. JSON manifests use the analogous `write_json_dataclass()` from `src/common/utils.py`.
 * **Two-Pass Concat Architecture**: The orchestrator separates individual file writes (Pass 1 — one corridor at a time) from concat rebuilding (Pass 2 — all corridors after the batch loop). This ensures FUSE buffers are fully flushed before any file is re-read for consolidation, preventing 4-byte truncated footer errors.
 
 ---
@@ -301,7 +339,7 @@ python -m src.core.fetching.opensky_fetcher \
     --start-date "2024-01-01" \
     --end-date "2024-01-31" \
     --typecode A320 \
-    --min-distance 800.0 \
+    --min-distance 0 \
     --run-id test_run_001
 ```
 
@@ -317,7 +355,7 @@ python -m src.core.fetching.opensky_fetcher `
     --start-date "2024-01-01" `
     --end-date "2024-01-31" `
     --typecode A320 `
-    --min-distance 800.0 `
+    --min-distance 0 `
     --run-id test_run_001
 ```
 
@@ -334,7 +372,7 @@ python -m src.core.fetching.opensky_fetcher `
 | `--start-date` | `str` | `None` | No | Lower bound of departure window in ISO format (e.g., `2024-01-01`). |
 | `--end-date` | `str` | `None` | No | Upper bound of departure window in ISO format (e.g., `2024-01-31`). |
 | `--typecode` | `str` | `None` | No | Aircraft model filter (e.g., `A320`, `B738`). |
-| `--min-distance` | `float` | `800.0` | No | **Metadata-only for single-route worker runs.** Route distance filtering is applied by `fetcher_orchestrator`. |
+| `--min-distance` | `float` | `MIN_DISTANCE_KM` (`0`) | No | **Metadata-only for single-route worker runs.** Route distance filtering is applied by `fetcher_orchestrator`. |
 | `--run-id` | `str` | `None` | No | Optional custom run identifier for checkpoint naming. |
 | `--rank` | `int` | `None` | No | Corridor rank index metadata for manifest reporting. |
 | `--strategy` | `str` | `None` | No | Sampling strategy name metadata for manifest reporting. |
@@ -355,7 +393,7 @@ python -m src.core.fetching.fetcher_orchestrator \
     --strategy fixed \
     --value 50 \
     --seed 42 \
-    --min-distance 800.0 \
+    --min-distance 0 \
     --resume
 ```
 
@@ -370,7 +408,7 @@ python -m src.core.fetching.fetcher_orchestrator `
     --strategy fixed `
     --value 50 `
     --seed 42 `
-    --min-distance 800.0 `
+    --min-distance 0 `
     --resume
 ```
 
@@ -390,7 +428,7 @@ python -m src.core.fetching.fetcher_orchestrator `
 | `--start-date` | `str` | `None` | No | Global start date filter passed down to worker executions. |
 | `--end-date` | `str` | `None` | No | Global end date filter passed down to worker executions. |
 | `--typecode` | `str` | `None` | No | Global aircraft model filter passed down to worker executions. |
-| `--min-distance` | `float` | `800.0` | No | Minimum route distance threshold in km. Routes below this are excluded from the execution plan. |
+| `--min-distance` | `float` | `MIN_DISTANCE_KM` (`0`) | No | Minimum route distance threshold in km. Routes below this are excluded from the execution plan only when a positive value is supplied. |
 | `--resume` | flag | `False` | No | Skips corridors with existing manifests where `result.success == True`. |
 
 > \* Exactly one of `--ranks` or `--lower-rank` is required.
@@ -409,7 +447,8 @@ python -m src.core.fetching.fetcher_orchestrator `
 ### 6.2 Referenced Registry & Configuration Files
 All filesystem paths and physical constants conform to the standards defined in [`src/common/config.py`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py) and [`src/conventions.md`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md):
 * `data/databases/master_flights/master_flights.parquet` (`MASTER_FLIGHTS_FILE`): Source population of verified commercial flights.
-* `data/databases/master_flights/master_flights_route_summary.parquet` (`ROUTE_SUMMARY_PARQUET`): Aggregated corridor rankings and traffic density metrics.
+* `data/databases/master_flights/master_flights_route_summary.parquet` (`ROUTE_SUMMARY_PARQUET`): Aggregated corridor rankings and traffic density metrics; also supplies `route_duration_median` for duration metadata prefilters when available.
+* `DEFAULT_PREFILTER_THRESHOLDS`: Centralized metadata filter dictionary controlling airport distance/candidate and route-duration sanity filters before fetching and quota calculation.
 * `data/registries/global_trajectory_registry.parquet` (`GLOBAL_TRAJECTORY_REGISTRY`): Canonical project-wide trajectory index mapping `flight_id` to relative Parquet paths (2-column schema: `flight_id`, `file_path`).
 * `data/logs/fetching.log` (`LOGS_DIR`): Centralized execution and milestone log for all fetching operations.
 * `data/logs/skipped_aircraft.log` (`LOGS_DIR`): Append-only audit record of airframes skipped during OpenAP phase labeling. Written as tab-separated `icao24\ttypecode\terror` lines.

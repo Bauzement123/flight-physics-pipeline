@@ -12,12 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
+import src.common.adapters as adapters
 from src.common.config import (
     MASTER_FLIGHTS_FILE,
     RAW_TRAJECTORY_DIRNAME,
     RAW_TRAJECTORY_SUFFIX,
     is_supported_typecode,
+    DEFAULT_PREFILTER_THRESHOLDS,
+    ROUTE_SUMMARY_PARQUET,
 )
 from src.common.utils import to_project_relative, write_json_dataclass, log_skipped_aircraft
 from src.core.fetching.models import FetchResult, FetchRunParams
@@ -50,13 +52,111 @@ def load_master_flights_for_route(
             return pd.DataFrame()
 
 
+def _apply_metadata_prefilters(df: pd.DataFrame) -> pd.DataFrame:
+    """Applies metadata pre-filters based on DEFAULT_PREFILTER_THRESHOLDS config."""
+    active_thresholds = {k: v for k, v in DEFAULT_PREFILTER_THRESHOLDS.items() if v is not None}
+    if not active_thresholds:
+        return df
+
+    res = df.copy()
+    initial_count = len(res)
+
+    route_medians_min = {}
+    duration_check_active = (
+        "max_duration_pct_above_median" in active_thresholds or
+        "min_duration_pct_below_median" in active_thresholds
+    )
+    if duration_check_active:
+        try:
+            df_route_summary = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
+            if not df_route_summary.empty and "route" in df_route_summary.columns and "route_duration_median" in df_route_summary.columns:
+                for _, row in df_route_summary.iterrows():
+                    clean_route = str(row["route"]).replace(" -> ", "-").replace(" ", "")
+                    route_medians_min[clean_route] = float(row["route_duration_median"])
+        except Exception as e:
+            logger.warning(f"Could not load route summary for duration pre-filter: {e}")
+
+    # Compute duration in seconds if lastseen/firstseen columns are present and duration is not in columns
+    if duration_check_active and 'duration_s' not in res.columns:
+        try:
+            res['duration_s'] = (pd.to_datetime(res['lastseen'], utc=True) - pd.to_datetime(res['firstseen'], utc=True)).dt.total_seconds()
+        except Exception as e:
+            logger.warning(f"Could not compute duration_s: {e}")
+
+    # Apply distance and candidate filters
+    # 1. max_dep_horiz_dist
+    val = active_thresholds.get("max_dep_horiz_dist")
+    if val is not None and "estdepartureairporthorizdistance" in res.columns:
+        res = res[res["estdepartureairporthorizdistance"].isna() | (res["estdepartureairporthorizdistance"].astype(float) <= float(val))]
+
+    # 2. max_dep_vert_dist
+    val = active_thresholds.get("max_dep_vert_dist")
+    if val is not None and "estdepartureairportvertdistance" in res.columns:
+        res = res[res["estdepartureairportvertdistance"].isna() | (res["estdepartureairportvertdistance"].astype(float).abs() <= float(val))]
+
+    # 3. max_arr_horiz_dist
+    val = active_thresholds.get("max_arr_horiz_dist")
+    if val is not None and "estarrivalairporthorizdistance" in res.columns:
+        res = res[res["estarrivalairporthorizdistance"].isna() | (res["estarrivalairporthorizdistance"].astype(float) <= float(val))]
+
+    # 4. max_arr_vert_dist
+    val = active_thresholds.get("max_arr_vert_dist")
+    if val is not None and "estarrivalairportvertdistance" in res.columns:
+        res = res[res["estarrivalairportvertdistance"].isna() | (res["estarrivalairportvertdistance"].astype(float).abs() <= float(val))]
+
+    # 5. max_dep_candidates
+    val = active_thresholds.get("max_dep_candidates")
+    if val is not None and "departureairportcandidatescount" in res.columns:
+        res = res[res["departureairportcandidatescount"].isna() | (res["departureairportcandidatescount"].astype(float) <= float(val))]
+
+    # 6. max_arr_candidates
+    val = active_thresholds.get("max_arr_candidates")
+    if val is not None and "arrivalairportcandidatescount" in res.columns:
+        res = res[res["arrivalairportcandidatescount"].isna() | (res["arrivalairportcandidatescount"].astype(float) <= float(val))]
+
+    # 7. max_duration_pct_above_median
+    val = active_thresholds.get("max_duration_pct_above_median")
+    if val is not None and "duration_s" in res.columns:
+        def filter_duration_above(row):
+            dep = row.get("estdepartureairport")
+            arr = row.get("estarrivalairport")
+            route_id = f"{dep}-{arr}" if pd.notna(dep) and pd.notna(arr) else ""
+            med_min = route_medians_min.get(route_id, None)
+            if med_min is None:
+                return True
+            max_s = med_min * 60.0 * (1.0 + float(val) / 100.0)
+            dur = row.get("duration_s")
+            return pd.isna(dur) or float(dur) <= max_s
+        res = res[res.apply(filter_duration_above, axis=1)]
+
+    # 8. min_duration_pct_below_median
+    val = active_thresholds.get("min_duration_pct_below_median")
+    if val is not None and "duration_s" in res.columns:
+        def filter_duration_below(row):
+            dep = row.get("estdepartureairport")
+            arr = row.get("estarrivalairport")
+            route_id = f"{dep}-{arr}" if pd.notna(dep) and pd.notna(arr) else ""
+            med_min = route_medians_min.get(route_id, None)
+            if med_min is None:
+                return True
+            min_s = med_min * 60.0 * (1.0 - float(val) / 100.0)
+            dur = row.get("duration_s")
+            return pd.isna(dur) or float(dur) >= min_s
+        res = res[res.apply(filter_duration_below, axis=1)]
+
+    filtered_count = len(res)
+    if filtered_count < initial_count:
+        logger.info(f"Metadata pre-filtering removed {initial_count - filtered_count} flights based on config. {filtered_count} remaining.")
+    return res
+
+
 def apply_flight_filters(
     df: pd.DataFrame,
     start_date: str | None = None,
     end_date: str | None = None,
     typecode: str | None = None,
 ) -> pd.DataFrame:
-    """Applies date and typecode filters to a flight cohort DataFrame."""
+    """Applies date, typecode, and config-based metadata pre-filters to a flight cohort DataFrame."""
     if df.empty:
         return df
     res = df.copy()
@@ -99,6 +199,9 @@ def apply_flight_filters(
             for _, bad_row in res[~supported_mask].iterrows():
                 log_skipped_aircraft(build_flight_id(bad_row) or str(bad_row.get('icao24', 'UNK')), bad_row.get('typecode'), "ERROR_FLAG: Missing, NaN, or non-target family aircraft typecode in apply_flight_filters")
             res = res[supported_mask]
+
+    # Apply configuration-driven metadata pre-filters
+    res = _apply_metadata_prefilters(res)
 
     return res
 
@@ -227,13 +330,15 @@ def all_individual_files_exist(paths: list[Path]) -> bool:
 
 
 def write_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
-    """Writes a DataFrame to a Parquet file using a FUSE-safe atomic pattern.
+    """Generic atomic writer – does not enforce Golden Schema.
 
+    Writes any DataFrame to a Parquet file using a FUSE-safe atomic pattern.
     On Windows Google Drive (FUSE mount), directly overwriting an existing file
     causes lock contention and 4-byte footer truncation errors.  This helper
     unlinks the existing file first, writes to a UUID-named temp file in the
     same directory, then atomically replaces the target.
     """
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -244,6 +349,42 @@ def write_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
     temp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}.parquet")
     try:
         df.to_parquet(temp_path, index=False)
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def write_parquet_atomic_PyOpenSky(df: pd.DataFrame, path: Path) -> None:
+    """Write raw PyOpenSky/OpenSky Trino data atomically after Golden Schema conversion.
+
+    This writer is reserved for raw OpenSky query outputs whose input columns
+    may use PyOpenSky aliases such as lat, lon, baroaltitude, velocity, and
+    vertrate. It converts them through adapters.PyOpenSky_df_to_PyContrails_df()
+    before performing the same FUSE-safe temp-file and os.replace() sequence as
+    write_parquet_atomic().
+    """
+
+    # ---> ENFORCE GOLDEN SCHEMA BEFORE WRITING <---
+    df_golden = adapters.PyOpenSky_df_to_PyContrails_df(df)
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    temp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}.parquet")
+
+    try:
+        # Save the unified Golden Schema dataframe to disk
+        df_golden.to_parquet(temp_path, index=False)
         os.replace(temp_path, path)
     except Exception:
         if temp_path.exists():

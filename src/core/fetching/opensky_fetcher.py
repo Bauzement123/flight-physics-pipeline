@@ -34,6 +34,7 @@ from src.core.fetching.helpers import (
     load_master_flights_for_route,
     prepare_flight_records,
     sample_flights,
+    write_parquet_atomic_PyOpenSky,
     write_parquet_atomic,
     write_run_manifest,
 )
@@ -193,7 +194,7 @@ def _resolve_from_trino(
         df['lastseen'] = record['lastseen']
         df = label_flight_phase(df)
         record["raw_path"].parent.mkdir(parents=True, exist_ok=True)
-        write_parquet_atomic(df, record["raw_path"])
+        write_parquet_atomic_PyOpenSky(df, record["raw_path"])
         return df
     except Exception as e:
         logger.error(f"   -> Failed to process/save Trino df for {record['flight_id']}: {e}")
