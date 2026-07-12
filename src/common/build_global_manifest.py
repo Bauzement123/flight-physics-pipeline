@@ -6,7 +6,8 @@ import logging
 from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
-    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY, RAW_CONCAT_SUFFIX
+    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY, RAW_CONCAT_SUFFIX,
+    GLOBAL_EKF_DIAG_REGISTRY
 )
 from src.common.registry_utils import save_model_registry
 from src.common.utils import setup_file_logger, to_project_relative
@@ -24,8 +25,9 @@ def index_parquet_files(
     search_dirs: list[Path],
     description: str,
     exclude_filename_suffixes: tuple[str, ...] = (),
+    force: bool = False,
 ):
-    logger.info(f"--- Rebuilding/Updating {description} Registry ---")
+    logger.info(f"--- Rebuilding/Updating {description} Registry (force={force}) ---")
     
     # 1. Search directories for matching parquet files
     found_files = []
@@ -48,7 +50,7 @@ def index_parquet_files(
     # Load existing registry if it exists
     existing_df = None
     indexed_files = set()
-    if registry_file.exists():
+    if not force and registry_file.exists():
         try:
             existing_df = pd.read_parquet(registry_file)
             if not existing_df.empty and 'file_path' in existing_df.columns:
@@ -128,8 +130,8 @@ def index_parquet_files(
     logger.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
 
 
-def index_synthesized_files(registry_file: Path, search_dir: Path):
-    logger.info("--- Rebuilding/Updating Synthesized Registry ---")
+def index_synthesized_files(registry_file: Path, search_dir: Path, force: bool = False):
+    logger.info(f"--- Rebuilding/Updating Synthesized Registry (force={force}) ---")
     if not search_dir.exists():
         logger.info("Synthesized folder does not exist. Skipping.")
         return
@@ -146,12 +148,40 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
             # Standardize route format e.g. "LIRF-LFMN"
             route_key = row['route'].replace(" -> ", "-").strip()
             route_to_rank[route_key] = row['rank']
+
+    # Load existing registry if force is False
+    existing_df = None
+    indexed_files = set()
+    if not force and registry_file.exists():
+        try:
+            existing_df = pd.read_parquet(registry_file)
+            if not existing_df.empty and 'file_path' in existing_df.columns:
+                original_len = len(existing_df)
+                existing_df = existing_df[
+                    existing_df['file_path'].apply(lambda p: (BASE_DIR / p).exists())
+                ]
+                pruned_count = original_len - len(existing_df)
+                if pruned_count > 0:
+                    logger.info(f"Pruned {pruned_count} stale entries from {registry_file.name}.")
+                
+                if not existing_df.empty:
+                    indexed_files = set(existing_df['file_path'].unique())
+                    logger.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+                else:
+                    existing_df = None
+        except Exception as e:
+            logger.warning(f"Could not load existing registry {registry_file.name} ({e}). Rebuilding from scratch.")
             
     new_entries = []
+    skipped_count = 0
     for filepath_str in found_files:
         filepath = Path(filepath_str)
         rel_path = to_project_relative(filepath)
         
+        if rel_path in indexed_files:
+            skipped_count += 1
+            continue
+            
         name = filepath.name
         if name.endswith(".parquet") and "_synthesized_c" in name:
             try:
@@ -177,17 +207,30 @@ def index_synthesized_files(registry_file: Path, search_dir: Path):
                 })
             except Exception as e:
                 logger.warning(f"Failed to parse or read synthesized file {name}: {e}")
+
+    if skipped_count > 0:
+        logger.info(f"Skipped {skipped_count} synthesized files that were already indexed.")
             
-    df_updated = pd.DataFrame(new_entries)
-    if df_updated.empty:
-        df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
+    if not new_entries:
+        if existing_df is not None:
+            logger.info("No new synthesized files to index. Registry is up to date.")
+            df_updated = existing_df
+        else:
+            logger.warning("No synthesized entries were extracted.")
+            df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
+    else:
+        df_new = pd.DataFrame(new_entries)
+        if existing_df is not None:
+            df_updated = pd.concat([existing_df, df_new])
+        else:
+            df_updated = df_new
+        df_updated = df_updated.drop_duplicates(subset=['file_path'], keep='last')
         
     save_model_registry(df_updated)
     logger.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
 
 
-def build_global_manifest():
-    # 1. Raw trajectories registry
+def rebuild_raw_registry(force: bool = False) -> None:
     index_parquet_files(
         pattern="*_raw.parquet",
         registry_file=GLOBAL_TRAJECTORY_REGISTRY,
@@ -195,20 +238,24 @@ def build_global_manifest():
             TRAJECTORIES_DIR
         ],
         description="Raw Trajectory",
-        exclude_filename_suffixes=(RAW_CONCAT_SUFFIX,)
+        exclude_filename_suffixes=(RAW_CONCAT_SUFFIX,),
+        force=force
     )
-    
-    # 2. Clean EKF trajectories registry
+
+
+def rebuild_clean_registry(force: bool = False) -> None:
     index_parquet_files(
         pattern="*_clean_si.parquet",
         registry_file=GLOBAL_CLEAN_REGISTRY,
         search_dirs=[
             TRAJECTORIES_DIR
         ],
-        description="Clean EKF Trajectory"
+        description="Clean EKF Trajectory",
+        force=force
     )
-    
-    # 3. Simulated outputs registry
+
+
+def rebuild_simulation_registry(force: bool = False) -> None:
     index_parquet_files(
         pattern="*_simulated.parquet",
         registry_file=GLOBAL_SIMULATION_REGISTRY,
@@ -216,27 +263,241 @@ def build_global_manifest():
             RESULTS_DIR,
             TRAJECTORIES_DIR
         ],
-        description="Physics Simulation"
+        description="Physics Simulation",
+        force=force
     )
-    
-    # 4. Corridor simulated outputs registry
+
+
+def rebuild_corridor_sim_registry(force: bool = False) -> None:
     index_parquet_files(
         pattern="*_simulated.parquet",
         registry_file=GLOBAL_CORRIDOR_SIM_REGISTRY,
         search_dirs=[
             RESULTS_DIR / "corridor_simulations"
         ],
-        description="Corridor Physics Simulation"
-    )
-    
-    # 5. Corridor paths registry
-    index_synthesized_files(
-        registry_file=GLOBAL_MODEL_REGISTRY,
-        search_dir=CORRIDOR_PATHS_DIR
+        description="Corridor Physics Simulation",
+        force=force
     )
 
-if __name__ == "__main__":
+
+def rebuild_model_registry(force: bool = False) -> None:
+    index_synthesized_files(
+        registry_file=GLOBAL_MODEL_REGISTRY,
+        search_dir=CORRIDOR_PATHS_DIR,
+        force=force
+    )
+
+
+def extract_metrics_from_diag_file(
+    diag_path: Path,
+    recompute_metrics: bool,
+) -> tuple[float, float, float]:
+    """
+    Extracts EKF quality metrics from a diagnostic npz archive.
+    If recompute_metrics is True, calls the recomputation wrapper.
+    Otherwise, reads the stored metrics array, falling back to NaNs if missing/corrupt.
+    """
+    if recompute_metrics:
+        from src.core.processing.kalman_filter import compute_ekf_quality_metrics_from_diag
+        return compute_ekf_quality_metrics_from_diag(diag_path)
+
+    import numpy as np
+    try:
+        with np.load(diag_path) as data:
+            metrics = data.get("metrics")
+            if metrics is None or len(metrics) < 3:
+                return float("nan"), float("nan"), float("nan")
+            return float(metrics[0]), float(metrics[1]), float(metrics[2])
+    except Exception as e:
+        logger.warning(f"Failed to read metrics from {diag_path.name}: {e}. Falling back to NaNs.")
+        return float("nan"), float("nan"), float("nan")
+
+
+def _load_existing_diag_registry(force: bool) -> tuple[pd.DataFrame | None, set[str]]:
+    """Loads and prunes the existing EKF diagnostic registry if force is False."""
+    existing_df = None
+    indexed_files = set()
+    if not force and GLOBAL_EKF_DIAG_REGISTRY.exists():
+        try:
+            existing_df = pd.read_parquet(GLOBAL_EKF_DIAG_REGISTRY, memory_map=False)
+            if not existing_df.empty and 'diag_file_path' in existing_df.columns:
+                original_len = len(existing_df)
+                existing_df = existing_df[
+                    existing_df['diag_file_path'].apply(lambda p: (BASE_DIR / p).exists())
+                ]
+                pruned_count = original_len - len(existing_df)
+                if pruned_count > 0:
+                    logger.info(f"Pruned {pruned_count} stale entries from {GLOBAL_EKF_DIAG_REGISTRY.name}.")
+
+                if not existing_df.empty:
+                    indexed_files = set(existing_df['diag_file_path'].unique())
+                    logger.info(f"Loaded existing registry with {len(indexed_files)} already-indexed files.")
+                else:
+                    existing_df = None
+        except Exception as e:
+            logger.warning(f"Could not load existing registry {GLOBAL_EKF_DIAG_REGISTRY.name} ({e}). Rebuilding from scratch.")
+    return existing_df, indexed_files
+
+
+def _scan_diag_files() -> list[Path]:
+    """Scans the trajectories directory for EKF diagnostic npz files."""
+    glob_pattern = str(TRAJECTORIES_DIR / "**" / "diagnostics" / "*_ekf_diag.npz")
+    found_files = glob.glob(glob_pattern, recursive=True)
+    logger.info(f"Found {len(found_files)} diagnostic NPZ files on disk.")
+    return [Path(f) for f in found_files]
+
+
+def _build_diag_rows(
+    found_files: list[Path],
+    indexed_files: set[str],
+    recompute_metrics: bool,
+) -> list[dict]:
+    """Iterates over diagnostic files, extracting/recomputing metrics and building rows."""
+    new_mappings = []
+    skipped_count = 0
+
+    for filepath in found_files:
+        rel_path = to_project_relative(filepath)
+
+        # Skip already-indexed files only if we are NOT recomputing metrics
+        if not recompute_metrics and rel_path in indexed_files:
+            skipped_count += 1
+            continue
+
+        try:
+            if recompute_metrics and rel_path in indexed_files:
+                logger.info(f"Recomputing metrics for diagnostic file: {filepath.name}")
+            else:
+                logger.info(f"Indexing diagnostic file: {filepath.name}")
+            
+            flight_id = filepath.name.replace("_ekf_diag.npz", "")
+            q, nis, tr = extract_metrics_from_diag_file(filepath, recompute_metrics)
+            
+            new_mappings.append({
+                "flight_id": flight_id,
+                "diag_file_path": rel_path,
+                "ekf_quality_score": q,
+                "ekf_max_trace_p": tr,
+                "ekf_mean_nis": nis,
+            })
+        except Exception as e:
+            logger.error(f"Error reading diagnostic NPZ file {filepath.name}: {e}")
+
+    if skipped_count > 0:
+        logger.info(f"Skipped {skipped_count} diagnostic files that were already indexed.")
+
+    return new_mappings
+
+
+def _merge_and_save_diag_registry(
+    existing_df: pd.DataFrame | None,
+    new_mappings: list[dict],
+) -> None:
+    """Merges new diagnostic entries with the existing registry, deduplicates, and saves."""
+    if not new_mappings:
+        if existing_df is not None:
+            logger.info("No new files to index. Diagnostic registry is up to date.")
+            df_updated = existing_df
+        else:
+            logger.warning("No EKF diagnostics were extracted.")
+            df_updated = pd.DataFrame(columns=["flight_id", "diag_file_path", "ekf_quality_score", "ekf_max_trace_p", "ekf_mean_nis"])
+    else:
+        df_new = pd.DataFrame(new_mappings)
+        if existing_df is not None:
+            df_updated = pd.concat([existing_df, df_new])
+        else:
+            df_updated = df_new
+        df_updated = df_updated.drop_duplicates(subset=['flight_id'], keep='last')
+
+    REGISTRIES_DIR.mkdir(parents=True, exist_ok=True)
+    df_updated.to_parquet(GLOBAL_EKF_DIAG_REGISTRY, index=False)
+    logger.info(f"Successfully generated/updated EKF diagnostic registry at: {GLOBAL_EKF_DIAG_REGISTRY}")
+    logger.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
+
+
+def rebuild_ekf_diag_registry(
+    force: bool = False,
+    recompute_metrics: bool = False,
+) -> None:
+    """Orchestrates the rebuilding/updating of the EKF diagnostic registry."""
+    logger.info(f"--- Rebuilding/Updating EKF Diagnostic Registry (force={force}, recompute={recompute_metrics}) ---")
+    existing_df, indexed_files = _load_existing_diag_registry(force)
+    found_files = _scan_diag_files()
+    new_mappings = _build_diag_rows(found_files, indexed_files, recompute_metrics)
+    _merge_and_save_diag_registry(existing_df, new_mappings)
+
+
+def build_global_manifest() -> None:
+    rebuild_raw_registry()
+    rebuild_clean_registry()
+    rebuild_simulation_registry()
+    rebuild_corridor_sim_registry()
+    rebuild_model_registry()
+    rebuild_ekf_diag_registry()
+
+
+def main(args_list: list[str] | None = None) -> None:
+    import argparse
     from src.common.config import init_runtime
     init_runtime()
     setup_file_logger(log_filename="manifest.log")
-    build_global_manifest()
+
+    parser = argparse.ArgumentParser(description="Global manifest/registry builder.")
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        choices=["raw", "clean", "simulation", "corridor-sim", "model", "ekf-diag"],
+        help="Rebuild only specified registries.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Rebuild all registries.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rebuild from scratch (ignore existing registry files).",
+    )
+    parser.add_argument(
+        "--recompute-ekf-metrics",
+        action="store_true",
+        help="Recompute EKF quality metrics from diagnostic arrays instead of reading stored metrics.",
+    )
+    parser.add_argument(
+        "--diag-only",
+        action="store_true",
+        help="Convenience alias to rebuild/update only the EKF diagnostic registry.",
+    )
+
+    args = parser.parse_args(args_list)
+
+    # Determine what to rebuild
+    to_rebuild = set()
+    if args.all:
+        to_rebuild = {"raw", "clean", "simulation", "corridor-sim", "model", "ekf-diag"}
+    elif args.diag_only:
+        to_rebuild = {"ekf-diag"}
+    elif args.only:
+        to_rebuild = set(args.only)
+    else:
+        # Default behavior (if no flags are provided, run all)
+        to_rebuild = {"raw", "clean", "simulation", "corridor-sim", "model", "ekf-diag"}
+
+    # Execute rebuilds
+    if "raw" in to_rebuild:
+        rebuild_raw_registry(force=args.force)
+    if "clean" in to_rebuild:
+        rebuild_clean_registry(force=args.force)
+    if "simulation" in to_rebuild:
+        rebuild_simulation_registry(force=args.force)
+    if "corridor-sim" in to_rebuild:
+        rebuild_corridor_sim_registry(force=args.force)
+    if "model" in to_rebuild:
+        rebuild_model_registry(force=args.force)
+    if "ekf-diag" in to_rebuild:
+        rebuild_ekf_diag_registry(force=args.force, recompute_metrics=args.recompute_ekf_metrics)
+
+
+if __name__ == "__main__":
+    main()

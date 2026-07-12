@@ -20,3 +20,9 @@ class CheckpointError(PipelineError):
 class RetryError(PipelineError):
     """Raised by retry_backoff when max_retries is exhausted."""
     pass
+
+
+class DiagnosticsIOError(PipelineError):
+    """Raised when an EKF diagnostics filesystem or report compilation operation fails."""
+    pass
+

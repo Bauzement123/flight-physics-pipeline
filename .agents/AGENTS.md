@@ -100,6 +100,7 @@ data/logs/
 ├── simulation.log        ← simulation.py, clone_simulation.py runs
 ├── weather.log           ← era5_manager.py runs
 ├── calibration.log       ← variational_orchestrator.py, gt_stability_sweep.py runs
+├── manifest.log          ← build_global_manifest.py runs
 └── skipped_aircraft.log  ← appended by any module that skips an unsupported aircraft
 ```
 

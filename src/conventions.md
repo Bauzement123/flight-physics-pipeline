@@ -46,7 +46,7 @@ To prevent different cross-validation cohorts from overwriting each other, run f
 Note that **simulation results** stored under `data/results/` do not use this hashing naming scheme. Instead, the simulation output directory defaults to `data/results/corridor_simulations/`, inside which results are saved iteratively corridor-by-corridor in route-specific subfolders (e.g., `<origin>-<destination>_cloned_simulated/`).
 
 ### Rank-Distance Slicing Interaction
-Slicing flight list data cohorts by route rank is also subject to the minimum route distance threshold (defaulting to 800.0 km). Ranked routes shorter than this distance will be filtered out unless `--min-distance 0` is explicitly specified.
+Slicing flight list data cohorts by route rank is also subject to the minimum route distance threshold. The centralized default is `MIN_DISTANCE_KM = 0` in `src.common.config`, meaning ranked routes are not excluded by distance unless a CLI caller explicitly supplies a positive `--min-distance` value.
 
 ---
 
@@ -93,7 +93,7 @@ The pipeline transitions between **Aviation Units** (input/raw data) and **SI Un
 * **Centralized Logging Policy**: 
   - All module entrypoints must call `setup_file_logger()` from `src.common.utils` as their first action in `if __name__ == "__main__":`.
   - **`logging.basicConfig(...)` is strictly forbidden** anywhere in the codebase.
-  - Log files are written to fixed filenames in `data/logs/` (`LOGS_DIR`): `fetching.log`, `acquisition.log`, `processing.log`, `corridor.log`, `weather.log`, `simulation.log`, `calibration.log`, and the global append-only `skipped_aircraft.log`.
+  - Log files are written to fixed filenames in `data/logs/` (`LOGS_DIR`): `fetching.log`, `filtering.log`, `processing.log`, `acquisition.log`, `corridor.log`, `simulation.log`, `weather.log`, `calibration.log`, `manifest.log`, and the global append-only `skipped_aircraft.log`.
 * **CLI Invocation**: All script runs must use Python's module format:
   `python -m src.folder.script_name --args`
 

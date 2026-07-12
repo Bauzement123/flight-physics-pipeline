@@ -59,7 +59,7 @@ AIRPORTS_CACHE_PATH = REGISTRIES_DIR / "airport_coordinates.json"
 DEFAULT_AIRPORT_PREFIXES = ["B", "E", "L"]
 
 # Fetching module defaults (§3.3.1)
-MIN_DISTANCE_KM: float = 800.0          # Default minimum corridor distance filter
+MIN_DISTANCE_KM: float = 0          # Default minimum corridor distance filter
 DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
 
 # Pipeline Concurrency and Threading Defaults
@@ -211,8 +211,8 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 
 # Default post-filter thresholds
 DEFAULT_POSTFILTER_THRESHOLDS = {
-    "max_velocity_kt": 650.0,            # max 3D velocity (knots)
-    "max_acceleration_mps2": 340.29,     # max 3D acceleration (m/s^2), corresponds to Mach 1
+    "max_velocity_kt": 700.0,            # max 3D velocity (knots)
+    "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2), corresponds to Mach 1
 }
 
 # Flag to force a re-computation of airport distance metrics before filtering
