@@ -43,13 +43,15 @@ Phase Quality Campaign Objectives
       │
       ├── Sub-objective 3: Evaluate Trajectory Post-Filters (Script 2 Part B)
       │    └── Solution: apply_trajectory_postfilters() in phase_quality_filters.py
+      │         ├── Helper: calculate_coordinate_velocity_3d(df_clean) → pd.Series of 3D m/s step-to-step via Haversine + altitude diff
       │         ├── Helper: calculate_acceleration(df_clean) → pd.Series of 3D m/s² step-to-step
       │         ├── Helper: get_airport_coords(origin_icao, dest_icao) → dict via airportsdata
       │         ├── Helper: recompute_airport_distances(df_clean, airport_coords) → df with dist_hor_nm, dist_vert_ft, dist_total_nm
-      │         ├── filter_max_velocity(df_clean, thresholds): 3D speed = √(gs_kt² + rocd_kt²); reject if > max_velocity_kt (650 kt)
+      │         ├── filter_max_coordinate_velocity(df_clean, thresholds): coordinate-derived 3D speed = √(v_horiz_kt² + v_vert_kt²) via Haversine; rejects if max_speed_3d_kt > max_velocity_kt (650 kt); metric: max_speed_3d_kt
+      │         ├── filter_max_velocity(df_clean, thresholds): kinematic-column 3D speed = √(gs_kt² + rocd_kt²); reject if > max_velocity_kt (650 kt)
       │         ├── filter_max_acceleration(df_clean, thresholds): step-to-step 3D acceleration; reject if > max_acceleration_mps2 (340.29 m/s² ≈ Mach 1)
       │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport; reject on configured horiz/vert limits
-      │         ├── Short-circuit: filter chain stops at first rejection (velocity → acceleration → distance)
+      │         ├── Short-circuit: filter chain stops at first rejection (coord velocity → kinematic velocity → acceleration → distance)
       │         └── Outputs: (rejected: bool, reason: str, metrics: dict) per flight; aggregated POSTFILTER status written to filter_evaluation.csv
       │
       ├── Sub-objective 4: Orchestrate Multi-Route Campaign Runs (Script 2 Part C)
@@ -129,7 +131,11 @@ flowchart TD
 6. Dispatch multi-page PDF compilation tasks across parallel worker processes using `ProcessPoolExecutor`.
 7. Each worker loads raw parquet trajectory files for its assigned route. If `--use-clean` or `--clean-dir` is specified, it resolves clean EKF trajectory files by searching `GLOBAL_CLEAN_REGISTRY`, the explicitly provided `clean_dir`, and standard sibling `clean/` directories in that order.
 8. For each flight that passed pre-filtering and has a clean trajectory, the worker optionally calls `recompute_airport_distances()` (when `RECOMPUTE_AIRPORT_DISTANCES = True`) to augment the clean DataFrame with freshly computed `dist_hor_nm`, `dist_vert_ft`, and `dist_total_nm` columns using the `airportsdata` library.
-9. `apply_trajectory_postfilters()` is invoked per flight with short-circuit semantics: `filter_max_velocity()` runs first (reject if max 3D speed > `max_velocity_kt`), then `filter_max_acceleration()` (reject if max step-to-step 3D acceleration > `max_acceleration_mps2` ≈ Mach 1), then `passes_distance_prefilters()` checks re-computed waypoint-to-airport distances. The chain stops at the first rejection.
+9. `apply_trajectory_postfilters()` is invoked per flight with short-circuit semantics:
+   - **Step 1.0 — Coordinate-derived 3-D velocity**: `filter_max_coordinate_velocity()` computes `max_speed_3d_kt` using `calculate_coordinate_velocity_3d()` — the Haversine horizontal distance between consecutive GPS waypoints plus altitude delta — converted to knots. Rejects if `max_speed_3d_kt` exceeds `DEFAULT_POSTFILTER_THRESHOLDS["max_velocity_kt"]` (650 kt).
+   - **Step 1.5 — Kinematic-column velocity**: `filter_max_velocity()` checks the same velocity limit using reported `gs` and `rocd` columns instead of GPS-derived values.
+   - **Step 2 — Acceleration**: `filter_max_acceleration()` rejects if max step-to-step 3D acceleration exceeds `max_acceleration_mps2` (≈ Mach 1).
+   - **Step 3 — Distance prefilters**: `passes_distance_prefilters()` checks re-computed waypoint-to-airport distances. The chain stops at the first rejection.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
 11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**: Row 1 (Raw + Prefilter), Row 2 (Those But Clean — ignoring POSTFILTER rejections), Row 3 (Clean + Postfilter — full combined rejection view).
 12. Each worker returns a `flight_updates` dict mapping `flight_id → {status, fail_stage, reject_reason}` for all POSTFILTER rejections back to the main process.
@@ -300,6 +306,11 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 - `src.common.config.PhaseControl`: Central dataclass controls toggling phases.
 - `src.common.config.PHASE_QUALITY_RUNS_DIR`: Base directory for campaign output folders.
 - `src.common.config.DEFAULT_PREFILTER_THRESHOLDS`: Dictionary of metadata pre-filter thresholds (max horiz/vert dist, duration pct).
-- `src.common.config.DEFAULT_POSTFILTER_THRESHOLDS`: Dictionary of trajectory post-filter thresholds: `max_velocity_kt` (650.0) and `max_acceleration_mps2` (340.29 ≈ Mach 1).
+- `src.common.config.DEFAULT_POSTFILTER_THRESHOLDS`: Dictionary of trajectory post-filter thresholds: `max_velocity_kt` (650.0, used by both `filter_max_coordinate_velocity` and `filter_max_velocity`) and `max_acceleration_mps2` (340.29 ≈ Mach 1).
 - `src.common.config.RECOMPUTE_AIRPORT_DISTANCES`: Boolean flag. When `True`, worker processes call `recompute_airport_distances()` on each clean trajectory before running post-filters.
 - For global project naming conventions, see [conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/conventions.md).
+
+### 5.3 Known Issues & TODOs
+
+> [!NOTE]
+> **Plotting Bug (tracked)**: `io.generate_route_report()` currently renders only flights that passed all post-filters into the corridor PDF. Filtered-out flights are not plotted alongside passing flights, which limits visual comparison. A future revision should include all flights with rejection annotations so their EKF diagnostic characteristics can be contrasted directly.

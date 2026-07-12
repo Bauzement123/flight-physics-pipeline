@@ -144,6 +144,51 @@ def apply_metadata_prefilters(
     
     return df_out
 
+def calculate_coordinate_velocity_3d(df_clean: pd.DataFrame) -> pd.Series:
+    """
+    Calculate 3D velocity (m/s) step-to-step from latitude, longitude, and altitude.
+    
+    Uses Haversine formula for horizontal distance and simple difference for vertical.
+    """
+    import numpy as np
+    
+    lat_col = "latitude" if "latitude" in df_clean.columns else "lat"
+    lon_col = "longitude" if "longitude" in df_clean.columns else "lon"
+    alt_col = "altitude" if "altitude" in df_clean.columns else ("baroaltitude" if "baroaltitude" in df_clean.columns else "geoaltitude")
+    time_col = "time" if "time" in df_clean.columns else "timestamp"
+    
+    df_clean = df_clean.sort_values(by=time_col)            # Ensure sorted by time
+    df_clean = df_clean.drop_duplicates(subset=[time_col])  # Remove duplicates to avoid zero devision errors
+    # Convert to radians
+    lat_rad = np.radians(df_clean[lat_col])
+    lon_rad = np.radians(df_clean[lon_col])
+    
+    # Calculate horizontal distances using Haversine formula
+    R = 6371000.0  # Earth radius in meters
+    dlat = lat_rad.diff().fillna(0.0)
+    dlon = lon_rad.diff().fillna(0.0)
+    
+    # Haversine formula
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat_rad.shift(1).fillna(lat_rad)) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    
+    horiz_dist_m = R * c
+    
+    # Vertical distances
+    vert_dist_m = df_clean[alt_col].diff().fillna(0.0)
+    
+    # Time differences in seconds
+    t_series = pd.to_datetime(df_clean[time_col])
+    dt = t_series.diff().dt.total_seconds().fillna(1.0)
+    
+    # Calculate velocities
+    vel_horiz_mps = horiz_dist_m / dt
+    vel_vert_mps = vert_dist_m / dt
+    
+    # 3D velocity: sqrt(vel_horiz^2 + vel_vert^2)
+    vel_3d_mps = np.sqrt(vel_horiz_mps**2 + vel_vert_mps**2)
+    
+    return pd.Series(vel_3d_mps, index=df_clean.index)
 
 def calculate_acceleration(df_clean: pd.DataFrame) -> pd.Series:
     """
@@ -248,6 +293,22 @@ def recompute_airport_distances(df_clean: pd.DataFrame, airport_coords: dict) ->
     df_out["dist_total_nm"] = sqrt(horiz_nm ** 2 + (vert_ft / 6076.12) ** 2)
     return df_out
 
+def filter_max_coordinate_velocity(df_clean: pd.DataFrame, thresholds: dict) -> tuple[bool, str, dict]:
+    """
+    Check if maximum 3D velocity (from coordinates) exceeds max_velocity_kt limit.
+    
+    3D velocity = sqrt(gs_kt^2 + vertrate_kt^2)
+    """
+    vel_3d_mps = calculate_coordinate_velocity_3d(df_clean)
+    vel_3d_kt = vel_3d_mps * 1.9438444924
+    max_vel_3d = vel_3d_kt.max()
+    
+    metrics = {"max_speed_3d_kt": max_vel_3d}
+    limit = thresholds.get("max_velocity_kt", 650.0)
+    
+    if max_vel_3d > limit:
+        return True, f"max 3D speed {max_vel_3d:.1f} kt > {limit} kt", metrics
+    return False, "PASSED", metrics
 
 def filter_max_velocity(df_clean: pd.DataFrame, thresholds: dict) -> tuple[bool, str, dict]:
     """
@@ -395,7 +456,13 @@ def apply_trajectory_postfilters(
     all_metrics.update(metrics)
     if rejected:
         return True, reason, all_metrics
-        
+
+    # 1.5. Max 3D Velocity
+    rejected, reason, metrics = filter_max_coordinate_velocity(df_clean, thresholds)
+    all_metrics.update(metrics)
+    if rejected:
+        return True, reason, all_metrics
+    
     # 2. Max Acceleration
     rejected, reason, metrics = filter_max_acceleration(df_clean, thresholds)
     all_metrics.update(metrics)
