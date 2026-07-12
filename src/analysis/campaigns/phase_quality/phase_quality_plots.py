@@ -377,7 +377,7 @@ def plot_cohort_audit_page(
         )
         legend_handles.extend([pre_handle, post_handle])
 
-    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records_pre, show_rejected)
+    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records, show_rejected)
     row2_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
     row3_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
 
