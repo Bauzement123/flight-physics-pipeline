@@ -41,7 +41,9 @@ PHASE_COLORS = {
     5: "#9467bd",
 }
 DEFAULT_COLOR = "#bcbd22"  # Olive / Yellow-Green for NA or unknown phase
-REJECTED_COLOR = "#ff0000" # Red for rejected trajectories
+REJECTED_COLOR = "#ff0000"               # keep as a fallback (deep red)
+REJECTED_PREFILTER_COLOR = "#ff7f7f"      # lighter red / pink for pre-filter rejections
+REJECTED_POSTFILTER_COLOR = "#ff0000"     # deep red for post-filter rejections
 
 # Hardcoded DPI for PDF rasterization and rendering
 DEFAULT_DPI = 300
@@ -138,8 +140,14 @@ def _render_trajectory_pair_on_axes(
         min_alt, max_alt = min(min_alt, np.nanmin(alts)), max(max_alt, np.nanmax(alts))
 
         if status == "REJECTED" and show_rejected:
-            ax_map.plot(lons, lats, color=REJECTED_COLOR, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
-            ax_prof.plot(t_norm, alts, color=REJECTED_COLOR, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
+            if fail_stage == "PREFILTER":
+                rej_color = REJECTED_PREFILTER_COLOR
+            elif fail_stage == "POSTFILTER":
+                rej_color = REJECTED_POSTFILTER_COLOR
+            else:
+                rej_color = REJECTED_COLOR
+            ax_map.plot(lons, lats, color=rej_color, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
+            ax_prof.plot(t_norm, alts, color=rej_color, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
         else:
             stats["plotted"] += 1
             pts_xy = np.array([lons, lats]).T.reshape(-1, 1, 2)
@@ -179,6 +187,50 @@ def _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lo
     ax_prof.grid(True, linestyle="--", alpha=0.5)
     ax_prof.set_xlim(-0.02, 1.02)
     ax_prof.set_ylim(max(0.0, min_alt - 1000.0), max_alt + 2500.0 if (min_alt < max_alt and max_alt > -1e8) else 45000.0)
+
+
+def _audit_drawability(
+    candidate_flight_ids: list[str],
+    trajectories: dict[str, pd.DataFrame],
+    eval_records: dict[str, dict] | None,
+    show_rejected: bool,
+) -> dict[str, int]:
+    """
+    Computes drawability stats for a list of candidate flight IDs under a given
+    trajectory and evaluation configuration.
+    
+    Returns a dict with keys:
+      'total', 'plotted', 'rejected', 'missing_geom', 'invalid_coords', 'drawn_rejected'
+    """
+    stats = {
+        "total": len(candidate_flight_ids),
+        "plotted": 0,
+        "rejected": 0,
+        "missing_geom": 0,
+        "invalid_coords": 0,
+        "drawn_rejected": 0,
+    }
+    for fid in candidate_flight_ids:
+        status = eval_records[fid].get("status", "PASSED") if eval_records and fid in eval_records else "PASSED"
+        if status == "REJECTED":
+            if not show_rejected:
+                stats["rejected"] += 1
+                continue
+            if not trajectories or fid not in trajectories:
+                stats["missing_geom"] += 1
+                continue
+        df_fl = trajectories.get(fid) if trajectories else None
+        if df_fl is None or df_fl.empty:
+            stats["missing_geom"] += 1
+            continue
+        coords = _extract_valid_coords_and_time(df_fl)
+        if not coords:
+            stats["invalid_coords"] += 1
+            continue
+        stats["plotted"] += 1
+        if status == "REJECTED" and show_rejected:
+            stats["drawn_rejected"] += 1
+    return stats
 
 
 def plot_cohort_audit_page(
@@ -308,15 +360,50 @@ def plot_cohort_audit_page(
     ]
 
     if show_rejected:
-        rejected_handle = mlines.Line2D(
+        # Prefilter-rejected (lighter red)
+        pre_handle = mlines.Line2D(
             [], [],
-            color=REJECTED_COLOR,
+            color=REJECTED_PREFILTER_COLOR,
             linestyle="--",
             linewidth=0.8,
             alpha=0.4,
-            label="REJECTED (prefilter/postfilter)",
+            label="Prefilter Rejected"
         )
-        legend_handles.append(rejected_handle)
+        # Postfilter-rejected (deep red)
+        post_handle = mlines.Line2D(
+            [], [],
+            color=REJECTED_POSTFILTER_COLOR,
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.4,
+            label="Postfilter Rejected"
+        )
+        legend_handles.extend([pre_handle, post_handle])
+
+    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records, show_rejected)
+    row2_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
+    row3_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
+
+    if is_three_row:
+        row2_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row2, eval_records_pre, show_rejected)
+        row3_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row3, eval_records, show_rejected)
+
+    page_plotted = row1_stats["plotted"] + row2_stats["plotted"] + row3_stats["plotted"]
+    page_rejected = row1_stats["drawn_rejected"] + row2_stats["drawn_rejected"] + row3_stats["drawn_rejected"]
+    page_missing = (
+        row1_stats["missing_geom"] + row1_stats["invalid_coords"] +
+        row2_stats["missing_geom"] + row2_stats["invalid_coords"] +
+        row3_stats["missing_geom"] + row3_stats["invalid_coords"]
+    )
+
+    log_msg = (
+        f"[{route_id}] Cohort {cohort_idx} – candidates={len(candidate_flight_ids)} |\n"
+        f"  row1: total={row1_stats['total']} plotted={row1_stats['plotted']} rejected={row1_stats['rejected']} missing_geom={row1_stats['missing_geom']} invalid_coords={row1_stats['invalid_coords']} |\n"
+        f"  row2: total={row2_stats['total']} plotted={row2_stats['plotted']} rejected={row2_stats['rejected']} missing_geom={row2_stats['missing_geom']} invalid_coords={row2_stats['invalid_coords']} |\n"
+        f"  row3: total={row3_stats['total']} plotted={row3_stats['plotted']} rejected={row3_stats['rejected']} missing_geom={row3_stats['missing_geom']} invalid_coords={row3_stats['invalid_coords']} |\n"
+        f"  page_summary: plotted={page_plotted} rejected={page_rejected} missing={page_missing}"
+    )
+    logger.info(log_msg)
 
     ax2.legend(handles=legend_handles, loc="upper right", fontsize=7.5, framealpha=0.85)
     fig.tight_layout(rect=[0, 0, 1, 0.94])

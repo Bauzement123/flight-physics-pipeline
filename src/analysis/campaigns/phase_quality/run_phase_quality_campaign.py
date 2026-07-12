@@ -28,6 +28,7 @@ from src.common.config import (
     AUDIT_COHORT_MAP_REGISTRY,
     DEFAULT_PREFILTER_THRESHOLDS,
     GLOBAL_CLEAN_REGISTRY,
+    GLOBAL_TRAJECTORY_REGISTRY,
 )
 from src.common.utils import setup_file_logger, load_route_summary
 from src.common.registry_utils import load_trajectory_registry
@@ -52,7 +53,6 @@ def _worker_run_campaign_route(
     out_dir: Path,
     plot_format: str = "SVG",
     show_rejected: bool = False,
-    clean_dir: Path | None = None,
     use_clean: bool = False,
 ) -> tuple[str, dict]:
     """Worker target to load trajectories, run post-filters, and compile PDF report for a route."""
@@ -61,9 +61,20 @@ def _worker_run_campaign_route(
         df_route = df_pool[df_pool["route_id"] == route_id].copy()
         trajectories = {}
         
-        load_clean = use_clean or (clean_dir is not None)
+        load_clean = use_clean
         trajectories_clean = {} if load_clean else None
         
+        # Pre-load raw registry index
+        raw_reg_map = {}
+        if GLOBAL_TRAJECTORY_REGISTRY.exists():
+            try:
+                df_raw_reg = load_trajectory_registry(GLOBAL_TRAJECTORY_REGISTRY)
+                if not df_raw_reg.empty and "flight_id" in df_raw_reg.columns and "file_path" in df_raw_reg.columns:
+                    raw_reg_map = dict(zip(df_raw_reg["flight_id"], df_raw_reg["file_path"]))
+                    logger.info(f"[{route_id}] Loaded raw registry index with {len(raw_reg_map):,} entries.")
+            except Exception as e:
+                logger.warning(f"[{route_id}] Could not load raw registry index: {e}")
+
         # Pre-load clean registry index if loading clean trajectories
         clean_reg_map = {}
         if load_clean and GLOBAL_CLEAN_REGISTRY.exists():
@@ -75,74 +86,58 @@ def _worker_run_campaign_route(
             except Exception as e:
                 logger.warning(f"[{route_id}] Could not load clean registry index: {e}")
         
-        logger.info(f"[{route_id}] Loading {len(df_route)} raw trajectory files from disk...")
+        logger.info(f"[{route_id}] Loading {len(df_route)} trajectories from disk...")
         for idx, row in df_route.iterrows():
             fid = row["flight_id"]
-            rel_path = row["file_path"]
-            abs_path = BASE_DIR / rel_path
+            rel_path = row.get("file_path")
             
-            if not abs_path.exists():
-                continue
+            # Resolve raw trajectory
+            raw_path = None
+            if fid in raw_reg_map:
+                raw_path = BASE_DIR / raw_reg_map[fid]
+            elif rel_path:
+                raw_path = BASE_DIR / rel_path
+
+            if raw_path and raw_path.exists():
+                try:
+                    df_traj = pd.read_parquet(raw_path)
+                    trajectories[fid] = df_traj
+                except Exception as e:
+                    logger.error(f"[{route_id}] Failed to read raw parquet for {fid} ({raw_path}): {e}")
+            else:
+                logger.warning(f"[{route_id}] Raw file missing on disk for {fid}: {raw_path}")
                 
-            try:
-                df_traj = pd.read_parquet(abs_path)
-                trajectories[fid] = df_traj
-            except Exception as e:
-                logger.error(f"[{route_id}] Failed to read parquet for {fid} ({abs_path}): {e}")
-                
+            # Resolve clean trajectory
             if load_clean:
                 clean_path = None
-                # 1. Check clean_dir if explicitly provided
-                if clean_dir:
-                    candidates = [
-                        clean_dir / f"{fid}.parquet",
-                        clean_dir / f"{fid}_clean_si.parquet",
-                        clean_dir / f"{fid}_clean.parquet",
-                        clean_dir / Path(rel_path).name,
-                        clean_dir / Path(rel_path).name.replace("_raw.parquet", "_clean_si.parquet"),
-                        clean_dir / Path(rel_path).name.replace("_raw.parquet", "_clean.parquet"),
-                    ]
-                    for cand in candidates:
-                        if cand.exists():
-                            clean_path = cand
-                            break
+                if fid in clean_reg_map:
+                    clean_path = BASE_DIR / clean_reg_map[fid]
+                elif rel_path:
+                    # Sibling path fallback just in case
+                    clean_path_cand = BASE_DIR / rel_path.replace("_raw.parquet", "_clean_si.parquet")
+                    if clean_path_cand.exists():
+                        clean_path = clean_path_cand
                 
-                # 2. Check GLOBAL_CLEAN_REGISTRY if not resolved via clean_dir
-                if clean_path is None and fid in clean_reg_map:
-                    reg_cand = BASE_DIR / clean_reg_map[fid]
-                    if reg_cand.exists():
-                        clean_path = reg_cand
-                        
-                # 3. Check standard sibling clean directory (normal directories) if not resolved yet
-                if clean_path is None and abs_path.parent.name == "raw":
-                    sibling_candidates = [
-                        abs_path.parent.parent / "clean" / abs_path.name.replace("_raw.parquet", "_clean_si.parquet"),
-                        abs_path.parent.parent / "clean" / abs_path.name.replace("_raw.parquet", "_clean.parquet"),
-                        abs_path.parent.parent / "clean" / f"{fid}.parquet",
-                    ]
-                    for cand in sibling_candidates:
-                        if cand.exists():
-                            clean_path = cand
-                            break
-                elif clean_path is None:
-                    local_candidates = [
-                        abs_path.parent / abs_path.name.replace("_raw.parquet", "_clean_si.parquet"),
-                        abs_path.parent / abs_path.name.replace("_raw.parquet", "_clean.parquet"),
-                        abs_path.parent / f"{fid}_clean_si.parquet",
-                        abs_path.parent / f"{fid}_clean.parquet",
-                    ]
-                    for cand in local_candidates:
-                        if cand.exists():
-                            clean_path = cand
-                            break
-                            
                 if clean_path and clean_path.exists():
                     try:
                         trajectories_clean[fid] = pd.read_parquet(clean_path)
                     except Exception as e:
                         logger.error(f"[{route_id}] Failed to read clean parquet for {fid} ({clean_path}): {e}")
                 else:
-                    logger.debug(f"[{route_id}] Clean trajectory not found for {fid} (checked registry and sibling dirs)")
+                    logger.debug(f"[{route_id}] Clean trajectory not found for {fid} (checked registry)")
+
+        n_raw_loaded = len(trajectories)
+        pct_raw = (n_raw_loaded / max(len(df_route), 1)) * 100
+        logger.info(f"[{route_id}] Raw trajectories loaded: {n_raw_loaded}/{len(df_route)} ({pct_raw:.1f}%)")
+        if pct_raw < 90.0:
+            logger.warning(f"[{route_id}] Low raw coverage ({pct_raw:.1f}%) — check GLOBAL_TRAJECTORY_REGISTRY for missing entries.")
+
+        if load_clean:
+            n_loaded = len(trajectories_clean)
+            pct = (n_loaded / max(len(df_route), 1)) * 100
+            logger.info(f"[{route_id}] Clean trajectories loaded: {n_loaded}/{len(df_route)} ({pct:.1f}%)")
+            if pct < 90.0:
+                logger.warning(f"[{route_id}] Low clean coverage ({pct:.1f}%) — check GLOBAL_CLEAN_REGISTRY for missing entries.")
 
         if not trajectories:
             return f"[{route_id}] FAILED: No trajectories loaded.", {}
@@ -237,18 +232,25 @@ def _worker_run_campaign_route(
     except Exception as e:
         logger.error(f"[{route_id}] Error in worker: {e}", exc_info=True)
         return f"[{route_id}] ERROR: {e}", {}
-
-
 def parse_args():
+    def str2bool(v):
+        if isinstance(v, bool):
+            return v
+        if v.lower() in ('yes', 'true', 't', 'y', '1'):
+            return True
+        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+            return False
+        else:
+            raise argparse.ArgumentTypeError('Boolean value expected.')
+
     parser = argparse.ArgumentParser(description="Run Phase Quality Filtering Campaign (Script 2 Part C)")
     parser.add_argument("--route", type=str, default="EDDF-LIRF", help="Specific route to evaluate (default: EDDF-LIRF)")
     parser.add_argument("--all", action="store_true", help="Evaluate all 6 target European routes")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker processes for PDF compilation")
     parser.add_argument("--format", type=str, choices=["SVG", "PNG"], default="SVG", help="Plot rendering format (default: SVG)")
     parser.add_argument("--out-dir", type=str, default=None, help="Custom output directory for evaluation results and PDFs")
-    parser.add_argument("--show-rejected", type=bool, default=True, help="Plot rejected trajectories on audit pages (default: hidden)")
-    parser.add_argument("--clean-dir", type=str, default=None, help="Directory containing cleaned/post-processed trajectory parquet files for 4-plot comparison")
-    parser.add_argument("--use-clean", action="store_true", help="Automatically resolve and load clean trajectories from normal directories and GLOBAL_CLEAN_REGISTRY for 4-plot comparison")
+    parser.add_argument("--show-rejected", type=str2bool, nargs='?', const=True, default=True, help="Plot rejected trajectories on audit pages (default: hidden)")
+    parser.add_argument("--use-clean", type=str2bool, nargs='?', const=True, default=True, help="Automatically resolve and load clean trajectories from GLOBAL_CLEAN_REGISTRY for 4-plot comparison")
     
     # 8 Metadata Pre-filter flags (all default to None = ignored unless set)
     parser.add_argument("--max-dep-horiz-dist", type=float, default=DEFAULT_PREFILTER_THRESHOLDS["max_dep_horiz_dist"], help="Max departure horizontal distance in meters")
@@ -323,8 +325,7 @@ def main():
         "LGSA-LGAV",
     ] if args.all else [args.route]
     
-    clean_dir = Path(args.clean_dir) if args.clean_dir else None
-    logger.info(f"Compiling PDF reports for {len(target_routes)} routes using {args.workers} workers (clean_dir={clean_dir}, use_clean={args.use_clean})...")
+    logger.info(f"Compiling PDF reports for {len(target_routes)} routes using {args.workers} workers (use_clean={args.use_clean})...")
     
     all_flight_updates = {}
     
@@ -341,7 +342,6 @@ def main():
                     out_dir,
                     args.format,
                     args.show_rejected,
-                    clean_dir,
                     args.use_clean,
                 ): route
                 for route in target_routes
@@ -360,7 +360,6 @@ def main():
                 out_dir,
                 args.format,
                 args.show_rejected,
-                clean_dir,
                 args.use_clean,
             )
             logger.info(msg)

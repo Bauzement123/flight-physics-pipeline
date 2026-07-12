@@ -129,7 +129,7 @@ flowchart TD
 4. Execute `apply_metadata_prefilters()` row-by-row to evaluate departure/arrival horizontal and vertical distances, candidate counts, and route duration anomalies.
 5. Annotate each flight with `status` (`PASSED` vs `REJECTED`), `fail_stage`, and `reject_reason`; export the initial summary table to `filter_evaluation.csv`.
 6. Dispatch multi-page PDF compilation tasks across parallel worker processes using `ProcessPoolExecutor`.
-7. Each worker loads raw parquet trajectory files for its assigned route. If `--use-clean` or `--clean-dir` is specified, it resolves clean EKF trajectory files by searching `GLOBAL_CLEAN_REGISTRY`, the explicitly provided `clean_dir`, and standard sibling `clean/` directories in that order.
+7. Each worker loads raw parquet trajectory files for its assigned route. If `--use-clean` is active (default: `True`), it resolves clean EKF trajectory files using `GLOBAL_CLEAN_REGISTRY` keyed by `flight_id`.
 8. For each flight that passed pre-filtering and has a clean trajectory, the worker optionally calls `recompute_airport_distances()` (when `RECOMPUTE_AIRPORT_DISTANCES = True`) to augment the clean DataFrame with freshly computed `dist_hor_nm`, `dist_vert_ft`, and `dist_total_nm` columns using the `airportsdata` library.
 9. `apply_trajectory_postfilters()` is invoked per flight with short-circuit semantics:
    - **Step 1.0 — Coordinate-derived 3-D velocity**: `filter_max_coordinate_velocity()` computes `max_speed_3d_kt` using `calculate_coordinate_velocity_3d()` — the Haversine horizontal distance between consecutive GPS waypoints plus altitude delta — converted to knots. Rejects if `max_speed_3d_kt` exceeds `DEFAULT_POSTFILTER_THRESHOLDS["max_velocity_kt"]` (650 kt).
@@ -246,8 +246,7 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
 | `--format` | String | `SVG` | Plot rendering format (`SVG` vector vs `PNG` rasterized). |
 | `--out-dir` | String | *Optional* | Custom output directory for evaluation results and PDFs. |
 | `--show-rejected` | `bool` | `True` | When `True`, prefilter- and postfilter-rejected trajectories are overlaid as red dashed lines (`REJECTED_COLOR`) on all audit pages and a legend entry is added. Pass `False` to hide them. |
-| `--clean-dir` | String | *Optional* | Directory containing cleaned/post-processed trajectory parquet files for 4-plot comparison. |
-| `--use-clean` | Flag | `False` | Automatically resolve and load clean trajectories from normal directories and `GLOBAL_CLEAN_REGISTRY` for 4-plot comparison. |
+| `--use-clean` | `bool` | `True` | Automatically resolve and load clean trajectories from `GLOBAL_CLEAN_REGISTRY` for 3-row comparison layout. |
 | `--max-dep-horiz-dist` | Float | `None` | Max departure horizontal distance to airport center (meters). |
 | `--max-dep-vert-dist` | Float | `None` | Max departure vertical distance to airport altitude (meters). |
 | `--max-arr-horiz-dist` | Float | `None` | Max arrival horizontal distance to airport center (meters). |
@@ -323,3 +322,12 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 
 > [!NOTE]
 > **PDF rasterization DPI raised**: `DEFAULT_DPI` increased from `150` to `300` for higher-fidelity PNG rasterization in audit PDFs.
+
+> [!NOTE]
+> **Registry-Centric Clean Loading (2026-07-12)**: Clean trajectories are resolved and loaded directly via `GLOBAL_CLEAN_REGISTRY` mapping instead of fragile directory path-guessing.
+
+> [!NOTE]
+> **Two-Shade Red Rejections (2026-07-12)**: Rejections are color-coded based on the failure stage: pre-filter rejections use `REJECTED_PREFILTER_COLOR = "#ff7f7f"` (lighter red) and post-filter rejections use `REJECTED_POSTFILTER_COLOR = "#ff0000"` (deep red) with distinct legend handles.
+
+> [!NOTE]
+> **Cohort-Level Detailed Logging (2026-07-12)**: Audit page generation now logs a detailed row-wise drawability statistics breakdown and page summary per cohort page.
