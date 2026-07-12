@@ -28,9 +28,14 @@ ever touching the filesystem.
 ```text
 src/core/processing/
 ├── README.md                          # This documentation file
+├── filter_result.py                   # Dataclass for holding flight post-filter outcomes
 ├── kalman_filter.py                   # 6D Kinematic EKF filtering, grid resampling,
 │                                      #   phase assignment & registry update engine
-└── TRAFFIC_LIBRARY_EKF_ANALYSIS.md   # Advanced mathematical reference for the EKF
+├── postfilter_cli.py                  # CLI entrypoint for post-filter pipeline
+├── postfilter_orchestrator.py         # Orchestrator with batching, pooling, and snapshot flush
+├── postfilter_worker.py               # Worker initialization and batch processing task
+├── TRAFFIC_LIBRARY_EKF_ANALYSIS.md   # Advanced mathematical reference for the EKF
+└── trajectory_filters.py              # Pure trajectory checks (velocity, accel, distance)
 ```
 
 ---
@@ -153,6 +158,34 @@ Module Objective
            │     write_flights_to_parquet() → *_clean_si.parquet
            │   update_global_registry(GLOBAL_CLEAN_REGISTRY, entries)
            └── Output : *_clean_si.parquet + GLOBAL_CLEAN_REGISTRY updated
+
+ Objective 2 (Post-Filtering)
+  └── Annotate clean-registry flights with trajectory quality post-filter outcomes (velocity, coordinate velocity, acceleration, distance).
+       │
+       ├── Sub-objective 1 — CLI & corridor resolution
+       │    ├── Input : corridor ranks, routes, or custom source directory, and filters selection
+       │    ├── Solution : postfilter_cli.py::main()
+       │    │              Resolves target flights matching criteria from clean registry
+       │    └── Output : list of targets to filter, filters_to_run list
+       │
+       ├── Sub-objective 2 — Multi-process worker pool initialization
+       │    ├── Input : thresholds dictionary, spawn context
+       │    ├── Solution : postfilter_worker.py::_worker_init()
+       │    │              Pre-loads airportsdata into process-level memory, configures log handler
+       │    └── Output : process-level globals initialized across pool worker interpreters
+       │
+       ├── Sub-objective 3 — Dataclass tracking & sanitization
+       │    ├── Input : flight_id, file_path, and filter pass fields
+       │    ├── Solution : FilterResult dataclass (filter_result.py)
+       │    │              __post_init__() enforces pre-check; as_dict() enforces post-check sanitization + warnings
+       │    └── Output : standardized dictionary data structure mapping outcome columns
+       │
+       ├── Sub-objective 4 — Batch execution & atomic temporary parquet flush
+       │    ├── Input : FilterResult stubs, chunk size, filters_to_run
+       │    ├── Solution : postfilter_orchestrator.py::run_postfilters()
+       │    │              Splits stubs into batches, invokes pool, merges outcomes back to in-memory df,
+       │    │              overwrites global_clean_registry.tmp.parquet after each batch
+       │    └── Output : global_clean_registry.parquet updated on success; tmp snapshot deleted
 ```
 
 ---
@@ -214,7 +247,47 @@ flowchart TD
 
 ---
 
-### 4.2 Workflow B — Programmatic In-Process Entry (`clean_pycontrails_flight` / `clean_traffic_flight`)
+### 4.2 Workflow B — Trajectory Post-Filtering (`postfilter_cli.py`)
+
+This workflow applies physical threshold checks (velocity, coordinate velocity, acceleration, and distance) to already-smoothed trajectories (`_clean_si.parquet`), annotating the global registry with boolean outcome columns.
+
+```mermaid
+flowchart TD
+    A["CLI: python -m src.core.processing.postfilter_cli\n--routes / --ranks / --filters\n--batch-size N --max-workers W"] --> B["setup_file_logger('processing.log')\ninit_runtime()"]
+    B --> C["Resolve target flights from GLOBAL_CLEAN_REGISTRY\nusing ranks, routes, or source_dir"]
+    C --> D["run_postfilters()\nLoad GLOBAL_CLEAN_REGISTRY into memory DataFrame"]
+    D --> E["Prepare missing columns (pass / reject_reason)\nBuild list of FilterResult stubs"]
+    E --> F{"overwrite == False?"}
+    F -->|Yes| G["Skip flights where all requested filters are already non-NA"]
+    F -->|No| H["Process all target flights unconditionally"]
+    G --> I["Partition remaining flights into batches of size N"]
+    H --> I
+    I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer loads airportsdata once per worker process"]
+    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\nRun check_velocity, check_coordinate_velocity,\ncheck_acceleration, check_distance\nReturn list of updated FilterResult stubs"]
+    K --> L["Main process: future as_completed\nMerge outcomes back to index of in-memory DataFrame\nFlush full DataFrame to global_clean_registry.tmp.parquet"]
+    L --> M["Final step: overwrite original global_clean_registry.parquet\nDelete .tmp.parquet snapshot"]
+```
+
+**Step-by-step:**
+
+1. **CLI Ingestion**: `postfilter_cli.py` invokes `setup_file_logger("processing.log")` and parses parameters, including `--filters` list and corridor constraints.
+2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory and sets the index to `flight_id` for efficient in-place updates. It appends missing pass/reason columns as `pd.NA`.
+3. **Target Scope & Overwrite Logic**: For each target flight:
+   - If `--overwrite` is specified, it is processed unconditionally.
+   - If `--overwrite` is not specified, it is skipped only if all requested filters have non-null outcomes. If even one requested filter is still `pd.NA`, the flight is added to the queue to re-run all requested checks.
+4. **Child Process Initializer**: The process pool launches under the `"spawn"` context. Its initializer `_worker_init` loads the `airportsdata` database once and caches it in a process-level global, avoiding redundant I/O during distance checks.
+5. **Parallel Batch Filtering**: Workers load each `_clean_si.parquet` file via its absolute path. The worker evaluates the trajectory using pure mathematics:
+   - `check_velocity()`: Computes 3D ground/vertical speed in m/s, compares it against the converted SI threshold, and flags anomalies.
+   - `check_coordinate_velocity()`: Computes step-to-step 3D speed directly from latitude, longitude, and altitude (in m/s).
+   - `check_acceleration()`: Computes 3D step-to-step acceleration from ground speed and vertical rate.
+   - `check_distance()`: Wrapper that computes absolute horizontal and vertical deviations from origin/destination airport coordinates.
+6. **Double-Sanitization**: Dataclass attributes are sanitized during instantiation (`__post_init__`) and again upon export (`as_dict()`). Any non-boolean/non-NA value is replaced with `pd.NA` and logged as a warning.
+7. **Atomic Parquet Snapshot Flush**: As each batch future resolves, the orchestrator merges updated dataclass values into the master in-memory DataFrame, immediately saving a full registry copy to `global_clean_registry.tmp.parquet`.
+8. **Finalization**: On successful completion, the original registry is safely overwritten with the complete data, and the temporary snapshot is deleted. On crash, the `.tmp.parquet` remains for diagnostic recovery.
+
+---
+
+### 4.3 Workflow C — Programmatic In-Process Entry (`clean_pycontrails_flight` / `clean_traffic_flight`)
 
 This workflow exposes the EKF cleaning pipeline as a library call, suitable for use by the
 fetcher, corridor orchestrator, or any other pipeline stage that already holds an in-memory
@@ -285,8 +358,9 @@ To ensure that `kalman_filter.py` can be seamlessly embedded within both standal
 
 ## 5. CLI Usage Guide
 
-### Bash
+### 5.1 Workflow A — Batch EKF Smoothing (`kalman_filter.py`)
 
+#### Bash
 ```bash
 # Process specific corridor volume ranks across 8 parallel CPU cores
 python -m src.core.processing.kalman_filter --ranks 1 2 3 --max-workers 8
@@ -310,8 +384,7 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --overwrite --workers 1
 ```
 
-### PowerShell
-
+#### PowerShell
 ```powershell
 # Process specific corridor volume ranks across 8 parallel CPU cores
 python -m src.core.processing.kalman_filter --ranks 1 2 3 --max-workers 8
@@ -335,7 +408,7 @@ python -m src.core.processing.kalman_filter --rank-range 1 50 --save-diagnostics
 python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --overwrite --workers 1
 ```
 
-### Parameter Reference
+#### Parameter Reference
 
 | Option | Type | Default | Required | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -348,6 +421,41 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 | `--overwrite` | flag | `False` | No | When set, re-processes and overwrites any existing `*_clean_si.parquet` (and diagnostic `.npz`) files that would otherwise be skipped. |
 | `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel `ProcessPoolExecutor` worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` from `src.common.config` (currently `4`). If set to `1`, execution falls back to sequential loop. |
 | `--time-grid`, `--time-grid-seconds` | `int` | `CORRIDOR_TIME_GRID_SECONDS` / `60` | No | Uniform time grid spacing in seconds for EKF resampling. |
+
+---
+
+### 5.2 Workflow B — Trajectory Post-Filtering (`postfilter_cli.py`)
+
+#### Bash
+```bash
+# Post-filter specific corridor volume ranks, running only velocity and distance checks
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters velocity distance --max-workers 8
+
+# Force re-running and overwriting all four post-filters on all clean flights
+python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
+```
+
+#### PowerShell
+```powershell
+# Post-filter specific corridor volume ranks, running only velocity and distance checks
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters velocity distance --max-workers 8
+
+# Force re-running and overwriting all four post-filters on all clean flights
+python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
+```
+
+#### Parameter Reference
+
+| Option | Type | Default | Required | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `--ranks` | `int` (list) | `None` | No | One or more specific corridor volume rank indices to process. Looked up in `master_flights_route_summary.parquet`. |
+| `--rank-range` | `int int` | `None` | No | Inclusive start–end rank range to process. |
+| `--routes` | `str` (list) | `None` | No | One or more explicit corridor strings to process (e.g. `EDDF-LIRF`). |
+| `--source-dir` | `str` | `None` | No | Filter flights by their parent path in the clean registry. |
+| `--overwrite` | flag | `False` | No | When set, ignores cached columns and re-evaluates all target rows. |
+| `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` (currently `4`). |
+| `--batch-size` | `int` | `200` | No | Number of rows processed per worker batch. |
+| `--filters` | `str` (list) | all four | No | List of sub-filters to run. Choices: `velocity`, `coordinate_velocity`, `acceleration`, `distance`. |
 
 ---
 
@@ -364,6 +472,7 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 | `traffic` (`Flight`, `EKF`, `ProcessXYZZFilterBase`, `rts_smoother`) | EKF Jacobians (`EKF.jacobian_state_transition`, `EKF.state_transition_function`), state preprocessing / postprocessing (`ProcessXYZZFilterBase`), RTS backward smoother (`rts_smoother`) |
 | `openap.phase.FlightPhase` | Primary aerodynamic flight phase labelling (`CL`, `CR`, `DE`, …); ROCD-threshold fallback if unavailable |
 | `pycontrails` | `pycontrails.Flight` SI containers; consumed and produced by `clean_pycontrails_flight()` |
+| `airportsdata` | Airport metadata registry database, resolved in worker process memory cache for distance filter checks |
 
 ### Config Constants (`src.common.config`)
 
@@ -374,15 +483,24 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 | `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file mapping cleaned trajectory paths; contains `flight_id` and `file_path` |
 | `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
+| `POSTFILTER_BATCH_SIZE_DEFAULT` | `200` (int) | Default batch size of stubs evaluated per worker process during post-filtering |
+| `POSTFILTER_COL_VELOCITY_PASS` | `"velocity_pass"` (str) | Clean-registry column indicating if flight passed the raw gs/rocd physical limit check |
+| `POSTFILTER_COL_VELOCITY_REASON` | `"velocity_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the velocity check |
+| `POSTFILTER_COL_COORD_VEL_PASS` | `"coordinate_velocity_pass"` (str) | Clean-registry column indicating if flight passed the coordinates-derived speed check |
+| `POSTFILTER_COL_COORD_VEL_REASON` | `"coordinate_velocity_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the coordinate velocity check |
+| `POSTFILTER_COL_ACCEL_PASS` | `"acceleration_pass"` (str) | Clean-registry column indicating if flight passed the step-to-step 3D acceleration check |
+| `POSTFILTER_COL_ACCEL_REASON` | `"acceleration_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the acceleration check |
+| `POSTFILTER_COL_DISTANCE_PASS` | `"distance_pass"` (str) | Clean-registry column indicating if flight passed origin/destination horizontal and vertical bounds |
+| `POSTFILTER_COL_DISTANCE_REASON` | `"distance_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the distance check |
 
 ### Registry Files
 
 | File | Access | Description |
 | :--- | :--- | :--- |
-| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written** | Clean flight mapping: contains `flight_id` and `file_path` of resampled trajectories. |
+| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight mapping: contains `flight_id`, `file_path`, and the 8 boolean/reason post-filter columns. |
 | `data/registries/global_ekf_diag_registry.parquet` (`GLOBAL_EKF_DIAG_REGISTRY`) | **Written** | EKF diagnostics index: maps `flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, and `ekf_max_trace_p`. |
 | `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
-| `data/logs/processing.log` | **Written** | All `logging` output from batch runs (INFO progress, WARNING anomalies, ERROR per-flight failures). |
+| `data/logs/processing.log` | **Written** | All `logging` output from EKF smoothing (`kalman_filter.py`) and post-filtering (`postfilter_cli.py`) runs. |
 | `data/logs/skipped_aircraft.log` | **Appended** | Tab-separated audit entries (`ISO_UTC \t flight_id \t typecode \t REASON`) for every flight rejected by the Rule 11 typecode gate. |
 
 For canonical naming conventions, coordinate reference system definitions, and unit

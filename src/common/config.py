@@ -215,6 +215,19 @@ DEFAULT_POSTFILTER_THRESHOLDS = {
     "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2), corresponds to Mach 1
 }
 
+# Post-filter stage defaults
+POSTFILTER_BATCH_SIZE_DEFAULT: int = 200
+
+# Clean-registry column names written by the post-filter stage
+POSTFILTER_COL_VELOCITY_PASS: str = "velocity_pass"
+POSTFILTER_COL_VELOCITY_REASON: str = "velocity_reject_reason"
+POSTFILTER_COL_COORD_VEL_PASS: str = "coordinate_velocity_pass"
+POSTFILTER_COL_COORD_VEL_REASON: str = "coordinate_velocity_reject_reason"
+POSTFILTER_COL_ACCEL_PASS: str = "acceleration_pass"
+POSTFILTER_COL_ACCEL_REASON: str = "acceleration_reject_reason"
+POSTFILTER_COL_DISTANCE_PASS: str = "distance_pass"
+POSTFILTER_COL_DISTANCE_REASON: str = "distance_reject_reason"
+
 # Flag to force a re-computation of airport distance metrics before filtering
 RECOMPUTE_AIRPORT_DISTANCES = True
 
