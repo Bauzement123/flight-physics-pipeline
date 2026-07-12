@@ -137,7 +137,7 @@ flowchart TD
    - **Step 2 — Acceleration**: `filter_max_acceleration()` rejects if max step-to-step 3D acceleration exceeds `max_acceleration_mps2` (≈ Mach 1).
    - **Step 3 — Distance prefilters**: `passes_distance_prefilters()` checks re-computed waypoint-to-airport distances. The chain stops at the first rejection.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
-11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**: Row 1 (Raw + Prefilter), Row 2 (Those But Clean — ignoring POSTFILTER rejections), Row 3 (Clean + Postfilter — full combined rejection view). When `show_rejected=True` (the default), any prefilter-rejected flight whose clean trajectory is absent from the registry is backfilled with its raw DataFrame so it is still rendered as a **red dashed line** (`REJECTED_COLOR = "#ff0000"`) in Row 2. A matching red-dashed entry is appended to the figure legend automatically.
+11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**: Row 1 (Raw + Prefilter), Row 2 (Those But Clean — ignoring POSTFILTER rejections), Row 3 (Clean + Postfilter — full combined rejection view). When `show_rejected=True` (the default), two local merged dicts (`trajectories_for_row2`, `trajectories_for_row3`) are built by copying `trajectories_clean` and back-filling any missing flight IDs from the raw `trajectories` dict. Both Row 2 and Row 3 receive these merged dicts, ensuring all 40 cohort flights are renderable. Rejected flights appear as red dashed lines (`REJECTED_COLOR = "#ff0000"`); a matching legend entry is appended automatically. The original `trajectories_clean` dict is never mutated.
 12. Each worker returns a `flight_updates` dict mapping `flight_id → {status, fail_stage, reject_reason}` for all POSTFILTER rejections back to the main process.
 13. The main process merges all worker updates into the global `df_eval`, overwrites `filter_evaluation.csv` with the final post-filtered statuses, and logs the total count of POSTFILTER rejections applied.
 
@@ -313,7 +313,7 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 ### 5.3 Change Log — Hotfixes
 
 > [!NOTE]
-> **Plotting Bug (resolved — 2026-07-12)**: `plot_cohort_audit_page()` previously dropped prefilter-rejected flights from Row 2 of the 3-row PDF layout when their clean trajectory was absent from the registry. Fixed by backfilling `trajectories_clean` with each flight's raw DataFrame when `show_rejected=True`, ensuring all flights are visible. Rejected trajectories are now rendered as red dashed lines (`REJECTED_COLOR = "#ff0000"`) and annotated in the figure legend.
+> **Plotting Bug (resolved — 2026-07-12, follow-up fix 2026-07-12)**: Initial fix used `trajectories_clean.setdefault()` to back-fill rejected flights, silently mutating the caller's dict and only covering Row 2. Follow-up fix builds two separate local dicts (`trajectories_for_row2`, `trajectories_for_row3`) by copying `trajectories_clean` before merging, so the original dict is never modified and **all 40 flights appear in every row** when `show_rejected=True`.
 
 > [!NOTE]
 > **`--show-rejected` default changed**: Was `store_true` (default `False`). Changed to `type=bool, default=True` so rejected trajectories are always visible unless explicitly suppressed.

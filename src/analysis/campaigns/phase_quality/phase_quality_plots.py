@@ -237,8 +237,27 @@ def plot_cohort_audit_page(
         label_prefix="Raw + Prefilter" if is_three_row else ""
     )
 
-    #If there are clean trajectories, render the additional rows
+    # If there are clean trajectories, render the additional rows
     if is_three_row:
+        # -----------------------------------------------------------------
+        # Build trajectory dictionaries that contain *all* flights when
+        # show_rejected is True.  We keep the original clean dict untouched
+        # for the normal (show_rejected=False) path.
+        # -----------------------------------------------------------------
+        if show_rejected:
+            # Row 1 already uses the raw dict (trajectories) – no change needed.
+            # For Rows 2 and 3 we need a merged dict that adds any missing raw
+            # trajectories (rejected flights) to the clean dict so the renderer
+            # can draw them as red dashed lines.
+            trajectories_for_row2: dict[str, pd.DataFrame] = trajectories_clean.copy()
+            trajectories_for_row3: dict[str, pd.DataFrame] = trajectories_clean.copy()
+            for fid, df in trajectories.items():
+                trajectories_for_row2.setdefault(fid, df)  # add missing rejected flights
+                trajectories_for_row3.setdefault(fid, df)  # same for Row 3
+        else:
+            trajectories_for_row2 = trajectories_clean
+            trajectories_for_row3 = trajectories_clean
+
         # Row 2: Those But Clean (uses eval_records ignoring POSTFILTER rejections)
         ax3 = fig.add_subplot(3, 2, 3, projection=ccrs.PlateCarree())
         ax4 = fig.add_subplot(3, 2, 4)
@@ -249,15 +268,10 @@ def plot_cohort_audit_page(
 
         map_cache.add_features_to_axes(ax3)
 
-        # When show_rejected is enabled, backfill any prefilter-rejected flight IDs
-        # that are absent from trajectories_clean with their raw DataFrame so the
-        # renderer can draw them as red dashed lines in Row 2.
-        if show_rejected:
-            for fid, df in trajectories.items():
-                trajectories_clean.setdefault(fid, df)
-
+        # Uses the merged dict so that rejected flights (absent from the clean
+        # registry) are still drawable as red dashed lines when show_rejected=True.
         _render_trajectory_pair_on_axes(
-            ax3, ax4, candidate_flight_ids, trajectories_clean, eval_records_pre,
+            ax3, ax4, candidate_flight_ids, trajectories_for_row2, eval_records_pre,
             show_rejected, map_cache, route_id, crop_padding, label_prefix="Those But Clean"
         )
 
@@ -271,8 +285,10 @@ def plot_cohort_audit_page(
 
         map_cache.add_features_to_axes(ax5)
 
+        # Uses the merged dict so that prefilter-rejected flights appear here too
+        # as red dashed lines alongside the clean+postfilter evaluation colours.
         _render_trajectory_pair_on_axes(
-            ax5, ax6, candidate_flight_ids, trajectories_clean, eval_records,
+            ax5, ax6, candidate_flight_ids, trajectories_for_row3, eval_records,
             show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean + Postfilter"
         )
 
