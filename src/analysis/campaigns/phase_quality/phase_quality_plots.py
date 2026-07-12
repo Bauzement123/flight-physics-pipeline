@@ -41,8 +41,7 @@ PHASE_COLORS = {
     5: "#9467bd",
 }
 DEFAULT_COLOR = "#bcbd22"  # Olive / Yellow-Green for NA or unknown phase
-REJECTED_COLOR = "#ff0000"               # keep as a fallback (deep red)
-REJECTED_PREFILTER_COLOR = "#ff7f7f"      # lighter red / pink for pre-filter rejections
+REJECTED_PREFILTER_COLOR = "#cc00ff"      # lighter red / pink for pre-filter rejections
 REJECTED_POSTFILTER_COLOR = "#ff0000"     # deep red for post-filter rejections
 
 # Hardcoded DPI for PDF rasterization and rendering
@@ -144,16 +143,14 @@ def _render_trajectory_pair_on_axes(
                 rej_color = REJECTED_PREFILTER_COLOR
             elif fail_stage == "POSTFILTER":
                 rej_color = REJECTED_POSTFILTER_COLOR
-            else:
-                rej_color = REJECTED_COLOR
-            ax_map.plot(lons, lats, color=rej_color, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3, transform=ccrs.PlateCarree())
-            ax_prof.plot(t_norm, alts, color=rej_color, linestyle="--", linewidth=0.8, alpha=0.4, zorder=3)
+            ax_map.plot(lons, lats, color=rej_color, linestyle="--", linewidth=1, alpha=0.6, zorder=3, transform=ccrs.PlateCarree())
+            ax_prof.plot(t_norm, alts, color=rej_color, linestyle="--", linewidth=1, alpha=0.6, zorder=3)
         else:
             stats["plotted"] += 1
             pts_xy = np.array([lons, lats]).T.reshape(-1, 1, 2)
-            ax_map.add_collection(LineCollection(np.concatenate([pts_xy[:-1], pts_xy[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4, transform=ccrs.PlateCarree()))
+            ax_map.add_collection(LineCollection(np.concatenate([pts_xy[:-1], pts_xy[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.8, zorder=4, transform=ccrs.PlateCarree()))
             pts_zt = np.array([t_norm, alts]).T.reshape(-1, 1, 2)
-            ax_prof.add_collection(LineCollection(np.concatenate([pts_zt[:-1], pts_zt[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.75, zorder=4))
+            ax_prof.add_collection(LineCollection(np.concatenate([pts_zt[:-1], pts_zt[1:]], axis=1), colors=colors[:-1], linewidths=1.2, alpha=0.8, zorder=4))
 
     _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lon, max_lon, min_lat, max_lat, min_alt, max_alt, label_prefix)
     return stats
@@ -284,7 +281,7 @@ def plot_cohort_audit_page(
     map_cache.add_features_to_axes(ax1)
 
     stats = _render_trajectory_pair_on_axes(
-        ax1, ax2, candidate_flight_ids, trajectories, eval_records,
+        ax1, ax2, candidate_flight_ids, trajectories, eval_records_pre,
         show_rejected, map_cache, route_id, crop_padding,
         label_prefix="Raw + Prefilter" if is_three_row else ""
     )
@@ -365,8 +362,8 @@ def plot_cohort_audit_page(
             [], [],
             color=REJECTED_PREFILTER_COLOR,
             linestyle="--",
-            linewidth=0.8,
-            alpha=0.4,
+            linewidth=1,
+            alpha=0.6,
             label="Prefilter Rejected"
         )
         # Postfilter-rejected (deep red)
@@ -374,13 +371,13 @@ def plot_cohort_audit_page(
             [], [],
             color=REJECTED_POSTFILTER_COLOR,
             linestyle="--",
-            linewidth=0.8,
-            alpha=0.4,
+            linewidth=1,
+            alpha=0.6,
             label="Postfilter Rejected"
         )
         legend_handles.extend([pre_handle, post_handle])
 
-    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records, show_rejected)
+    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records_pre, show_rejected)
     row2_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
     row3_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
 
