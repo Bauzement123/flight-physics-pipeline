@@ -336,10 +336,14 @@ def plot_cohort_audit_page(
 
         # Uses the merged dict so that prefilter-rejected flights appear here too
         # as red dashed lines alongside the clean+postfilter evaluation colours.
-        _render_trajectory_pair_on_axes(
+        row3_render_stats = _render_trajectory_pair_on_axes(
             ax5, ax6, candidate_flight_ids, trajectories_for_row3, eval_records,
             show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean + Postfilter"
         )
+        stats["plotted"] = row3_render_stats["plotted"]
+        stats["rejected"] = row3_render_stats["rejected"]
+        stats["prefilter"] = row3_render_stats["prefilter"]
+        stats["postfilter"] = row3_render_stats["postfilter"]
 
     na_pct = (stats["na_points"] / stats["total_points"] * 100.0) if stats["total_points"] > 0 else 0.0
     summary_str = f"Route: {route_id} | Cohort {cohort_idx} ({len(candidate_flight_ids)} Candidates)\n"
