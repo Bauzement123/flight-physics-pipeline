@@ -98,13 +98,15 @@ Module Objective
       │    ├── Solution : rts_smoother()  [traffic.algorithms.filters.ekf — no custom math]
       │    └── Output : smoothed_states pd.DataFrame (T,6)
       │
-      ├── Sub-objective 6 — EKF quality metrics
-      │    ├── Input : S_hist (T,6,6), P_hist (T,6,6), e_hist (T,6)
-      │    ├── Solution : compute_ekf_quality_metrics()
-      │    │     mean_NIS  = Σ (e_i^T S_i^{-1} e_i) / valid_steps
-      │    │     NIS factor  = 6 / max(6, mean_NIS)
-      │    │     trace factor = exp(−max(0, max_trace_P − 60) / 500)
-      │    │     quality_score = clip(NIS_factor × trace_factor, 0, 1)
+      ├── Sub-objective 6 — EKF quality metrics & diagnostic loaders
+      │    ├── Input : S_hist (T,6,6), P_hist (T,6,6), e_hist (T,6) or EKF diagnostic path
+      │    ├── Solution : • compute_ekf_quality_metrics()
+      │    │                mean_NIS  = Σ (e_i^T S_i^{-1} e_i) / valid_steps
+      │    │                NIS factor  = 6 / max(6, mean_NIS)
+      │    │                trace factor = exp(−max(0, max_trace_P − 60) / 500)
+      │    │                quality_score = clip(NIS_factor × trace_factor, 0, 1)
+      │    │              • load_ekf_diag_arrays(diag_path): loads S_k, P_k, e_k from NPZ file
+      │    │              • compute_ekf_quality_metrics_from_diag(diag_path): wraps loader and EKF quality metric calculator
       │    └── Output : (ekf_quality_score, ekf_mean_nis, ekf_max_trace_p)
       │
       ├── Sub-objective 7 — Optional diagnostic tensor export
@@ -206,7 +208,9 @@ flowchart TD
 16. **Postprocessing & grid resampling**: `ProcessXYZZFilterBase.postprocess(smoothed_states)` converts the smoothed EKF state back to aviation units. `to_lonlat.transform(x, y)` reprojects LAEA Cartesian back to WGS84 `(longitude, latitude)`. The full merged DataFrame is then sliced to only the rows whose timestamps are in `grid_times` (`df_out[df_out["timestamp"].isin(grid_times)]`), yielding an exactly equidistant trajectory of spacing `time_grid_seconds`.
 17. **Phase assignment & metadata**: `_finalize_resampled_flight()` re-injects original flight metadata (`icao24`, `callsign`, `typecode`, airport codes, `firstseen`/`lastseen`), sets `onground = False`, calls `assign_flight_phases()` (OpenAP primary, ROCD fallback), and converts to a `pycontrails.Flight` in SI units via `traffic_to_pycontrails()`.
 18. **Output write**: All successfully cleaned pycontrails flights from a single raw Parquet are collected and written together by `write_flights_to_parquet(pc_flights, out_path)` → `{out_dir}/*_clean_si.parquet`.
-19. **Registry update**: `update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)` appends all collected registry rows — `flight_id`, `file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`, `diag_file_path` — to `data/registries/global_clean_registry.parquet` using an atomic deduplication-aware write.
+19. **Registry updates**:
+    - **Clean Trajectory Index**: `update_global_registry(GLOBAL_CLEAN_REGISTRY, clean_entries)` appends basic mapping rows (`flight_id`, `file_path`) to `data/registries/global_clean_registry.parquet`.
+    - **EKF Diagnostic Manifest**: If diagnostics were exported, the pipeline calls `update_global_registry(GLOBAL_EKF_DIAG_REGISTRY, diag_entries)` to append (`flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`) to the dedicated diagnostic manifest. Both writes are atomic and deduplicated.
 
 ---
 
@@ -367,14 +371,16 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 | :--- | :--- | :--- |
 | `BASE_DIR` | `pathlib.Path` | Workspace root; used to construct all absolute paths and compute registry-relative path strings |
 | `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Default temporal resolution of the injected uniform time grid when no CLI or programmatic override is specified |
-| `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file updated by `update_global_registry()` after each batch run |
+| `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file mapping cleaned trajectory paths; contains `flight_id` and `file_path` |
+| `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 
 ### Registry Files
 
 | File | Access | Description |
 | :--- | :--- | :--- |
-| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written** | Indexed output: one row per successfully cleaned flight, with `flight_id`, `file_path`, `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`, `diag_file_path`. |
+| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written** | Clean flight mapping: contains `flight_id` and `file_path` of resampled trajectories. |
+| `data/registries/global_ekf_diag_registry.parquet` (`GLOBAL_EKF_DIAG_REGISTRY`) | **Written** | EKF diagnostics index: maps `flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, and `ekf_max_trace_p`. |
 | `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
 | `data/logs/processing.log` | **Written** | All `logging` output from batch runs (INFO progress, WARNING anomalies, ERROR per-flight failures). |
 | `data/logs/skipped_aircraft.log` | **Appended** | Tab-separated audit entries (`ISO_UTC \t flight_id \t typecode \t REASON`) for every flight rejected by the Rule 11 typecode gate. |

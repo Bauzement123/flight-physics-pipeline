@@ -53,6 +53,7 @@ from src.common.config import (
     BASE_DIR,
     CORRIDOR_TIME_GRID_SECONDS,
     GLOBAL_CLEAN_REGISTRY,
+    GLOBAL_EKF_DIAG_REGISTRY,
     is_supported_typecode,
     PROCESSING_DEFAULT_MAX_WORKERS,
     PROCESSING_NUMERIC_THREADS_PER_WORKER,
@@ -311,6 +312,28 @@ def compute_ekf_quality_metrics(
     return quality_score, float(mean_nis), float(max_trace_p)
 
 
+def load_ekf_diag_arrays(diag_path: Path) -> tuple[ArrayFloat, ArrayFloat, ArrayFloat]:
+    """Loads S_k, P_k, and e_k arrays from an EKF diagnostic .npz archive."""
+    with np.load(diag_path) as data:
+        S_hist = data["S_k"]
+        P_hist = data["P_k"]
+        e_hist = data["e_k"]
+    return S_hist, P_hist, e_hist
+
+
+def compute_ekf_quality_metrics_from_diag(
+    diag_path: Path,
+) -> tuple[float, float, float]:
+    """
+    Loads EKF diagnostic tensors from a .npz file and recomputes the scalar quality metrics.
+
+    Returns:
+        ekf_quality_score, ekf_mean_nis, ekf_max_trace_p
+    """
+    S_hist, P_hist, e_hist = load_ekf_diag_arrays(diag_path)
+    return compute_ekf_quality_metrics(S_hist, P_hist, e_hist)
+
+
 # ==============================================================================
 # Flight phase assignment
 # ==============================================================================
@@ -359,7 +382,6 @@ def assign_flight_phases(df: pd.DataFrame, typecode: str) -> pd.DataFrame:
         phases = _fallback_rocd_phases(df_out)
     phase_list = list(phases)
     df_out["flight_phase"] = phase_list
-    df_out["phase"]        = phase_list
     return df_out
 
 
@@ -700,6 +722,7 @@ def process_trajectories_by_route_ranks(
         raise ValueError("time_grid_seconds must be a positive integer number of seconds.")
 
     all_entries: list[dict[str, Any]] = []
+    # Each task: (raw_file, out_dir, save_diagnostics, overwrite, flight_id_filter, time_grid_seconds)
     tasks_to_run: list[tuple[Path, Path, bool, bool, set[str] | None, int]] = []
 
     if source_dir is not None:
@@ -801,8 +824,32 @@ def process_trajectories_by_route_ranks(
                     logging.error(f"Worker process failed: {exc}")
 
     if all_entries:
-        update_global_registry(GLOBAL_CLEAN_REGISTRY, all_entries)
-        logging.info(f"Registry updated with {len(all_entries)} new clean flight entries.")
+        # Extract clean registry entries (only flight_id and file_path)
+        clean_entries = [
+            {
+                "flight_id": entry["flight_id"],
+                "file_path": entry["file_path"],
+            }
+            for entry in all_entries
+        ]
+        update_global_registry(GLOBAL_CLEAN_REGISTRY, clean_entries)
+        logging.info(f"Registry updated with {len(clean_entries)} new clean flight entries.")
+
+        # Extract only EKF diagnostic entries (where diag_file_path is not None / null)
+        diag_entries = [
+            {
+                "flight_id": entry["flight_id"],
+                "diag_file_path": entry["diag_file_path"],
+                "ekf_quality_score": entry["ekf_quality_score"],
+                "ekf_mean_nis": entry["ekf_mean_nis"],
+                "ekf_max_trace_p": entry["ekf_max_trace_p"],
+            }
+            for entry in all_entries
+            if entry.get("diag_file_path") is not None
+        ]
+        if diag_entries:
+            update_global_registry(GLOBAL_EKF_DIAG_REGISTRY, diag_entries)
+            logging.info(f"Diagnostics registry updated with {len(diag_entries)} entries.")
 
 
 # ==============================================================================

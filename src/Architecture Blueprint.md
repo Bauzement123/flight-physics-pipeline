@@ -105,6 +105,7 @@ Standard suffixes indicate the processing state of trajectory datasets across th
 | `*_clean_si.parquet` | Resampled and EKF-smoothed coordinates in SI units. | Parquet |
 | `*_synthesized_c[ID].parquet` | Temporal-gridded DTW trajectory route centroids. | Parquet |
 | `*_simulated.parquet` | Trajectories containing PSFlight and CoCiP simulation results. | Parquet |
+| `*_ekf_diag.npz` | Per-flight EKF diagnostic tensor archive containing covariance (`S_k`, `P_k`) and innovation (`e_k`) arrays and scalar quality metrics. Written by `kalman_filter.py` when `--save-diagnostics` is active. | Compressed NumPy NPZ |
 
 ### 3.3 Physical Units Standards
 The pipeline converts raw aviation inputs into SI units during EKF smoothing and simulation phases. Conversion factors are centralized in `src/common/config.py`:
@@ -121,7 +122,8 @@ The pipeline converts raw aviation inputs into SI units during EKF smoothing and
 All global state tracking is managed via atomic Parquet registries defined in `src/common/config.py`:
 
 * `GLOBAL_TRAJECTORY_REGISTRY`: Tracks raw trajectory acquisition status (`data/registries/global_trajectory_registry.parquet`).
-* `GLOBAL_CLEAN_REGISTRY`: Tracks EKF smoothing and resampling completion (`data/registries/global_clean_registry.parquet`).
+* `GLOBAL_CLEAN_REGISTRY`: Tracks EKF-cleaned trajectories (`data/registries/global_clean_registry.parquet`). Contains `flight_id` and `file_path` of resampled `*_clean_si.parquet` files.
+* `GLOBAL_EKF_DIAG_REGISTRY`: Dedicated diagnostic manifest (`data/registries/global_ekf_diag_registry.parquet`). Maps `flight_id` → `diag_file_path` (relative `*_ekf_diag.npz` path) + scalar columns `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`. Written by `kalman_filter.py` when `--save-diagnostics` is active; can be rebuilt/recomputed via `build_global_manifest.py --diag-only`.
 * `GLOBAL_SIMULATION_REGISTRY`: Tracks individual flight physics simulation outcomes (`data/registries/global_simulation_registry.parquet`).
 * `GLOBAL_CORRIDOR_SIM_REGISTRY`: Tracks corridor-level cloned simulation progress (`data/registries/global_corridor_simulation_registry.parquet`).
 * `GLOBAL_MODEL_REGISTRY`: Stores DTW cluster medoid IDs and corridor model metadata (`data/registries/global_model_registry.parquet`).
@@ -141,6 +143,7 @@ All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `l
 * `weather.log`: Copernicus CDS ERA5 NetCDF downloads.
 * `simulation.log`: PSFlight and CoCiP simulation runs.
 * `calibration.log`: Phase quality and variational calibration campaigns.
+* `manifest.log`: Global registry scan, pruning, and rebuild/update runs (`build_global_manifest.py`).
 * `skipped_aircraft.log`: Global append-only log recording skipped airframes across all pipeline stages.
 
 ### 3.6 Concurrency & Thread-Limiting Policy
@@ -218,14 +221,21 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
   ```
 
 ### 4.4 Core Processing (`src/core/processing/`)
-* **Objective**: Clean raw ADS-B waypoints by applying an Extended Kalman Filter (EKF) in a local Lambert projection plane and resampling to a uniform 1-minute grid.
+* **Objective**: Clean raw ADS-B waypoints by applying a 6D Kinematic Extended Kalman Filter (EKF) in a per-flight LAEA projection plane, resample to a uniform time grid (default 60 s), assign OpenAP aerodynamic flight phases, and optionally export EKF diagnostic tensors for offline mathematical autopsy.
 * **FAST Mapping**:
   ```text
   Trajectory Processing (EKF)
-   └── Smoothing & Resampling: kalman_filter.py::process_flight()
-        ├── Inputs: Raw trajectory waypoints (`*_raw.parquet`)
-        ├── Outputs: Clean SI trajectories (`*_clean_si.parquet`) and `GLOBAL_CLEAN_REGISTRY` update
-        ├── Safety: Uses `traffic` library EKF; logs anomalies to `processing.log`
+   └── Smoothing, Resampling & Diagnostics: kalman_filter.py
+        ├── Inputs: Raw trajectory waypoints (`*_raw.parquet`) queried via GLOBAL_TRAJECTORY_REGISTRY
+        ├── Outputs:
+        │    ├── Clean SI trajectories (`*_clean_si.parquet`) → GLOBAL_CLEAN_REGISTRY updated
+        │    └── (optional) Diagnostic archives (`*_ekf_diag.npz`) → GLOBAL_EKF_DIAG_REGISTRY updated
+        ├── Core Functions:
+        │    ├── run_6d_kinematic_ekf(): Forward EKF pass recording S_hist[i], e_hist[i] per step
+        │    ├── compute_ekf_quality_metrics(S_hist, P_hist, e_hist): NIS-based scalar quality score
+        │    ├── load_ekf_diag_arrays(diag_path): Reads S_k, P_k, e_k from an NPZ archive
+        │    └── compute_ekf_quality_metrics_from_diag(diag_path): Wraps loader + quality metric calculator
+        ├── Safety: Rule 11 typecode validation via is_supported_typecode(); logs rejects to skipped_aircraft.log
         └── Exception: Index setting prior to EKF is omitted to prevent time-serialization JSON crashes
   ```
 
