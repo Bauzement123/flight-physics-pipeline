@@ -215,10 +215,6 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 DEFAULT_POSTFILTER_THRESHOLDS = {
     "max_velocity_kt": 650.0,        # max 3D velocity (knots)
     "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2)
-    "max_dep_horiz_dist": 15000,     # max departure horizontal distance (meters)
-    "max_dep_vert_dist": 1000,       # max departure vertical distance (meters)
-    "max_arr_horiz_dist": 15000,     # max arrival horizontal distance (meters)
-    "max_arr_vert_dist": 1000,       # max arrival vertical distance (meters)
 }
 
 # Post-filter stage defaults

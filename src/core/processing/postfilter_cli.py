@@ -9,6 +9,7 @@ from src.common.config import (
     GLOBAL_CLEAN_REGISTRY,
     POSTFILTER_BATCH_SIZE_DEFAULT,
     PROCESSING_DEFAULT_MAX_WORKERS,
+    DEFAULT_PREFILTER_THRESHOLDS,
     DEFAULT_POSTFILTER_THRESHOLDS,
     BASE_DIR,
 )
@@ -94,7 +95,12 @@ def main() -> None:
                     target_flight_ids.update(df_target["flight_id"].tolist())
                     
     # 2. Invoke orchestrator
+    _DISTANCE_KEYS = ("max_dep_horiz_dist", "max_dep_vert_dist", "max_arr_horiz_dist", "max_arr_vert_dist")
     thresholds = DEFAULT_POSTFILTER_THRESHOLDS.copy()
+    for k in _DISTANCE_KEYS:
+        if k in DEFAULT_PREFILTER_THRESHOLDS:
+            thresholds[k] = DEFAULT_PREFILTER_THRESHOLDS[k]
+
     run_postfilters(
         registry_path=GLOBAL_CLEAN_REGISTRY,
         filters_to_run=args.filters,
