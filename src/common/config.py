@@ -67,6 +67,7 @@ PROCESSING_DEFAULT_MAX_WORKERS: int = 4
 PROCESSING_NUMERIC_THREADS_PER_WORKER: int = 1
 WEATHER_IO_WORKERS: int = 2
 CORRIDOR_IO_THREADS: int = 4
+CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
 
 # Trino retry / timeout parameters (§3.3.1)
 BACKOFF_MAX_RETRIES: int = 10           # Max Trino retry attempts (exponential back-off)
@@ -133,7 +134,7 @@ STABILITY_MAX_RESAMPLE_ROUNDS = 3   # Hard cap: max resample rounds before forci
 
 # Clustering Hyperparameter Tuning Constants
 # Promoted from hardcoded literals in path_generator.py.
-CLUSTERING_MAX_K          = 8      # Maximum k to evaluate in Silhouette loop
+CLUSTERING_MAX_K          = 4      # Maximum k to evaluate in Silhouette loop
 SILHOUETTE_THRESHOLD      = 0.35   # Minimum silhouette score to accept k > 1
 CHAOS_VARIANCE_THRESHOLD  = 200.0  # Total coordinate variance above which k=1 is classified as Chaos
 MIN_FLIGHTS_FOR_CLUSTERING = 3     # Minimum cohort size; below this k=1 is forced
