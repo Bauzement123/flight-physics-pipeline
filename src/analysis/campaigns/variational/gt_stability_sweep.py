@@ -20,7 +20,17 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_ROUTES, GLOBAL_MODEL_REGISTRY, GLOBAL_FLIGHT_CLUSTER_MAP, ORACLE_COHORT_CACHE_DIR
+from src.common.config import (
+    BASE_DIR,
+    D_PCA,
+    SILHOUETTE_THRESHOLD,
+    CALIBRATION_ROUTES,
+    GLOBAL_MODEL_REGISTRY,
+    GLOBAL_FLIGHT_CLUSTER_MAP,
+    ORACLE_COHORT_CACHE_DIR,
+    CLUSTERING_MAX_K,
+    CHAOS_VARIANCE_THRESHOLD,
+)
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.core.corridor.pca_compressor import (
@@ -30,10 +40,71 @@ from src.core.corridor.pca_compressor import (
     fit_pca,
     apply_pca,
 )
-from src.core.corridor.clustering_worker import _evaluate_optimal_k, _select_medoid
 from src.core.corridor.stability_worker import _load_route_flights
 
 logger = logging.getLogger(__name__)
+
+
+def _evaluate_optimal_k(X_pca: np.ndarray) -> tuple:
+    """Evaluates optimal k up to CLUSTERING_MAX_K using Silhouette score."""
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    n = len(X_pca)
+    best_k = 1
+    best_labels = np.zeros(n, dtype=int)
+    best_silhouette = float("nan")
+
+    max_k = min(CLUSTERING_MAX_K, n - 1)
+    if max_k >= 2:
+        best_score = -1.0
+        for k in range(2, max_k + 1):
+            try:
+                km = KMeans(n_clusters=k, random_state=42, n_init="auto")
+                labels = km.fit_predict(X_pca)
+                score = silhouette_score(X_pca, labels)
+                if score > best_score and score >= SILHOUETTE_THRESHOLD:
+                    best_k = k
+                    best_labels = labels
+                    best_score = score
+                    best_silhouette = score
+            except Exception:
+                continue
+
+    # Determine route class
+    if best_k == 1:
+        total_variance = float(np.var(X_pca, axis=0).sum())
+        if total_variance > CHAOS_VARIANCE_THRESHOLD:
+            route_class = 4
+        else:
+            route_class = 1
+    elif best_k == 2:
+        route_class = 2
+    else:
+        route_class = 3
+
+    return best_k, best_labels, best_silhouette, route_class
+
+
+def _select_medoid(
+    X_pca: np.ndarray,
+    cluster_mask: np.ndarray,
+    is_clean_flags: list,
+) -> int:
+    """Selects the representative medoid index within a cluster."""
+    cluster_indices = np.where(cluster_mask)[0]
+    centroid = X_pca[cluster_mask].mean(axis=0)
+    distances = np.linalg.norm(X_pca[cluster_mask] - centroid, axis=1)
+
+    clean_local = np.array([is_clean_flags[i] for i in cluster_indices])
+    if clean_local.any():
+        distances_clean = np.where(clean_local, distances, np.inf)
+        local_best = int(np.argmin(distances_clean))
+    else:
+        local_best = int(np.argmin(distances))
+
+    return int(cluster_indices[local_best])
+
 
 
 DEFAULT_N_VALUES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 400]

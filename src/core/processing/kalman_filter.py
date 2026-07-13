@@ -54,6 +54,7 @@ from src.common.config import (
     CORRIDOR_TIME_GRID_SECONDS,
     GLOBAL_CLEAN_REGISTRY,
     GLOBAL_EKF_DIAG_REGISTRY,
+    PROCESSING_KALMAN_THREADS_PER_WORKER,
     is_supported_typecode,
     PROCESSING_DEFAULT_MAX_WORKERS,
     PROCESSING_NUMERIC_THREADS_PER_WORKER,
@@ -630,7 +631,7 @@ def _worker_init() -> None:
     Guarantees INFO-level log capture and prevents N_workers × N_BLAS thread oversubscription.
     """
     setup_file_logger(log_filename="processing.log")
-    limit_numeric_threads(PROCESSING_NUMERIC_THREADS_PER_WORKER)
+    limit_numeric_threads(PROCESSING_KALMAN_THREADS_PER_WORKER)
 
 
 # ==============================================================================

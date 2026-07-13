@@ -357,7 +357,11 @@ def batch_register_flight_cluster_map(route_results: list) -> None:
     Appends flight_id to cluster_id mappings from multiple route results to the global flight cluster map.
     """
     all_mappings = []
+    incoming_ids = set()
     for res in route_results:
+        route_id = res.get("route_id")
+        if route_id:
+            incoming_ids.add(route_id)
         mappings = res.get("flight_mappings")
         if mappings:
             all_mappings.extend(mappings)
@@ -378,6 +382,11 @@ def batch_register_flight_cluster_map(route_results: list) -> None:
             # Standardize columns for concatenation
             if "route" in df_reg.columns and "route_id" not in df_reg.columns:
                 df_reg = df_reg.rename(columns={"route": "route_id"})
+            
+            # Remove old entries for the routes we are writing now
+            if "route_id" in df_reg.columns and incoming_ids:
+                df_reg = df_reg[~df_reg["route_id"].isin(incoming_ids)]
+                
             df_updated = pd.concat([df_reg, df_new]).drop_duplicates(subset=['flight_id'], keep='last')
         except Exception as e:
             logger.warning(f"Could not read flight cluster map, overwriting: {e}")

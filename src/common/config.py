@@ -65,6 +65,7 @@ DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
 # Pipeline Concurrency and Threading Defaults
 PROCESSING_DEFAULT_MAX_WORKERS: int = 4
 PROCESSING_NUMERIC_THREADS_PER_WORKER: int = 1
+PROCESSING_KALMAN_THREADS_PER_WORKER: int = 2
 WEATHER_IO_WORKERS: int = 2
 CORRIDOR_IO_THREADS: int = 4
 CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
@@ -214,6 +215,10 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 DEFAULT_POSTFILTER_THRESHOLDS = {
     "max_velocity_kt": 650.0,        # max 3D velocity (knots)
     "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2)
+    "max_dep_horiz_dist": 15000,     # max departure horizontal distance (meters)
+    "max_dep_vert_dist": 1000,       # max departure vertical distance (meters)
+    "max_arr_horiz_dist": 15000,     # max arrival horizontal distance (meters)
+    "max_arr_vert_dist": 1000,       # max arrival vertical distance (meters)
 }
 
 # Post-filter stage defaults

@@ -25,10 +25,30 @@ from src.analysis.campaigns.variational.variational_plots import generate_route_
 from src.common.config import BASE_DIR, CALIBRATION_ROUTES, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION_FLIGHT_CLUSTER_MAP
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
-from src.core.corridor.clustering_worker import _select_medoid
 from src.core.corridor.pca_compressor import calculate_delta_cv
 
 logger = logging.getLogger(__name__)
+
+
+def _select_medoid(
+    X_pca: np.ndarray,
+    cluster_mask: np.ndarray,
+    is_clean_flags: list,
+) -> int:
+    """Selects the representative medoid index within a cluster."""
+    cluster_indices = np.where(cluster_mask)[0]
+    centroid = X_pca[cluster_mask].mean(axis=0)
+    distances = np.linalg.norm(X_pca[cluster_mask] - centroid, axis=1)
+
+    clean_local = np.array([is_clean_flags[i] for i in cluster_indices])
+    if clean_local.any():
+        distances_clean = np.where(clean_local, distances, np.inf)
+        local_best = int(np.argmin(distances_clean))
+    else:
+        local_best = int(np.argmin(distances))
+
+    return int(cluster_indices[local_best])
+
 
 
 def _worker_init() -> None:
