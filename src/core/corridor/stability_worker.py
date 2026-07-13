@@ -33,7 +33,6 @@ import pandas as pd
 from src.common.config import BASE_DIR, CORRIDOR_IO_THREADS
 from src.common.adapters import parquet_to_pycontrails, pycontrails_to_traffic, df_to_traffic
 from src.core.corridor.pca_compressor import (
-    classify_and_normalize_cohort,
     vectorize_cohort,
     normalize_vectors,
     fit_pca,
@@ -476,12 +475,11 @@ def _run_pca_pipeline(
     ------
     ValueError  if fewer than _MIN_FLIGHTS remain after normalisation/vectorization
     """
-    # Step 1 — ROCD classification & holding-pattern renormalisation
-    normalized_flights, _ = classify_and_normalize_cohort(flights)
+    # Step 1 — Use EKF clean flights directly
+    normalized_flights = flights
     if len(normalized_flights) < _MIN_FLIGHTS:
         raise ValueError(
-            f"Only {len(normalized_flights)} flights survived normalisation "
-            f"(need >= {_MIN_FLIGHTS})."
+            f"Only {len(normalized_flights)} flights survived (need >= {_MIN_FLIGHTS})."
         )
 
     # Step 2 — Vectorize to (N, 300)

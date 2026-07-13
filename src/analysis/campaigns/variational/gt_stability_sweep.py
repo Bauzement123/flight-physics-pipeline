@@ -24,7 +24,6 @@ from src.common.config import BASE_DIR, D_PCA, SILHOUETTE_THRESHOLD, CALIBRATION
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.core.corridor.pca_compressor import (
-    classify_and_normalize_cohort,
     normalize_vectors,
     vectorize_cohort,
     calculate_delta_cv,
@@ -235,9 +234,10 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         flights = _load_route_flights(route_id, n_target=9999, registry_df=registry_df)
         if not flights:
             raise RuntimeError(f"No flights found for route {route_id}")
-        norm_flights, is_clean = classify_and_normalize_cohort(flights)
+        norm_flights = flights
+        is_clean = [True] * len(flights)
         if not norm_flights:
-            raise RuntimeError(f"No flights survived normalization for {route_id}")
+            raise RuntimeError(f"No flights survived for {route_id}")
         X_raw = vectorize_cohort(norm_flights)
         X_scaled, mean_vec, std_vec = normalize_vectors(X_raw)
         
@@ -261,9 +261,10 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
     if not flights:
         raise RuntimeError(f"No flights found for route {route_id}")
 
-    norm_flights, is_clean = classify_and_normalize_cohort(flights)
+    norm_flights = flights
+    is_clean = [True] * len(flights)
     if not norm_flights:
-        raise RuntimeError(f"No flights survived normalization for {route_id}")
+        raise RuntimeError(f"No flights survived for {route_id}")
 
     X_raw = vectorize_cohort(norm_flights)
     X_scaled, mean_vec, std_vec = normalize_vectors(X_raw)

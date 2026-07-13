@@ -18,16 +18,28 @@ from src.common.config import CALIBRATION_ROUTES
 from src.common.registry_utils import load_trajectory_registry
 from src.common.utils import setup_file_logger
 from src.core.corridor.pca_compressor import (
-    classify_and_normalize_cohort,
-    find_d_pca,
     normalize_vectors,
     vectorize_cohort,
 )
 from src.core.corridor.stability_worker import _load_route_flights
 
+from sklearn.decomposition import PCA
+
 logger = logging.getLogger(__name__)
 
-
+def find_d_pca(
+    X_scaled: np.ndarray,
+    variance_target: float = 0.95,
+    max_components: int = 20,
+) -> int:
+    """Finds the minimum number of PCA components needed to capture variance_target."""
+    n_max = min(max_components, X_scaled.shape[0] - 1, X_scaled.shape[1])
+    probe = PCA(n_components=n_max, random_state=42)
+    probe.fit(X_scaled)
+    cumvar = np.cumsum(probe.explained_variance_ratio_)
+    d_pca = int(np.searchsorted(cumvar, variance_target)) + 1
+    d_pca = min(d_pca, n_max)
+    return d_pca
 
 
 def run_phase_a(routes: list[str] = CALIBRATION_ROUTES) -> int:
@@ -41,7 +53,8 @@ def run_phase_a(routes: list[str] = CALIBRATION_ROUTES) -> int:
         if not flights:
             continue
 
-        norm_flights, _ = classify_and_normalize_cohort(flights)
+        # Use EKF clean flights directly
+        norm_flights = flights
         if len(norm_flights) < 10:
             continue
 
