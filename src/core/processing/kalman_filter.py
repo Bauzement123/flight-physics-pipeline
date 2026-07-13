@@ -446,6 +446,7 @@ def _prepare_grid_and_project(
         freq=f"{time_grid_seconds}s",
     )
     # Merge raw rows with empty grid rows; grid rows inherit NaN measurement columns
+    # Deduplicate on timestamp, and keep the first row (which is the ADS-B row if it exists, else the empty grid row)
     df_merged = (
         pd.concat([f_data, pd.DataFrame({"timestamp": grid_times})])
         .drop_duplicates(subset=["timestamp"])

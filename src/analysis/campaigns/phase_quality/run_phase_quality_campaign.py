@@ -54,6 +54,7 @@ def _worker_run_campaign_route(
     plot_format: str = "SVG",
     show_rejected: bool = False,
     use_clean: bool = False,
+    thresholds: dict = DEFAULT_PREFILTER_THRESHOLDS,
 ) -> tuple[str, dict]:
     """Worker target to load trajectories, run post-filters, and compile PDF report for a route."""
     setup_file_logger("calibration.log")
@@ -194,7 +195,7 @@ def _worker_run_campaign_route(
                             
                 # Run the post-filters
                 rejected, reason, metrics = apply_trajectory_postfilters(
-                    df_clean, df_raw, DEFAULT_POSTFILTER_THRESHOLDS
+                    df_clean, df_raw, thresholds= thresholds
                 )
                 
                 if rejected:
@@ -299,6 +300,7 @@ def main():
     df_map = pd.read_parquet(map_file)
     df_route_summary = load_route_summary()
     
+
     thresholds = {
         "max_dep_horiz_dist": args.max_dep_horiz_dist,
         "max_dep_vert_dist": args.max_dep_vert_dist,
@@ -343,6 +345,7 @@ def main():
                     args.format,
                     args.show_rejected,
                     args.use_clean,
+                    thresholds
                 ): route
                 for route in target_routes
             }

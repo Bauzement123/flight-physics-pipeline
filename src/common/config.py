@@ -199,9 +199,9 @@ CORRIDOR_SIMULATIONS_DIR = RESULTS_DIR / "corridor_simulations"
 # --- Phase Quality Campaign Filtering Defaults ---
 # Default metadata pre-filter thresholds (None = check is ignored/pass-through unless overridden via CLI)
 DEFAULT_PREFILTER_THRESHOLDS = {
-    "max_dep_horiz_dist": None,          # meters
+    "max_dep_horiz_dist": 15000,          # meters
     "max_dep_vert_dist": 1000,           # meters
-    "max_arr_horiz_dist": None,          # meters
+    "max_arr_horiz_dist": 15000,          # meters
     "max_arr_vert_dist": 1000,           # meters
     "max_dep_candidates": None,          # count
     "max_arr_candidates": None,          # count
@@ -211,8 +211,8 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 
 # Default post-filter thresholds
 DEFAULT_POSTFILTER_THRESHOLDS = {
-    "max_velocity_kt": 650.0,            # max 3D velocity (knots)
-    "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2), corresponds to Mach 1
+    "max_velocity_kt": 650.0,        # max 3D velocity (knots)
+    "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2)
 }
 
 # Post-filter stage defaults
