@@ -168,7 +168,16 @@ def run_physics_pipeline(
         
         sim_registry_file = GLOBAL_SIMULATION_REGISTRY
         rel_sim_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
-        new_entries = [{"flight_id": fid, "file_path": rel_sim_path} for fid in [f.attrs['flight_id'] for f in simulated_flights]]
+        new_entries = [
+            {
+                "flight_id": f.attrs['flight_id'],
+                "file_path": rel_sim_path,
+                "total_contrail_ef": float(np.nansum(f["ef"])) if "ef" in f.data else 0.0,
+                "total_fuel_burn": float(f.attrs.get("total_fuel_burn", 0.0)),
+                "cocip_total": int(np.sign(float(np.nansum(f["ef"])))) if "ef" in f.data else 0,
+            }
+            for f in simulated_flights
+        ]
         update_global_registry(sim_registry_file, new_entries)
     else:
         logger.warning("No flights were successfully simulated.")

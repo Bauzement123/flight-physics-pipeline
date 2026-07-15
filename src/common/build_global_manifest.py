@@ -2,6 +2,7 @@ import glob
 import pandas as pd
 from pathlib import Path
 import logging
+import numpy as np
 
 from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
@@ -89,15 +90,34 @@ def index_parquet_files(
             
         try:
             logger.info(f"Indexing new file: {filepath.name}")
-            # Read only flight_id column to keep memory usage low
-            df = pd.read_parquet(filepath, columns=['flight_id'])
-            unique_ids = df['flight_id'].dropna().unique()
-            
-            for f_id in unique_ids:
-                new_mappings.append({
-                    "flight_id": f_id,
-                    "file_path": rel_path
-                })
+            if "_simulated.parquet" in pattern:
+                try:
+                    df = pd.read_parquet(filepath, columns=['flight_id', 'ef', 'fuel_burn'])
+                except Exception:
+                    df = pd.read_parquet(filepath, columns=['flight_id'])
+                    
+                unique_ids = df['flight_id'].dropna().unique()
+                for f_id in unique_ids:
+                    df_fid = df[df['flight_id'] == f_id]
+                    total_ef = float(np.nansum(df_fid['ef'])) if 'ef' in df_fid.columns else 0.0
+                    total_fuel = float(np.nansum(df_fid['fuel_burn'])) if 'fuel_burn' in df_fid.columns else 0.0
+                    new_mappings.append({
+                        "flight_id": f_id,
+                        "file_path": rel_path,
+                        "total_contrail_ef": total_ef,
+                        "total_fuel_burn": total_fuel,
+                        "cocip_total": int(np.sign(total_ef)) if total_ef != 0.0 else 0
+                    })
+            else:
+                # Read only flight_id column to keep memory usage low
+                df = pd.read_parquet(filepath, columns=['flight_id'])
+                unique_ids = df['flight_id'].dropna().unique()
+                
+                for f_id in unique_ids:
+                    new_mappings.append({
+                        "flight_id": f_id,
+                        "file_path": rel_path
+                    })
         except Exception as e:
             logger.error(f"Error reading Parquet file {filepath.name}: {e}")
             

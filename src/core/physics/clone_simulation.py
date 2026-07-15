@@ -626,7 +626,13 @@ def run_batch_clone_simulation(
                     daily_skipped += 1
                     daily_trajectories += 1
                     rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
-                    new_registry_entries.append({"flight_id": flight_id, "file_path": rel_out_path})
+                    new_registry_entries.append({
+                        "flight_id": flight_id,
+                        "file_path": rel_out_path,
+                        "cocip_total": None,
+                        "total_contrail_ef": None,
+                        "total_fuel_burn": None,
+                    })
                     continue
                     
                 base_flight = cached_base_flights.get((route_key, cluster_id))
@@ -672,7 +678,14 @@ def run_batch_clone_simulation(
                 try:
                     write_flights_to_parquet([fl], out_file)
                     rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
-                    new_registry_entries.append({"flight_id": fid, "file_path": rel_out_path})
+                    total_contrail_ef = float(np.nansum(fl["ef"])) if "ef" in fl.data else 0.0
+                    new_registry_entries.append({
+                        "flight_id": fid, 
+                        "file_path": rel_out_path,
+                        "total_contrail_ef": total_contrail_ef,
+                        "total_fuel_burn": float(fl.attrs.get("total_fuel_burn", 0.0)),
+                        "cocip_total": int(np.sign(total_contrail_ef)) if total_contrail_ef != 0.0 else 0
+                    })
                     daily_success += 1
                 except Exception as e:
                     logger.error(f"Failed to serialize simulated flight {fid}: {e}")

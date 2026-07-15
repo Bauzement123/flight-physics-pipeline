@@ -34,12 +34,12 @@ Module Objectives
       ├── Sub-objective 1: Standard trajectory modeling
       │    └── Solution: run_physics_pipeline() in simulation.py
       │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory, max contrail age
-      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints (*_simulated.parquet), global_simulation_registry.parquet, skipped_aircraft.log, simulation.log
+      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints (*_simulated.parquet), global_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, simulation.log
       │
       ├── Sub-objective 2: Batch clone corridor flight simulation
       │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
       │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance, clusters_per_flight
-      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_corridor_simulation_registry.parquet, skipped_aircraft.log, simulation.log
+      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_corridor_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, simulation.log
       │
       ├── Sub-objective 3: Spatial weather downselection
       │    └── Solution: crop_met_dataset() in engine.py
@@ -91,7 +91,7 @@ graph TD
     
     K -->|10. Return simulated flights| B
     B -->|11. Save output parquet| L[data/results/test_scenario/*_simulated.parquet]
-    B -->|12. Update global registry| M[global_simulation_registry.parquet]
+    B -->|12. Update global registry with metrics| M[global_simulation_registry.parquet]
 ```
 
 #### Step-by-Step Description: Standard Simulation
@@ -103,7 +103,7 @@ graph TD
 6. **Aircraft Type Verification**: For each batch inside `engine.py:simulate_flight_batch`, aircraft typecodes are checked against the supported PSFlight aircraft list. Unsupported types are skipped and logged to `skipped_aircraft.log`.
 7. **Vectorized Simulation & Fallback**: Valid flights are evaluated together in a vectorized batch using PSFlight (for fuel/emission calculations) and CoCiP (for contrail forecasting). If the vectorized step raises an error, the batch falls back to an exception-safe sequential loop to process valid flights individually.
 8. **Trajectory Serialization**: Simulated flight data containing contrail attributes are serialized to a `*_simulated.parquet` file under the designated output directory.
-9. **Global Registry Update**: The script updates the centralized index registry (`global_simulation_registry.parquet`) mapping each simulated flight ID to its output Parquet file path.
+9. **Global Registry Update**: The script updates the centralized index registry (`global_simulation_registry.parquet`) mapping each simulated flight ID to its output Parquet file path and metrics (cocip_total, total_contrail_ef, and total_fuel_burn).
 
 ---
 
@@ -131,7 +131,7 @@ graph TD
     B -->|14. Serialize batch to disk| N["data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet"]
     B -->|15. Evict batch memory & GC| RAM[Free memory]
     B -->|16. Log skipped aircraft| O[skipped_aircraft.log]
-    B -->|17. Update global registry after run| P[global_corridor_simulation_registry.parquet]
+    B -->|17. Update global registry after run with metrics| P[global_corridor_simulation_registry.parquet]
 ```
 
 #### Step-by-Step Description: Batch Clone Simulation
@@ -143,7 +143,7 @@ graph TD
 6. **Synthetic Track Sampling**: Samples random synthesized tracks according to the requested number of `--clusters-per-flight` to represent corridor alternatives.
 7. **Parallel Engine Simulation**: The time-shifted cloned flights are passed to `engine.py:simulate_flights_parallel` along with a main-thread serialization callback.
 8. **Streaming Serialization & Memory Eviction**: Inside the engine's batch loop, completed batches are immediately passed to the main-thread callback. The callback serializes simulated trajectories to individual Parquet files under corridor-specific folders (e.g., `<origin>-<destination>_cloned_simulated/`) inside the output directory, updates the registry list, and logs any skipped flights. The engine then immediately deletes the batch from memory and forces garbage collection (`gc.collect()`).
-9. **Global Corridor Registry Update**: After the daily simulation cohort completes, the registry list is used to update the centralized registry file (`global_corridor_simulation_registry.parquet`) in a single consolidated write.
+9. **Global Corridor Registry Update**: After the daily simulation cohort completes, the registry list is used to update the centralized registry file (`global_corridor_simulation_registry.parquet`) in a single consolidated write containing the output file paths and flight-level metrics (cocip_total, total_contrail_ef, and total_fuel_burn).
 
 ---
 
