@@ -199,7 +199,8 @@ def simulate_flights_parallel(
     max_age_hours: int,
     batch_size: int = 50,
     max_workers: int = 4,
-    low_mem: bool = False
+    low_mem: bool = False,
+    on_batch_complete_callback = None
 ) -> tuple[list[Flight], list[tuple[str, str]]]:
     """
     Partitions flights into batches and orchestrates simulation.
@@ -219,8 +220,17 @@ def simulate_flights_parallel(
         logger.info("Executing batches sequentially (low-memory or single-thread mode)...")
         for batch in batches:
             sim, skip = simulate_flight_batch(batch, met, rad, max_age_hours, low_mem=low_mem)
-            all_simulated.extend(sim)
+            if on_batch_complete_callback is not None:
+                on_batch_complete_callback(sim, skip)
+            else:
+                all_simulated.extend(sim)
             all_skipped.extend(skip)
+            
+            # Evict simulated batch memory immediately
+            if on_batch_complete_callback is not None:
+                del sim
+                import gc
+                gc.collect()
     else:
         logger.info(f"Executing batches concurrently using ThreadPoolExecutor (max_workers={max_workers})...")
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -241,8 +251,18 @@ def simulate_flights_parallel(
                 batch = futures[future]
                 try:
                     sim, skip = future.result()
-                    all_simulated.extend(sim)
+                    if on_batch_complete_callback is not None:
+                        on_batch_complete_callback(sim, skip)
+                    else:
+                        all_simulated.extend(sim)
                     all_skipped.extend(skip)
+                    
+                    # Evict simulated batch memory immediately
+                    if on_batch_complete_callback is not None:
+                        del sim
+                        del batch
+                        import gc
+                        gc.collect()
                 except Exception as e:
                     logger.error(f"Task raised exception for batch containing {len(batch)} flights: {e}")
                     for fl in batch:

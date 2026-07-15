@@ -59,9 +59,10 @@ Module Objectives
       │
       └── Sub-objective 6: Concurrency & execution orchestration
            └── Solution: simulate_flights_parallel() in engine.py
-                ├── Inputs: list of Flights, met/rad datasets, max age, batch size, max workers, low-memory flag
+                ├── Inputs: list of Flights, met/rad datasets, max age, batch size, max workers, low-memory flag, on_batch_complete_callback
                 └── Outputs: Tuple of (list of simulated Flights, list of skipped flight_ids and typecodes)
                 └── Concurrency: runs batches in ThreadPoolExecutor (or sequentially if low-memory is active)
+                └── Optimization: Streams completed batches to disk and evicts simulated batch memory immediately when callback is provided
 ```
 
 ---
@@ -123,12 +124,14 @@ graph TD
     I -->|8. Chunk into batches| J[Batch of flights]
     J -->|9. ThreadPoolExecutor or sequential| K[engine.py: simulate_flight_batch]
     K -->|10. Filter unsupported types| L[Valid flights]
-    L -->|11. PSFlight & CoCiP eval| M[Simulated flights]
+    L -->|11. PSFlight & CoCiP eval| M[Simulated batch]
     
-    M -->|12. Return simulated flights| B
-    B -->|13. Serialize individually| N["data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet"]
-    B -->|14. Log skipped aircraft| O[skipped_aircraft.log]
-    B -->|15. Update global registry| P[global_corridor_simulation_registry.parquet]
+    M -->|12. Yield finished batch| I
+    I -->|13. Execute callback on main thread| B
+    B -->|14. Serialize batch to disk| N["data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet"]
+    B -->|15. Evict batch memory & GC| RAM[Free memory]
+    B -->|16. Log skipped aircraft| O[skipped_aircraft.log]
+    B -->|17. Update global registry after run| P[global_corridor_simulation_registry.parquet]
 ```
 
 #### Step-by-Step Description: Batch Clone Simulation
@@ -138,9 +141,9 @@ graph TD
 4. **Rolling Weather Management**: Iterates day-by-day over the cohort. For each day, it maintains a rolling 3-day weather window (Day N, Day N+1, Day N+2) in memory to cover potential advection time, evicting expired days and loading new ones.
 5. **Base Path Cloning & Time-shifting**: For each scheduled flight, the base synthesized path is cloned, and its datetime index is offset to align with the flight's scheduled departure time (`firstseen`).
 6. **Synthetic Track Sampling**: Samples random synthesized tracks according to the requested number of `--clusters-per-flight` to represent corridor alternatives.
-7. **Parallel Engine Simulation**: The time-shifted cloned flights are passed to `engine.py:simulate_flights_parallel` to run parallel batch simulation.
-8. **Corridor Trajectory Serialization**: Simulated trajectories are written to individual Parquet files under corridor-specific folders (e.g., `<origin>-<destination>_cloned_simulated/`) inside the output directory.
-9. **Global Corridor Registry Update**: Registers the newly simulated cloned trajectories in the `global_corridor_simulation_registry.parquet`.
+7. **Parallel Engine Simulation**: The time-shifted cloned flights are passed to `engine.py:simulate_flights_parallel` along with a main-thread serialization callback.
+8. **Streaming Serialization & Memory Eviction**: Inside the engine's batch loop, completed batches are immediately passed to the main-thread callback. The callback serializes simulated trajectories to individual Parquet files under corridor-specific folders (e.g., `<origin>-<destination>_cloned_simulated/`) inside the output directory, updates the registry list, and logs any skipped flights. The engine then immediately deletes the batch from memory and forces garbage collection (`gc.collect()`).
+9. **Global Corridor Registry Update**: After the daily simulation cohort completes, the registry list is used to update the centralized registry file (`global_corridor_simulation_registry.parquet`) in a single consolidated write.
 
 ---
 
@@ -152,6 +155,7 @@ To support simulation runs across a variety of hardware (from desktops with high
 *   **Weather Dataset Loading**: The cropped weather datasets (covering `WEATHER_BOUNDS_BBOX` plus spatial padding) are fully loaded into RAM using `.load()` at the start of the cohort day. Slicing reduces the global grid down to a lightweight subset (under 400 MB), allowing fast memory access.
 *   **Concurrency**: Batches of flights (default size: 50) are dispatched in parallel using a `ThreadPoolExecutor` (releasing Python's GIL inside NumPy/Pandas C-loops). 
 *   **RAM Safety**: Multiple threads read from the *same shared in-memory weather datasets*, ensuring weather grids are not duplicated in memory.
+*   **Streaming Write Safety**: Under parallel execution, the main thread serializes and evicts completed flight batches dynamically as workers finish them. This keeps peak RAM usage capped at only `max_workers` active batches (~200 flights across 4 threads) plus the weather dataset, regardless of total cohort size.
 
 #### Low-Memory Mode (`--low-mem` flag)
 *   **Weather Dataset Loading**: The cropped weather datasets are kept **lazy** on disk (using Dask). Coordinates are interpolated on-demand.

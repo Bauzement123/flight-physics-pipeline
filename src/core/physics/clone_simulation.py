@@ -403,7 +403,7 @@ def run_batch_clone_simulation(
     overwrite: bool = False,
     test_mode: bool = False,
     day_by_day: bool = True,
-    min_distance: float = 800.0,
+    min_distance: float = 0,
     clusters_per_flight: int = 1,
     low_mem: bool = False,
     batch_size: int = 50,
@@ -444,14 +444,17 @@ def run_batch_clone_simulation(
         dep, arr = split_route_string(r_str)
         return f"{dep}-{arr}"
     df_summary['route_key'] = df_summary['route'].apply(get_route_key)
-    
+    #logger.info(f"Loaded RouteSummary with {len(df_summary)} entries. Valid synthesized routes: {len(valid_routes_set)}")
+
     # Pre-resolve target route keys for descriptive log output
     df_ranks = df_summary[df_summary['rank'].isin(ranks)].copy() if ranks else df_summary.copy()
+    #logger.info(f"target routes before filtering: {df_ranks['route'].tolist()}")
     if min_distance is not None:
         df_ranks = df_ranks[df_ranks['distance_m'] >= min_distance * 1000.0]
+    #logger.info(f"target routes after distance filter: {df_ranks['route'].tolist()}")
     df_ranks = df_ranks[df_ranks['route_key'].isin(valid_routes_set)]
     
-    logger.info(f"Resolved requested ranks {ranks} to target routes:")
+    logger.info(f"Resolved requested ranks {ranks} to target routes: {df_ranks['route'].tolist()}")
     for _, row in df_ranks.sort_values(by='rank').iterrows():
         logger.info(f"  -> Rank {row['rank']}: {row['route']} ({row['distance_m']/1000.0:.1f} km)")
         
@@ -596,9 +599,6 @@ def run_batch_clone_simulation(
             
             icao24 = row['icao24']
             callsign = row.get('callsign', 'UNK')
-            typecode = row.get('typecode')
-            if pd.isna(typecode) or not typecode:
-                typecode = "UNKNOWN"
             firstseen_dt = pd.to_datetime(row['firstseen'])
             if firstseen_dt.tz is None:
                 firstseen_dt = firstseen_dt.tz_localize('UTC')
@@ -661,20 +661,12 @@ def run_batch_clone_simulation(
                     daily_failed += 1
                     daily_trajectories += 1
                     
-        # Simulate Parallel Vectorized batches
-        if flights_to_simulate:
-            simulated_results, skipped_types = simulate_flights_parallel(
-                flights=flights_to_simulate,
-                met=met,
-                rad=rad,
-                max_age_hours=max_age_hours,
-                batch_size=batch_size,
-                max_workers=max_workers,
-                low_mem=low_mem
-            )
+        # Define callback for immediate streaming serialization and memory eviction
+        def on_batch_complete(sim_batch, skipped_batch):
+            nonlocal daily_success, daily_failed, daily_skipped
             
-            # Serialize outputs
-            for fl in simulated_results:
+            # Serialize outputs immediately
+            for fl in sim_batch:
                 fid = fl.attrs['flight_id']
                 row, out_file, cluster_id, route_key = flight_to_meta_map[fid]
                 try:
@@ -686,14 +678,27 @@ def run_batch_clone_simulation(
                     logger.error(f"Failed to serialize simulated flight {fid}: {e}")
                     daily_failed += 1
                     
-            # Log skipped types
-            for fid, typecode in skipped_types:
+            # Log skipped types immediately
+            for fid, typecode in skipped_batch:
                 daily_skipped += 1
                 log_skipped_aircraft(
                     fid,
                     typecode,
                     "ERROR_FLAG: Unsupported aircraft typecode during cloned simulation batch"
                 )
+
+        # Simulate Parallel Vectorized batches
+        if flights_to_simulate:
+            simulate_flights_parallel(
+                flights=flights_to_simulate,
+                met=met,
+                rad=rad,
+                max_age_hours=max_age_hours,
+                batch_size=batch_size,
+                max_workers=max_workers,
+                low_mem=low_mem,
+                on_batch_complete_callback=on_batch_complete
+            )
                     
         # D. Garbage Collect weather datasets
         met = None
@@ -777,7 +782,7 @@ def run_batch_clone_simulation(
         logger.info(f"Successfully updated global cloned simulation registry at {cloned_registry_file.name}")
 
 if __name__ == "__main__":
-    setup_file_logger(log_filename="simulation.log")
+    setup_file_logger(log_filename="clone_simulation.log")
     parser = argparse.ArgumentParser(description="Batch Cloned Trajectory Simulation Engine")
     
     group = parser.add_mutually_exclusive_group(required=True)
@@ -794,7 +799,7 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true", help="Forces re-simulation of already simulated flights")
     parser.add_argument("--test-mode", action="store_true", help="Limits simulation to 1 flight and defaults date to 2025-01-01")
     parser.add_argument("--no-day-by-day", action="store_false", dest="day_by_day", help="Disables day-by-day temporal weather windowing and runs as a single batch")
-    parser.add_argument("--min-distance", type=float, default=800.0, help="Minimum route distance in kilometers to process")
+    parser.add_argument("--min-distance", type=float, default=0, help="Minimum route distance in kilometers to process")
     parser.add_argument("--clusters-per-flight", "-x", type=int, default=1, help="Number of randomized synthetic tracks to sample per flight schedule (default: 1)")
     
     # New Optimization and RAM options

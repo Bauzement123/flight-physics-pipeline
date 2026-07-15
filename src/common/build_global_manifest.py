@@ -130,14 +130,14 @@ def index_parquet_files(
     logger.info(f"Total flight IDs mapped: {len(df_updated):,}\n")
 
 
-def index_synthesized_files(registry_file: Path, search_dir: Path, force: bool = False):
-    logger.info(f"--- Rebuilding/Updating Synthesized Registry (force={force}) ---")
+def index_corridor_models(registry_file: Path, search_dir: Path, force: bool = False):
+    logger.info(f"--- Rebuilding/Updating Corridor Model Registry (force={force}) ---")
     if not search_dir.exists():
-        logger.info("Synthesized folder does not exist. Skipping.")
+        logger.info("Corridor models folder does not exist. Skipping.")
         return
         
-    found_files = glob.glob(str(search_dir / "**" / "*_synthesized_c*.parquet"), recursive=True)
-    logger.info(f"Found {len(found_files)} synthesized files on disk.")
+    found_files = glob.glob(str(search_dir / "**" / "*_corridor_c*.parquet"), recursive=True)
+    logger.info(f"Found {len(found_files)} corridor model files on disk.")
     
     # Load RouteSummary to resolve rank for each route
     from src.common.utils import load_route_summary
@@ -183,10 +183,10 @@ def index_synthesized_files(registry_file: Path, search_dir: Path, force: bool =
             continue
             
         name = filepath.name
-        if name.endswith(".parquet") and "_synthesized_c" in name:
+        if name.endswith(".parquet") and "_corridor_c" in name:
             try:
                 base_part = name.replace(".parquet", "")
-                route_part, c_part = base_part.split("_synthesized_c")
+                route_part, c_part = base_part.split("_corridor_c")
                 route = route_part.strip()
                 cluster_id = int(c_part.strip())
                 rank = route_to_rank.get(route, -1)
@@ -206,17 +206,17 @@ def index_synthesized_files(registry_file: Path, search_dir: Path, force: bool =
                     "cluster_id": cluster_id
                 })
             except Exception as e:
-                logger.warning(f"Failed to parse or read synthesized file {name}: {e}")
+                logger.warning(f"Failed to parse or read corridor model file {name}: {e}")
 
     if skipped_count > 0:
-        logger.info(f"Skipped {skipped_count} synthesized files that were already indexed.")
+        logger.info(f"Skipped {skipped_count} corridor model files that were already indexed.")
             
     if not new_entries:
         if existing_df is not None:
-            logger.info("No new synthesized files to index. Registry is up to date.")
+            logger.info("No new corridor model files to index. Registry is up to date.")
             df_updated = existing_df
         else:
-            logger.warning("No synthesized entries were extracted.")
+            logger.warning("No corridor model entries were extracted.")
             df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
     else:
         df_new = pd.DataFrame(new_entries)
@@ -227,7 +227,7 @@ def index_synthesized_files(registry_file: Path, search_dir: Path, force: bool =
         df_updated = df_updated.drop_duplicates(subset=['file_path'], keep='last')
         
     save_model_registry(df_updated)
-    logger.info(f"Successfully generated synthesized registry at: {registry_file} ({len(df_updated)} entries)\n")
+    logger.info(f"Successfully generated corridor model registry at: {registry_file} ({len(df_updated)} entries)\n")
 
 
 def rebuild_raw_registry(force: bool = False) -> None:
@@ -281,7 +281,7 @@ def rebuild_corridor_sim_registry(force: bool = False) -> None:
 
 
 def rebuild_model_registry(force: bool = False) -> None:
-    index_synthesized_files(
+    index_corridor_models(
         registry_file=GLOBAL_MODEL_REGISTRY,
         search_dir=CORRIDOR_PATHS_DIR,
         force=force
