@@ -132,7 +132,7 @@ def main() -> None:
     logger.info(f"{'Required Library (Import)':<30} | {'Installed Version':<20} | {'Status':<8}")
     logger.info("-" * 65)
     for lib in stdlib_libs:
-        logger.info(f"{lib:<30} | {f'Built-in ({python_version})':<20} | {'Installed':<8}")
+        logger.info(f"{lib:<30} | {f'{python_version}':<20} | {'Installed':<8}")
         
     logger.info("")
     logger.info("=========================================")
