@@ -121,6 +121,7 @@ def main() -> None:
     # Resolve the project root dynamically
     repo_root = Path(__file__).resolve().parent.parent.parent
     src_dir = repo_root / "src"
+    python_version = sys.version.split()[0]
     
     logger.info(f"Scanning imports in {src_dir}...")
     stdlib_libs, external_libs = scan_imports(src_dir)
@@ -128,19 +129,21 @@ def main() -> None:
     logger.info("=========================================")
     logger.info("SECTION 1: Standard Library Imports Used")
     logger.info("=========================================")
+    logger.info(f"{'Required Library (Import)':<30} | {'Installed Version':<20} | {'Status':<8}")
+    logger.info("-" * 65)
     for lib in stdlib_libs:
-        logger.info(f"- {lib}")
+        logger.info(f"{lib:<30} | {f'Built-in ({python_version})':<20} | {'Installed':<8}")
         
     logger.info("")
     logger.info("=========================================")
     logger.info("SECTION 2: External Dependencies")
     logger.info("=========================================")
-    logger.info(f"{'Required Library (Import)':<30} | {'Installed Version':<17} | {'Status':<8}")
-    logger.info("-" * 62)
+    logger.info(f"{'Required Library (Import)':<30} | {'Installed Version':<20} | {'Status':<8}")
+    logger.info("-" * 65)
     for lib in external_libs:
         ver = get_installed_version(lib)
         status = "Installed" if ver != "Not Installed / Unknown" else "Missing"
-        logger.info(f"{lib:<30} | {ver:<17} | {status:<8}")
+        logger.info(f"{lib:<30} | {ver:<20} | {status:<8}")
 
 if __name__ == "__main__":
     setup_file_logger(log_filename="devtools.log")
