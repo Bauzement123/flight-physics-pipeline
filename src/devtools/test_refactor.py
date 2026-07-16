@@ -385,7 +385,7 @@ def t4_20():
             "estdepartureairport":    ["EDDF"],
             "estarrivalairport":      ["EGLL"],
             "firstseen":              [pd.Timestamp("2024-01-01 10:00:00")],
-            "lastseen":               [pd.Timestamp("2024-01-01 12:00:00")],
+            "lastseen":               [pd.Timestamp("2024-01-01 11:10:00")],
         })
         df_master.to_parquet(master_path)
 

@@ -16,7 +16,7 @@ The module operates under a two-tier execution model:
 src/core/fetching/
 ├── README.md                   # Technical specification and workflow documentation
 ├── __init__.py                 # Package initializer
-├── models.py                   # Dataclasses for data contracts (FetchRunParams, FlightFetchOutcome, FetchResult)
+├── models.py                   # Dataclasses for data contracts (FetchRunParams, FlightFetchOutcome, FetchResult, BatchResults)
 ├── helpers.py                  # Pure helper functions for cohort preparation, atomic Parquet I/O
 ├── opensky_fetcher.py          # Worker: 3-step cache lookup (Registry -> Concat -> Trino) and trajectory downloader
 └── fetcher_orchestrator.py     # Orchestrator: batch route selection, quota calculation, Two-Pass concat rebuild
@@ -29,7 +29,7 @@ src/core/fetching/
 ```text
 Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight cohorts
  ├── Sub-objective: Define immutable data contracts and return types
- │    └── Solution: models.py (FetchRunParams, FlightFetchOutcome, FetchResult)
+ │    └── Solution: models.py (FetchRunParams, FlightFetchOutcome, FetchResult, BatchResults)
  │         ├── Inputs: Raw CLI arguments and execution metrics
  │         ├── Outputs: Typed dataclasses replacing loose tuples and dictionaries
  │         └── Safety behavior: Default field initialization and structured summary serialization

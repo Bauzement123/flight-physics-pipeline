@@ -56,3 +56,84 @@ class FetchResult:
     failed_flight_ids: list[str] = field(default_factory=list)
     manifest_path: Path | None = None
     duration_seconds: float | None = None
+
+
+@dataclass
+class BatchResults:
+    """
+    Summary of a single corridor fetch operation within a batch run.
+    This represents the result of all the routes and is a slimmed-down version of FetchResult.
+    """
+    rank: int
+    dep: str
+    arr: str
+    success: bool
+    requested: int
+    succeeded: int
+    failed: int
+    resumed: bool
+    cache_hits: int = 0
+    restore_from_concat: int = 0
+    fetch_from_trino: int = 0
+    fails: int = 0
+    error: str | None = None
+    new_dfs: list[str] = field(default_factory=list)
+    concat_path: str | None = None
+
+    @classmethod
+    def from_resumed(cls, rank: int, dep: str, arr: str, target: int) -> "BatchResults":
+        """Build a BatchResults entry from a skipped corridor due to resume logic."""
+        return cls(
+            rank=rank,
+            dep=dep,
+            arr=arr,
+            success=True,
+            requested=target,
+            succeeded=target,
+            failed=0,
+            resumed=True,
+            cache_hits=0,
+            restore_from_concat=0,
+            fetch_from_trino=0,
+            fails=0,
+        )
+
+    @classmethod
+    def from_fetch_result(cls, rank: int, dep: str, arr: str, res: FetchResult) -> "BatchResults":
+        """Build a BatchResults entry from a standard FetchResult."""
+        return cls(
+            rank=rank,
+            dep=dep,
+            arr=arr,
+            success=res.success,
+            requested=res.requested,
+            succeeded=res.succeeded,
+            failed=res.failed,
+            resumed=False,
+            new_dfs=res.failed_flight_ids,
+            concat_path=str(res.concat_path) if getattr(res, "concat_path", None) else None,
+            cache_hits=getattr(res, "registry_hits", 0),
+            restore_from_concat=getattr(res, "concat_recoveries", 0),
+            fetch_from_trino=getattr(res, "trino_fetches", 0),
+            fails=res.failed,
+        )
+
+    @classmethod
+    def from_error(cls, rank: int, dep: str, arr: str, target: int, error: Exception | str) -> "BatchResults":
+        """Build a BatchResults entry for a critical error/failed corridor execution."""
+        return cls(
+            rank=rank,
+            dep=dep,
+            arr=arr,
+            success=False,
+            requested=target,
+            succeeded=0,
+            failed=target,
+            resumed=False,
+            cache_hits=0,
+            restore_from_concat=0,
+            fetch_from_trino=0,
+            fails=target,
+            error=str(error),
+        )
+

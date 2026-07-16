@@ -5,6 +5,7 @@ from Trino/local cache into dynamically generated dataset namespace directories.
 Every public function is strictly <= 50 LOC.
 """
 import argparse
+import dataclasses
 import logging
 import math
 import sys
@@ -32,6 +33,7 @@ from src.common.utils import (
 )
 from src.core.fetching import opensky_fetcher
 from src.core.fetching.helpers import apply_flight_filters, load_master_flights_for_route
+from src.core.fetching.models import BatchResults
 
 logger = logging.getLogger(__name__)
 
@@ -103,21 +105,21 @@ def print_batch_plan(execution_plan: list[dict[str, Any]], run_id: str) -> None:
     print("=" * 70 + "\n")
 
 
-def print_batch_summary(results: list[dict[str, Any]]) -> None:
+def print_batch_summary(results: list[BatchResults]) -> None:
     """Prints formatted batch completion summary table to console."""
     print("\n" + "=" * 70)
     print("BATCH FETCH SUMMARY")
     print("=" * 70)
-    succ = sum(1 for r in results if r["success"])
+    succ = sum(1 for r in results if r.success)
     print(f"Total Corridors Processed: {len(results)} | Successful: {succ} | Failed: {len(results) - succ}")
     for r in results:
-        status = "SUCCESS" if r["success"] else "FAILED"
-        print(f"  [{status}] Rank {r['rank']:03d} ({r['dep']}->{r['arr']}): {r['succeeded']}/{r['requested']} flights retrieved.")
+        status = "SUCCESS" if r.success else "FAILED"
+        print(f"  [{status}] Rank {r.rank:03d} ({r.dep}->{r.arr}): {r.succeeded}/{r.requested} flights retrieved.")
     print("=" * 70 + "\n")
 
 
 def write_orchestrator_manifest(
-    manifest_path: Path, run_id: str, plan: list[dict[str, Any]], results: list[dict[str, Any]], cli_params: dict[str, Any]
+    manifest_path: Path, run_id: str, plan: list[dict[str, Any]], results: list[BatchResults], cli_params: dict[str, Any]
 ) -> None:
     """Writes aggregate orchestrator execution metadata to a JSON manifest."""
     payload = {
@@ -125,12 +127,12 @@ def write_orchestrator_manifest(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cli_params": cli_params,
         "total_corridors_requested": len(plan),
-        "total_corridors_succeeded": sum(1 for r in results if r["success"]),
-        "total_corridors_failed": sum(1 for r in results if not r["success"]),
-        "total_trajectories_requested": sum(r["requested"] for r in results),
-        "total_trajectories_succeeded": sum(r["succeeded"] for r in results),
-        "total_trajectories_failed": sum(r["failed"] for r in results),
-        "corridor_results": results,
+        "total_corridors_succeeded": sum(1 for r in results if r.success),
+        "total_corridors_failed": sum(1 for r in results if not r.success),
+        "total_trajectories_requested": sum(r.requested for r in results),
+        "total_trajectories_succeeded": sum(r.succeeded for r in results),
+        "total_trajectories_failed": sum(r.failed for r in results),
+        "corridor_results": [dataclasses.asdict(r) for r in results],
     }
     write_json_dataclass(manifest_path, payload)
     logger.info(f"Orchestrator manifest saved to {manifest_path}")
@@ -147,9 +149,9 @@ def run_batch(
     fetch_format: str | None = None,
     strategy: str | None = None,
     resume: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[BatchResults]:
     """Executes the batch fetching loop sequentially across all planned corridors."""
-    results = []
+    results: list[BatchResults] = []
     total = len(execution_plan)
 
     for i, item in enumerate(execution_plan, 1):
@@ -169,20 +171,12 @@ def run_batch(
                 _was_success = False
             if _was_success:
                 logger.info(f"Resuming: skipping completed rank {item['rank']} ({item['dep']}->{item['arr']}) based on checkpoint.")
-                results.append({
-                    "rank": item['rank'],
-                    "dep": item['dep'],
-                    "arr": item['arr'],
-                    "success": True,
-                    "requested": item['target'],
-                    "succeeded": item['target'],
-                    "failed": 0,
-                    "resumed": True,
-                    "cache_hits": 0,
-                    "restore_from_concat": 0,
-                    "fetch_from_trino": 0,
-                    "fails": 0,
-                })
+                results.append(BatchResults.from_resumed(
+                    rank=item['rank'],
+                    dep=item['dep'],
+                    arr=item['arr'],
+                    target=item['target'],
+                ))
                 continue
 
         try:
@@ -193,39 +187,21 @@ def run_batch(
                 strategy=strategy, fetch_format=fetch_format,
                 update_concat=False,  # Pass 1: individual files only; concat rebuilt in Pass 2
             )
-            results.append({
-                "rank": item['rank'],
-                "dep": item['dep'],
-                "arr": item['arr'],
-                "success": res.success,
-                "requested": res.requested,
-                "succeeded": res.succeeded,
-                "failed": res.failed,
-                "resumed": False,
-                "new_dfs": res.failed_flight_ids,
-                "concat_path": str(res.concat_path),
-                "cache_hits": res.registry_hits,
-                "restore_from_concat": res.concat_recoveries,
-                "fetch_from_trino": res.trino_fetches,
-                "fails": res.failed,
-            })
+            results.append(BatchResults.from_fetch_result(
+                rank=item['rank'],
+                dep=item['dep'],
+                arr=item['arr'],
+                res=res,
+            ))
         except Exception as e:
             logger.error(f"CRITICAL ERROR fetching trajectories for {item['dep']}->{item['arr']}: {e}")
-            results.append({
-                "rank": item['rank'],
-                "dep": item['dep'],
-                "arr": item['arr'],
-                "success": False,
-                "requested": item['target'],
-                "succeeded": 0,
-                "failed": item['target'],
-                "error": str(e),
-                "resumed": False,
-                "cache_hits": 0,
-                "restore_from_concat": 0,
-                "fetch_from_trino": 0,
-                "fails": item['target'],
-            })
+            results.append(BatchResults.from_error(
+                rank=item['rank'],
+                dep=item['dep'],
+                arr=item['arr'],
+                target=item['target'],
+                error=e,
+            ))
             continue
 
     # Pass 2: Rebuild route-level concat files after all FUSE file handles have flushed
@@ -261,7 +237,7 @@ def execute_batch_fetch(
     strategy: str | None = None,
     resume: bool = False,
     cli_params: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[BatchResults]:
     """Orchestrates batch plan printing, sequential execution, summary reporting, and manifest saving."""
     if not execution_plan:
         logger.error("Execution plan is empty. Aborting batch fetch.")
@@ -349,10 +325,10 @@ if __name__ == "__main__":
                 end_date=args.end_date, typecode=args.typecode, min_distance=args.min_distance,
                 fetch_format=args.format, strategy=args.strategy, resume=args.resume, cli_params=vars(args)
             )
-            cache_hits = sum(r.get("cache_hits", 0) for r in results)
-            restore_from_concat = sum(r.get("restore_from_concat", 0) for r in results)
-            fetch_from_trino = sum(r.get("fetch_from_trino", 0) for r in results)
-            fails = sum(r.get("fails", 0) for r in results)
+            cache_hits = sum(r.cache_hits for r in results)
+            restore_from_concat = sum(r.restore_from_concat for r in results)
+            fetch_from_trino = sum(r.fetch_from_trino for r in results)
+            fails = sum(r.fails for r in results)
             logger.info(
                 f"Batch fetch run completed in {round(time.time() - t0, 2)}s. "
                 f"Cache hits: {cache_hits}, restore from concat: {restore_from_concat}, "
