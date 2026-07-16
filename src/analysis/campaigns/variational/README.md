@@ -111,12 +111,16 @@ flowchart TD
 - **OOM Recovery**: Workers catch out-of-memory exceptions during large matrix evaluations, logging a warning and falling back to sequential batch processing.
 
 ### 3.4 Metric & Progress Logging Formats
-All logging is routed through `setup_file_logger()` to `data/logs/calibration.log`:
-```text
-2026-07-07 19:10:00,000 - [INFO] - [variational_orchestrator] Starting 3D variational sweep across 6 routes...
-2026-07-07 19:10:05,123 - [INFO] - [variational_orchestrator] LOWW-EHAM: Oracle baseline cached (K=4 medoids).
-2026-07-07 19:11:20,456 - [INFO] - [variational_orchestrator] LOWW-EHAM: Pareto frontier identified at N0=150, tau=0.05, Kmax=5 (Error: 1.24 km).
-```
+
+All logging is routed through `setup_file_logger()` to both the general `data/logs/calibration.log` and script-specific log files:
+
+| Log file written to `data/logs/` | Writer | Purpose |
+|---|---|---|
+| `calibration.log` | All variational scripts | General consolidated campaign progress and calibration results. |
+| `phase_a_calibration.log` | `phase_a_d_pca.py` | Details for PCA dimension fits and cumulative variance iterations. |
+| `gt_stability_sweep.log` | `gt_stability_sweep.py` | Logs for the ground truth stability sweep resampling loop. |
+| `variational_orchestrator.log` | `variational_orchestrator.py` | Detailed metrics from parallel 3D variational calibration execution. |
+
 
 ---
 

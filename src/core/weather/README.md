@@ -136,4 +136,12 @@ $env:CDSAPI_URL="https://cds.climate.copernicus.eu/api/v2"
 $env:CDSAPI_KEY="YOUR_CDS_API_KEY"
 ```
 
+### Logging
+
+The weather downloader initializes logging via `setup_file_logger()` from `src.common.utils`.
+
+| Log file written to `data/logs/` | Writer | Purpose |
+|---|---|---|
+| `weather.log` | `era5_manager.py` | Logs Copernicus CDS API query requests, download progress, and reactive cache corruption/self-healing operations. |
+
 For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](../conventions.md)** standards.

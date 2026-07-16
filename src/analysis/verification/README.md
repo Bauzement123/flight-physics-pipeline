@@ -168,7 +168,13 @@ python -m src.analysis.verification.flight_level_analysis --top-k-percent 10
 python -m src.analysis.verification.flight_level_analysis --dist-step 200 --top-k-percent 10
 ```
 
----
+### Logging
+
+All entrypoint scripts initialize logging via `setup_file_logger()` from `src.common.utils`.
+
+| Log file written to `data/logs/` | Writer | Purpose |
+|---|---|---|
+| `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlap_prepare.py`, `route_class_analysis.py`, `route_popularity_analysis.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
 
 ## 5. Prerequisites & Dependencies
 
