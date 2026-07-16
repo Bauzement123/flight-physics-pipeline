@@ -239,7 +239,7 @@ def execute_batch_fetch(
         run_id=run_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         cli_params=cli_params or {},
-        corridor_results=results
+        corridors=results
     )
 
     manifest_path = TRAJECTORIES_DIR / FETCH_RUNS_DIRNAME / f"{run_id}_orchestrator.json"
