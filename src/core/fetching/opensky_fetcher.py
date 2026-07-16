@@ -38,7 +38,7 @@ from src.core.fetching.helpers import (
     write_parquet_atomic,
     write_run_manifest,
 )
-from src.core.fetching.models import FetchResult, FetchRunParams, FlightFetchOutcome
+from src.core.fetching.models import FetchRunParams, FlightFetchOutcome, RouteFetchResult
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def fetch_trajectories(
     strategy: str | None = None,
     fetch_format: str | None = None,
     update_concat: bool = True,
-) -> FetchResult:
+) -> RouteFetchResult:
     """Main orchestration function for retrieving flight trajectories on a single route."""
     start_time = time.time()
     out_path = Path(out_dir)
@@ -306,7 +306,7 @@ def fetch_trajectories(
 
     if not records:
         logger.warning(f"No valid flight records to fetch for route {dep}->{arr}.")
-        res = FetchResult(False, dep, arr, eff_run_id, 0, 0, 0, 0, 0, 0, 0, out_path, raw_dir, concat_path, [], [], manifest_path, 0.0)
+        res = RouteFetchResult(False, dep, arr, eff_run_id, 0, 0, 0, 0, 0, 0, 0, out_path, raw_dir, concat_path, [], [], manifest_path, 0.0)
         write_run_manifest(manifest_path, res, params)
         return res
 
@@ -314,7 +314,7 @@ def fetch_trajectories(
     expected_paths = compute_all_expected_paths(records)
     if all_individual_files_exist(expected_paths) and concat_path.exists():
         logger.info(f"Fast cache hit for {dep}->{arr}: all {len(records)} files already on disk.")
-        res = FetchResult(True, dep, arr, eff_run_id, len(records), len(records), 0, 0,
+        res = RouteFetchResult(True, dep, arr, eff_run_id, len(records), len(records), 0, 0,
                           len(records), 0, 0, out_path, raw_dir, concat_path, [], [], manifest_path,
                           round(time.time() - start_time, 2))
         write_run_manifest(manifest_path, res, params)
@@ -346,7 +346,7 @@ def fetch_trajectories(
         update_raw_concat(concat_path, new_dfs)
 
     succeeded = reg_hits + concat_rec + trino_f
-    res = FetchResult(
+    res = RouteFetchResult(
         succeeded > 0, dep, arr, eff_run_id, len(records), succeeded, len(failed_fids), 0,
         reg_hits, concat_rec, trino_f, out_path, raw_dir, concat_path, new_reg_entries, failed_fids,
         manifest_path, round(time.time() - start_time, 2)

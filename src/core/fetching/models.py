@@ -36,7 +36,7 @@ class FlightFetchOutcome:
 
 
 @dataclass
-class FetchResult:
+class RouteFetchResult:
     """Route-level result returned by the fetch worker to the orchestrator or CLI caller."""
     success: bool
     dep: str
@@ -59,10 +59,10 @@ class FetchResult:
 
 
 @dataclass
-class BatchResults:
+class RouteFetchSummary:
     """
     Summary of a single corridor fetch operation within a batch run.
-    This represents the result of all the routes and is a slimmed-down version of FetchResult.
+    This represents the result of all the routes and is a slimmed-down version of RouteFetchResult.
     """
     rank: int
     dep: str
@@ -81,8 +81,8 @@ class BatchResults:
     concat_path: str | None = None
 
     @classmethod
-    def from_resumed(cls, rank: int, dep: str, arr: str, target: int) -> "BatchResults":
-        """Build a BatchResults entry from a skipped corridor due to resume logic."""
+    def from_resumed(cls, rank: int, dep: str, arr: str, target: int) -> "RouteFetchSummary":
+        """Build a RouteFetchSummary entry from a skipped corridor due to resume logic."""
         return cls(
             rank=rank,
             dep=dep,
@@ -99,8 +99,8 @@ class BatchResults:
         )
 
     @classmethod
-    def from_fetch_result(cls, rank: int, dep: str, arr: str, res: FetchResult) -> "BatchResults":
-        """Build a BatchResults entry from a standard FetchResult."""
+    def from_fetch_result(cls, rank: int, dep: str, arr: str, res: RouteFetchResult) -> "RouteFetchSummary":
+        """Build a RouteFetchSummary entry from a standard RouteFetchResult."""
         return cls(
             rank=rank,
             dep=dep,
@@ -119,8 +119,8 @@ class BatchResults:
         )
 
     @classmethod
-    def from_error(cls, rank: int, dep: str, arr: str, target: int, error: Exception | str) -> "BatchResults":
-        """Build a BatchResults entry for a critical error/failed corridor execution."""
+    def from_error(cls, rank: int, dep: str, arr: str, target: int, error: Exception | str) -> "RouteFetchSummary":
+        """Build a RouteFetchSummary entry for a critical error/failed corridor execution."""
         return cls(
             rank=rank,
             dep=dep,
@@ -136,4 +136,37 @@ class BatchResults:
             fails=target,
             error=str(error),
         )
+
+
+@dataclass
+class BatchFetchSummary:
+    """Canonical summary of an entire batch fetch execution run."""
+    run_id: str
+    timestamp: str
+    cli_params: dict[str, Any]
+    corridors: list[RouteFetchSummary]
+
+    total_corridors_requested: int = field(init=False)
+    total_corridors_succeeded: int = field(init=False)
+    total_corridors_failed: int = field(init=False)
+    total_trajectories_requested: int = field(init=False)
+    total_trajectories_succeeded: int = field(init=False)
+    total_trajectories_failed: int = field(init=False)
+    cache_hits: int = field(init=False)
+    restore_from_concat: int = field(init=False)
+    fetch_from_trino: int = field(init=False)
+    fails: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.total_corridors_requested = len(self.corridors)
+        self.total_corridors_succeeded = sum(1 for c in self.corridors if c.success)
+        self.total_corridors_failed = self.total_corridors_requested - self.total_corridors_succeeded
+        self.total_trajectories_requested = sum(c.requested for c in self.corridors)
+        self.total_trajectories_succeeded = sum(c.succeeded for c in self.corridors)
+        self.total_trajectories_failed = sum(c.failed for c in self.corridors)
+        self.cache_hits = sum(c.cache_hits for c in self.corridors)
+        self.restore_from_concat = sum(c.restore_from_concat for c in self.corridors)
+        self.fetch_from_trino = sum(c.fetch_from_trino for c in self.corridors)
+        self.fails = sum(c.fails for c in self.corridors)
+
 

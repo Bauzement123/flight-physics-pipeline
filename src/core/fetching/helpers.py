@@ -22,7 +22,7 @@ from src.common.config import (
     ROUTE_SUMMARY_PARQUET,
 )
 from src.common.utils import to_project_relative, write_json_dataclass, log_skipped_aircraft
-from src.core.fetching.models import FetchResult, FetchRunParams
+from src.core.fetching.models import FetchRunParams, RouteFetchResult
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +396,7 @@ def write_parquet_atomic_PyOpenSky(df: pd.DataFrame, path: Path) -> None:
 
 
 def write_run_manifest(
-    manifest_path: Path, result: FetchResult, params: FetchRunParams
+    manifest_path: Path, result: RouteFetchResult, params: FetchRunParams
 ) -> None:
     """Writes combined execution metadata and outcome statistics to a JSON manifest."""
     payload = {

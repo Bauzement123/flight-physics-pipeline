@@ -16,7 +16,7 @@ The module operates under a two-tier execution model:
 src/core/fetching/
 ├── README.md                   # Technical specification and workflow documentation
 ├── __init__.py                 # Package initializer
-├── models.py                   # Dataclasses for data contracts (FetchRunParams, FlightFetchOutcome, FetchResult, BatchResults)
+├── models.py                   # Dataclasses for data contracts (FetchRunParams, FlightFetchOutcome, RouteFetchResult, RouteFetchSummary, BatchFetchSummary)
 ├── helpers.py                  # Pure helper functions for cohort preparation, atomic Parquet I/O
 ├── opensky_fetcher.py          # Worker: 3-step cache lookup (Registry -> Concat -> Trino) and trajectory downloader
 └── fetcher_orchestrator.py     # Orchestrator: batch route selection, quota calculation, Two-Pass concat rebuild
@@ -29,7 +29,7 @@ src/core/fetching/
 ```text
 Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight cohorts
  ├── Sub-objective: Define immutable data contracts and return types
- │    └── Solution: models.py (FetchRunParams, FlightFetchOutcome, FetchResult, BatchResults)
+ │    └── Solution: models.py (FetchRunParams, FlightFetchOutcome, RouteFetchResult, RouteFetchSummary, BatchFetchSummary)
  │         ├── Inputs: Raw CLI arguments and execution metrics
  │         ├── Outputs: Typed dataclasses replacing loose tuples and dictionaries
  │         └── Safety behavior: Default field initialization and structured summary serialization
@@ -185,10 +185,10 @@ flowchart TD
         Sample --> Recs["prepare_flight_records(): Build target flight record dicts"]
 
     Recs --> EmptyCheck{"Any valid records?"}
-    EmptyCheck -->|No| ExitEmpty["Write empty FetchResult manifest to runs/ and return"]
+    EmptyCheck -->|No| ExitEmpty["Write empty RouteFetchResult manifest to runs/ and return"]
     EmptyCheck -->|Yes| FastCheck{"all_individual_files_exist() & concat backup exists?"}
 
-    FastCheck -->|Yes| ExitFast["Log fast cache hit; write manifest and return FetchResult"]
+    FastCheck -->|Yes| ExitFast["Log fast cache hit; write manifest and return RouteFetchResult"]
     FastCheck -->|No| LoadReg["_load_cached_registry_map(): Read GLOBAL_TRAJECTORY_REGISTRY"]
     LoadReg --> LoadConcat["Load existing <route>_all_raw.parquet concat backup if present"]
 
@@ -217,9 +217,9 @@ flowchart TD
     RegUpdate --> ConcatCheck{"update_concat == True?"}
     ConcatCheck -->|Yes| ConcatUpdate["update_raw_concat():\nwrite_parquet_atomic() for <route>_all_raw.parquet"]
     ConcatCheck -->|No| SkipConcat["Skip concat rebuild (Pass 1 mode)"]
-    ConcatUpdate --> Manifest["write_run_manifest(): Save FetchResult to runs/<run_id>.json"]
+    ConcatUpdate --> Manifest["write_run_manifest(): Save RouteFetchResult to runs/<run_id>.json"]
     SkipConcat --> Manifest
-    Manifest --> Done["Return FetchResult"]
+    Manifest --> Done["Return RouteFetchResult"]
 ```
 
 **Step-by-step Walkthrough:**
@@ -237,7 +237,7 @@ flowchart TD
 9. **Failure Handling**: If Step 3 yields no waypoints or fails after exponential backoff, the flight is marked as failed, logged at ERROR level, and skipped.
 10. **Global Registry Update**: All newly fetched or recovered trajectories are atomically appended to `GLOBAL_TRAJECTORY_REGISTRY` via `update_global_registry()`.
 11. **Incremental Concat Update (if `update_concat=True`)**: `update_raw_concat()` merges all successful DataFrames with any existing rows in `<route>_all_raw.parquet`, deduplicating by `flight_id` and writing via `write_parquet_atomic()`.
-12. **Manifest Serialization**: A complete `FetchResult` dataclass is serialized to `<out_dir>/runs/<run_id>.json` via `write_run_manifest()`.
+12. **Manifest Serialization**: A complete `RouteFetchResult` dataclass is serialized to `<out_dir>/runs/<run_id>.json` via `write_run_manifest()`.
 
 ---
 
@@ -282,7 +282,7 @@ flowchart TD
     ResumeCheck -->|Yes| SkipResumed["Log checkpoint hit; skip worker execution"]
     ResumeCheck -->|No| ExecWorker["Call opensky_fetcher.fetch_trajectories(update_concat=False)"]
 
-    ExecWorker --> WorkerResult{"FetchResult.success == True?"}
+    ExecWorker --> WorkerResult{"RouteFetchResult.success == True?"}
     WorkerResult -->|Yes| LogSucc["Record corridor success metrics"]
     WorkerResult -->|No| LogErr["Log corridor failure; continue pipeline"]
 
@@ -293,7 +293,7 @@ flowchart TD
     NextCorridor -->|Yes| BatchLoop
     NextCorridor -->|No| Pass2["Pass 2: Rebuild all <route>_all_raw.parquet concat files\n(FUSE file handles now flushed)"]
     Pass2 --> PrintSum["print_batch_summary(): Display execution summary table"]
-    PrintSum --> SaveOrchManifest["write_orchestrator_manifest(): Save runs/<run_id>_orchestrator.json"]
+    PrintSum --> SaveOrchManifest["write_orchestrator_manifest(): Save BatchFetchSummary to runs/<run_id>_orchestrator.json"]
 ```
 
 **Step-by-step Walkthrough:**
@@ -308,7 +308,7 @@ flowchart TD
    - **Resume Evaluation**: If `--resume` is enabled and `<out_dir>/runs/<run_id>.json` exists, the manifest is parsed and the corridor is skipped only if `result.success == True`.
 9. **Pass 2 — Concat Rebuild**: After all corridor passes complete and all FUSE file handles have flushed, the orchestrator iterates over all planned corridors, reads the individual `raw/` files, and rebuilds each `<route>_all_raw.parquet` via `update_raw_concat()` using `write_parquet_atomic()`.
 10. **Summary Reporting**: `print_batch_summary()` outputs a terminal summary table showing total corridors processed, success counts, and per-route retrieval statistics.
-11. **Orchestrator Manifest Serialization**: `write_orchestrator_manifest()` saves an aggregate JSON manifest to `data/trajectories/runs/<run_id>_orchestrator.json`.
+11. **Orchestrator Manifest Serialization**: `write_orchestrator_manifest()` saves a `BatchFetchSummary` JSON manifest to `data/trajectories/runs/<run_id>_orchestrator.json`.
 
 ---
 

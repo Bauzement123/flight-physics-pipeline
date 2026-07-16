@@ -33,7 +33,7 @@ from src.common.utils import (
 )
 from src.core.fetching import opensky_fetcher
 from src.core.fetching.helpers import apply_flight_filters, load_master_flights_for_route
-from src.core.fetching.models import BatchResults
+from src.core.fetching.models import RouteFetchResult, RouteFetchSummary, BatchFetchSummary
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def print_batch_plan(execution_plan: list[dict[str, Any]], run_id: str) -> None:
     print("=" * 70 + "\n")
 
 
-def print_batch_summary(results: list[BatchResults]) -> None:
+def print_batch_summary(results: list[RouteFetchSummary]) -> None:
     """Prints formatted batch completion summary table to console."""
     print("\n" + "=" * 70)
     print("BATCH FETCH SUMMARY")
@@ -119,22 +119,10 @@ def print_batch_summary(results: list[BatchResults]) -> None:
 
 
 def write_orchestrator_manifest(
-    manifest_path: Path, run_id: str, plan: list[dict[str, Any]], results: list[BatchResults], cli_params: dict[str, Any]
+    manifest_path: Path, summary: BatchFetchSummary
 ) -> None:
     """Writes aggregate orchestrator execution metadata to a JSON manifest."""
-    payload = {
-        "run_id": run_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "cli_params": cli_params,
-        "total_corridors_requested": len(plan),
-        "total_corridors_succeeded": sum(1 for r in results if r.success),
-        "total_corridors_failed": sum(1 for r in results if not r.success),
-        "total_trajectories_requested": sum(r.requested for r in results),
-        "total_trajectories_succeeded": sum(r.succeeded for r in results),
-        "total_trajectories_failed": sum(r.failed for r in results),
-        "corridor_results": [dataclasses.asdict(r) for r in results],
-    }
-    write_json_dataclass(manifest_path, payload)
+    write_json_dataclass(manifest_path, summary)
     logger.info(f"Orchestrator manifest saved to {manifest_path}")
 
 
@@ -149,9 +137,9 @@ def run_batch(
     fetch_format: str | None = None,
     strategy: str | None = None,
     resume: bool = False,
-) -> list[BatchResults]:
+) -> list[RouteFetchSummary]:
     """Executes the batch fetching loop sequentially across all planned corridors."""
-    results: list[BatchResults] = []
+    results: list[RouteFetchSummary] = []
     total = len(execution_plan)
 
     for i, item in enumerate(execution_plan, 1):
@@ -171,7 +159,7 @@ def run_batch(
                 _was_success = False
             if _was_success:
                 logger.info(f"Resuming: skipping completed rank {item['rank']} ({item['dep']}->{item['arr']}) based on checkpoint.")
-                results.append(BatchResults.from_resumed(
+                results.append(RouteFetchSummary.from_resumed(
                     rank=item['rank'],
                     dep=item['dep'],
                     arr=item['arr'],
@@ -187,7 +175,7 @@ def run_batch(
                 strategy=strategy, fetch_format=fetch_format,
                 update_concat=False,  # Pass 1: individual files only; concat rebuilt in Pass 2
             )
-            results.append(BatchResults.from_fetch_result(
+            results.append(RouteFetchSummary.from_fetch_result(
                 rank=item['rank'],
                 dep=item['dep'],
                 arr=item['arr'],
@@ -195,7 +183,7 @@ def run_batch(
             ))
         except Exception as e:
             logger.error(f"CRITICAL ERROR fetching trajectories for {item['dep']}->{item['arr']}: {e}")
-            results.append(BatchResults.from_error(
+            results.append(RouteFetchSummary.from_error(
                 rank=item['rank'],
                 dep=item['dep'],
                 arr=item['arr'],
@@ -237,19 +225,26 @@ def execute_batch_fetch(
     strategy: str | None = None,
     resume: bool = False,
     cli_params: dict[str, Any] | None = None,
-) -> list[BatchResults]:
+) -> BatchFetchSummary:
     """Orchestrates batch plan printing, sequential execution, summary reporting, and manifest saving."""
     if not execution_plan:
         logger.error("Execution plan is empty. Aborting batch fetch.")
-        return []
+        raise ValueError("Execution plan is empty.")
 
     print_batch_plan(execution_plan, run_id)
     results = run_batch(execution_plan, run_id, seed, start_date, end_date, typecode, min_distance, fetch_format, strategy, resume)
     print_batch_summary(results)
 
+    summary = BatchFetchSummary(
+        run_id=run_id,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        cli_params=cli_params or {},
+        corridor_results=results
+    )
+
     manifest_path = TRAJECTORIES_DIR / FETCH_RUNS_DIRNAME / f"{run_id}_orchestrator.json"
-    write_orchestrator_manifest(manifest_path, run_id, execution_plan, results, cli_params or {})
-    return results
+    write_orchestrator_manifest(manifest_path, summary)
+    return summary
 
 
 def parse_cli_args() -> argparse.Namespace:
@@ -320,19 +315,15 @@ if __name__ == "__main__":
         )
         if plan:
             t0 = time.time()
-            results = execute_batch_fetch(
+            summary = execute_batch_fetch(
                 execution_plan=plan, run_id=dataset_name, seed=args.seed, start_date=args.start_date,
                 end_date=args.end_date, typecode=args.typecode, min_distance=args.min_distance,
                 fetch_format=args.format, strategy=args.strategy, resume=args.resume, cli_params=vars(args)
             )
-            cache_hits = sum(r.cache_hits for r in results)
-            restore_from_concat = sum(r.restore_from_concat for r in results)
-            fetch_from_trino = sum(r.fetch_from_trino for r in results)
-            fails = sum(r.fails for r in results)
             logger.info(
                 f"Batch fetch run completed in {round(time.time() - t0, 2)}s. "
-                f"Cache hits: {cache_hits}, restore from concat: {restore_from_concat}, "
-                f"fetch from trino: {fetch_from_trino}, fails: {fails}."
+                f"Cache hits: {summary.cache_hits}, restore from concat: {summary.restore_from_concat}, "
+                f"fetch from trino: {summary.fetch_from_trino}, fails: {summary.fails}."
             )
         else:
             logger.error("No valid corridors available in the execution plan.")
