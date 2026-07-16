@@ -28,7 +28,7 @@ data/
 │   └── corridor_simulations/ # PSFlight + CoCiP simulated trajectories
 ├── analysis/                # Analysis outputs and statistical evaluation
 │   └── reports/             # Aggregated statistical summaries and CSV tables
-└── logs/                    # Centralized pipeline execution logs (one fixed log file per module)
+└── logs/                    # Centralized active pipeline execution logs (legacy logs are moved to legacy/logs/)
 ```
 
 ### Dataset Subfolder Naming Schema
@@ -120,7 +120,12 @@ The OpenSky alias map applied by `src.common.adapters.PyOpenSky_df_to_PyContrail
 * **Centralized Logging Policy**: 
   - All module entrypoints must call `setup_file_logger()` from `src.common.utils` as their first action in `if __name__ == "__main__":`.
   - **`logging.basicConfig(...)` is strictly forbidden** anywhere in the codebase.
-  - Log files are written to fixed filenames in `data/logs/` (`LOGS_DIR`): `fetching.log`, `filtering.log`, `processing.log`, `acquisition.log`, `corridor.log`, `simulation.log`, `weather.log`, `calibration.log`, `manifest.log`, and the global append-only `skipped_aircraft.log`.
+  - Log files are written to fixed filenames in `data/logs/` (`LOGS_DIR`): `fetching.log`, `processing.log`, `acquisition.log`, `corridor.log`, `simulation.log`, `clone_simulation.log`, `stability_orchestrator.log`, `weather.log`, `calibration.log`, `gt_stability_sweep.log`, `phase_a_calibration.log`, `variational_orchestrator.log`, `analysis.log`, `manifest.log`, and the global append-only `skipped_aircraft.log`.
+  - *Legacy Logs Relocation*: Legacy log files (such as `filtering.log`, `clustering_orchestrator.log`, `streaming_pipeline.log`, `synthesis.log`, and `enrichment.log`) are cleaned up and moved to the project root `legacy/logs/` directory.
+  - *Skipped Aircraft Log (`skipped_aircraft.log`)*: Central append-only audit repository written to using `log_skipped_aircraft()` from `src.common.utils`. It records tab-separated audit entries (`ISO_UTC \t ID \t TYPECODE \t REASON`) for every flight, airframe, or trajectory skipped during fetching, parsing, Kalman filtering, clustering, or simulation.
+* **Strict Aircraft Typecode Verification & Anti-Default Policy (Rule 11)**: To preserve data integrity and aerodynamic validity, the pipeline strictly prohibits default or placeholder aircraft typecode injections (e.g., fallback guessing, filling missing typecodes with `'UNKNOWN'`, or hardcoding fallback families) anywhere in the pipeline.
+  - All modules that inspect or filter typecodes must call `is_supported_typecode(typecode)` from `src.common.config` to verify the model belongs strictly to `ALL_TARGET_FAMILIES`.
+  - Any missing, empty, or unassigned typecodes must trigger `log_skipped_aircraft()` to record the rejection reason and must be skipped immediately without assigning defaults.
 * **CLI Invocation**: All script runs must use Python's module format:
   `python -m src.folder.script_name --args`
 

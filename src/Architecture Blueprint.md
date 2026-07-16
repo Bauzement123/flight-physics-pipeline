@@ -42,7 +42,7 @@ data/
 │   └── corridor_simulations/ # PSFlight + CoCiP simulated trajectories
 ├── analysis/                # Analysis outputs and statistical evaluation
 │   └── reports/             # Aggregated statistical summaries and CSV tables
-└── logs/                    # Centralized pipeline execution logs (one fixed log file per module)
+└── logs/                    # Centralized active pipeline execution logs (legacy logs are moved to the root legacy/logs/ directory)
 ```
 
 ### 2.1 Source Code Directory Structure
@@ -139,12 +139,21 @@ All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `l
 * `fetching.log`: OpenSky Trino queries and download progress.
 * `acquisition.log`: Master population building and fleet merging.
 * `processing.log`: Kalman filtering and coordinate smoothing.
-* `corridor.log`: Corridor clustering, PCA compression, stability sweeps, and streaming pipeline execution.
+* `corridor.log`: Corridor clustering, PCA compression, and streaming pipeline execution.
 * `weather.log`: Copernicus CDS ERA5 NetCDF downloads.
 * `simulation.log`: PSFlight and CoCiP simulation runs.
-* `calibration.log`: Phase quality and variational calibration campaigns.
+* `clone_simulation.log`: Cloned corridor batch simulation runs (`clone_simulation.py`).
+* `stability_orchestrator.log`: Corridor stability sweep runs (`stability_orchestrator.py`).
+* `calibration.log`: General phase quality, schema enrichment, and variational calibration campaigns.
+* `gt_stability_sweep.log`: Ground Truth stability sweep runs (`gt_stability_sweep.py`).
+* `phase_a_calibration.log`: PCA dimension fit iterations (`phase_a_d_pca.py`).
+* `variational_orchestrator.log`: Variational calibration campaign runs (`variational_orchestrator.py`).
+* `analysis.log`: Statistical evaluation verification runs in `src/analysis/verification/`.
 * `manifest.log`: Global registry scan, pruning, and rebuild/update runs (`build_global_manifest.py`).
 * `skipped_aircraft.log`: Global append-only log recording skipped airframes across all pipeline stages.
+
+> [!NOTE]
+> Legacy logs (such as `filtering.log`, `clustering_orchestrator.log`, `streaming_pipeline.log`, `synthesis.log`, and `enrichment.log`) have been cleaned up and moved to the project's root `legacy/logs/` directory to keep `data/logs/` organized.
 
 ### 3.6 Concurrency & Thread-Limiting Policy
 
