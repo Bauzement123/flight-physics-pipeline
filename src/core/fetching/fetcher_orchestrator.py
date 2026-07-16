@@ -169,7 +169,20 @@ def run_batch(
                 _was_success = False
             if _was_success:
                 logger.info(f"Resuming: skipping completed rank {item['rank']} ({item['dep']}->{item['arr']}) based on checkpoint.")
-                results.append({"rank": item['rank'], "dep": item['dep'], "arr": item['arr'], "success": True, "requested": item['target'], "succeeded": item['target'], "failed": 0, "resumed": True})
+                results.append({
+                    "rank": item['rank'],
+                    "dep": item['dep'],
+                    "arr": item['arr'],
+                    "success": True,
+                    "requested": item['target'],
+                    "succeeded": item['target'],
+                    "failed": 0,
+                    "resumed": True,
+                    "cache_hits": 0,
+                    "restore_from_concat": 0,
+                    "fetch_from_trino": 0,
+                    "fails": 0,
+                })
                 continue
 
         try:
@@ -180,10 +193,39 @@ def run_batch(
                 strategy=strategy, fetch_format=fetch_format,
                 update_concat=False,  # Pass 1: individual files only; concat rebuilt in Pass 2
             )
-            results.append({"rank": item['rank'], "dep": item['dep'], "arr": item['arr'], "success": res.success, "requested": res.requested, "succeeded": res.succeeded, "failed": res.failed, "resumed": False, "new_dfs": res.failed_flight_ids, "concat_path": str(res.concat_path)})
+            results.append({
+                "rank": item['rank'],
+                "dep": item['dep'],
+                "arr": item['arr'],
+                "success": res.success,
+                "requested": res.requested,
+                "succeeded": res.succeeded,
+                "failed": res.failed,
+                "resumed": False,
+                "new_dfs": res.failed_flight_ids,
+                "concat_path": str(res.concat_path),
+                "cache_hits": res.registry_hits,
+                "restore_from_concat": res.concat_recoveries,
+                "fetch_from_trino": res.trino_fetches,
+                "fails": res.failed,
+            })
         except Exception as e:
             logger.error(f"CRITICAL ERROR fetching trajectories for {item['dep']}->{item['arr']}: {e}")
-            results.append({"rank": item['rank'], "dep": item['dep'], "arr": item['arr'], "success": False, "requested": item['target'], "succeeded": 0, "failed": item['target'], "error": str(e), "resumed": False})
+            results.append({
+                "rank": item['rank'],
+                "dep": item['dep'],
+                "arr": item['arr'],
+                "success": False,
+                "requested": item['target'],
+                "succeeded": 0,
+                "failed": item['target'],
+                "error": str(e),
+                "resumed": False,
+                "cache_hits": 0,
+                "restore_from_concat": 0,
+                "fetch_from_trino": 0,
+                "fails": item['target'],
+            })
             continue
 
     # Pass 2: Rebuild route-level concat files after all FUSE file handles have flushed
@@ -302,12 +344,20 @@ if __name__ == "__main__":
         )
         if plan:
             t0 = time.time()
-            execute_batch_fetch(
+            results = execute_batch_fetch(
                 execution_plan=plan, run_id=dataset_name, seed=args.seed, start_date=args.start_date,
                 end_date=args.end_date, typecode=args.typecode, min_distance=args.min_distance,
                 fetch_format=args.format, strategy=args.strategy, resume=args.resume, cli_params=vars(args)
             )
-            logger.info(f"Batch fetch run completed in {round(time.time() - t0, 2)}s.")
+            cache_hits = sum(r.get("cache_hits", 0) for r in results)
+            restore_from_concat = sum(r.get("restore_from_concat", 0) for r in results)
+            fetch_from_trino = sum(r.get("fetch_from_trino", 0) for r in results)
+            fails = sum(r.get("fails", 0) for r in results)
+            logger.info(
+                f"Batch fetch run completed in {round(time.time() - t0, 2)}s. "
+                f"Cache hits: {cache_hits}, restore from concat: {restore_from_concat}, "
+                f"fetch from trino: {fetch_from_trino}, fails: {fails}."
+            )
         else:
             logger.error("No valid corridors available in the execution plan.")
     else:
