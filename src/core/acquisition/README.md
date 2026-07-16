@@ -175,8 +175,18 @@ python -m src.core.acquisition.enrich_route_summary
 ```
 * **Parameters**: None. Runs directly against configured summary paths in `config.py`.
 
+### Logging
+
+All scripts initialize logging via `setup_file_logger()` from `src.common.utils` inside their entrypoint blocks.
+
+| Log file written to `data/logs/` | Writer | Purpose |
+|---|---|---|
+| `acquisition.log` | `build_master_population.py`, `enrich_route_summary.py`, `fleet_builder.py`, `master_merger.py` | Logs execution progress, records processed, database chunk operations, and route summary distance enrichment milestones. |
+| `skipped_aircraft.log` | `fleet_builder.py`, `master_merger.py` | Append-only audit record of skipped unsupported aircraft models. |
+
 ## 5. Prerequisites & Dependencies
 
 * **Libraries**: `pandas`, `sqlalchemy`, `numpy`, `pyarrow` (required for Parquet export).
 * **Database Access**: Trino credentials must be configured (typically in `~/.config/opensky/trino.json` or equivalent) for Track A.
 * **Optional Fallback**: `traffic` package (only loaded lazily if the local OpenSky database CSV is missing).
+

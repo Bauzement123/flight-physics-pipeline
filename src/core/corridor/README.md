@@ -176,5 +176,6 @@ python -m src.core.corridor.corridor_clustering_cli `
 * `data/registries/global_flight_cluster_map.parquet` (maps historical flights to cluster IDs)
 * `data/logs/skipped_aircraft.log` (logs skipped invalid/NaN medoid typecodes)
 * `data/logs/corridor.log` (central logging record)
+* `data/logs/stability_orchestrator.log` (logs stability sweep runs from `stability_orchestrator.py`)
 
 For naming standards, unit conversions (aviation vs. SI), and coordinate projections, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.

@@ -314,7 +314,15 @@ python -m src.core.physics.clone_simulation --ranks 1,76,177 --test-mode --weath
 | `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 
----
+### Logging
+
+All entrypoint scripts initialize logging via `setup_file_logger()` from `src.common.utils`.
+
+| Log file written to `data/logs/` | Writer | Purpose |
+|---|---|---|
+| `simulation.log` | `simulation.py` | Logs batch simulation milestones, thread execution metrics, and PSFlight/CoCiP simulation results. |
+| `clone_simulation.log` | `clone_simulation.py` | Logs rolling weather window changes, scheduled flight cloning, and batch stream serialization progress. |
+| `skipped_aircraft.log` | `simulation.py`, `clone_simulation.py` | Central append-only audit record of skipped unsupported aircraft types. |
 
 ## 5. Prerequisites & Dependencies
 
