@@ -155,8 +155,10 @@ def run_batch(
                 with open(checkpoint_path, encoding='utf-8') as _f:
                     _data = json.load(_f)
                 _was_success = _data.get("result", {}).get("success", False)
+                _duration = _data.get("result", {}).get("duration_seconds", 0.0)
             except Exception:
                 _was_success = False
+                _duration = 0.0
             if _was_success:
                 logger.info(f"Resuming: skipping completed rank {item['rank']} ({item['dep']}->{item['arr']}) based on checkpoint.")
                 results.append(RouteFetchSummary.from_resumed(
@@ -164,6 +166,7 @@ def run_batch(
                     dep=item['dep'],
                     arr=item['arr'],
                     target=item['target'],
+                    duration_seconds=_duration,
                 ))
                 continue
 
@@ -239,7 +242,7 @@ def execute_batch_fetch(
         run_id=run_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         cli_params=cli_params or {},
-        corridors=results
+        corridor_results=results
     )
 
     manifest_path = TRAJECTORIES_DIR / FETCH_RUNS_DIRNAME / f"{run_id}_orchestrator.json"
@@ -322,6 +325,7 @@ if __name__ == "__main__":
             )
             logger.info(
                 f"Batch fetch run completed in {round(time.time() - t0, 2)}s. "
+                f"Total cumulative corridor duration: {round(summary.total_duration_seconds, 2)}s. "
                 f"Cache hits: {summary.cache_hits}, restore from concat: {summary.restore_from_concat}, "
                 f"fetch from trino: {summary.fetch_from_trino}, fails: {summary.fails}."
             )

@@ -79,9 +79,10 @@ class RouteFetchSummary:
     error: str | None = None
     new_dfs: list[str] = field(default_factory=list)
     concat_path: str | None = None
+    duration_seconds: float = 0.0
 
     @classmethod
-    def from_resumed(cls, rank: int, dep: str, arr: str, target: int) -> "RouteFetchSummary":
+    def from_resumed(cls, rank: int, dep: str, arr: str, target: int, duration_seconds: float = 0.0) -> "RouteFetchSummary":
         """Build a RouteFetchSummary entry from a skipped corridor due to resume logic."""
         return cls(
             rank=rank,
@@ -96,6 +97,7 @@ class RouteFetchSummary:
             restore_from_concat=0,
             fetch_from_trino=0,
             fails=0,
+            duration_seconds=duration_seconds,
         )
 
     @classmethod
@@ -116,6 +118,7 @@ class RouteFetchSummary:
             restore_from_concat=getattr(res, "concat_recoveries", 0),
             fetch_from_trino=getattr(res, "trino_fetches", 0),
             fails=res.failed,
+            duration_seconds=res.duration_seconds if getattr(res, "duration_seconds", None) is not None else 0.0,
         )
 
     @classmethod
@@ -135,6 +138,7 @@ class RouteFetchSummary:
             fetch_from_trino=0,
             fails=target,
             error=str(error),
+            duration_seconds=0.0,
         )
 
 
@@ -144,8 +148,9 @@ class BatchFetchSummary:
     run_id: str
     timestamp: str
     cli_params: dict[str, Any]
-    corridors: list[RouteFetchSummary]
+    corridor_results: list[RouteFetchSummary]
 
+    total_duration_seconds: float = field(init=False)
     total_corridors_requested: int = field(init=False)
     total_corridors_succeeded: int = field(init=False)
     total_corridors_failed: int = field(init=False)
@@ -158,15 +163,16 @@ class BatchFetchSummary:
     fails: int = field(init=False)
 
     def __post_init__(self) -> None:
-        self.total_corridors_requested = len(self.corridors)
-        self.total_corridors_succeeded = sum(1 for c in self.corridors if c.success)
+        self.total_duration_seconds = sum(c.duration_seconds for c in self.corridor_results)
+        self.total_corridors_requested = len(self.corridor_results)
+        self.total_corridors_succeeded = sum(1 for c in self.corridor_results if c.success)
         self.total_corridors_failed = self.total_corridors_requested - self.total_corridors_succeeded
-        self.total_trajectories_requested = sum(c.requested for c in self.corridors)
-        self.total_trajectories_succeeded = sum(c.succeeded for c in self.corridors)
-        self.total_trajectories_failed = sum(c.failed for c in self.corridors)
-        self.cache_hits = sum(c.cache_hits for c in self.corridors)
-        self.restore_from_concat = sum(c.restore_from_concat for c in self.corridors)
-        self.fetch_from_trino = sum(c.fetch_from_trino for c in self.corridors)
-        self.fails = sum(c.fails for c in self.corridors)
+        self.total_trajectories_requested = sum(c.requested for c in self.corridor_results)
+        self.total_trajectories_succeeded = sum(c.succeeded for c in self.corridor_results)
+        self.total_trajectories_failed = sum(c.failed for c in self.corridor_results)
+        self.cache_hits = sum(c.cache_hits for c in self.corridor_results)
+        self.restore_from_concat = sum(c.restore_from_concat for c in self.corridor_results)
+        self.fetch_from_trino = sum(c.fetch_from_trino for c in self.corridor_results)
+        self.fails = sum(c.fails for c in self.corridor_results)
 
 
