@@ -8,7 +8,7 @@ from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
     GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY, RAW_CONCAT_SUFFIX,
-    GLOBAL_EKF_DIAG_REGISTRY
+    CLEAN_CONCAT_SUFFIX, GLOBAL_EKF_DIAG_REGISTRY
 )
 from src.common.registry_utils import save_model_registry
 from src.common.utils import setup_file_logger, to_project_relative
@@ -271,6 +271,7 @@ def rebuild_clean_registry(force: bool = False) -> None:
             TRAJECTORIES_DIR
         ],
         description="Clean EKF Trajectory",
+        exclude_filename_suffixes=(CLEAN_CONCAT_SUFFIX,),
         force=force
     )
 

@@ -356,6 +356,17 @@ To ensure that `kalman_filter.py` can be seamlessly embedded within both standal
 
 ---
 
+> [!NOTE]
+> **Clean Trajectory Backup Archives (`*_all_clean.parquet`)**: The processing pipeline (`kalman_filter.py`) **only** writes individual `*_clean_si.parquet` files — one per raw source file. It **never** creates or updates `*_all_clean.parquet` batch archives automatically. Batch archival of clean trajectories is a **manual devtool operation**:
+> ```powershell
+> # Backup all clean trajectories for a cohort
+> python -m src.devtools.trajectory_manager pack --cohort rank_143_EDDF-LIRF --type clean
+>
+> # Restore clean trajectories from backup (only extracts flights with no single file on disk)
+> python -m src.devtools.trajectory_manager unpack --cohort rank_143_EDDF-LIRF --type clean
+> ```
+> `*_all_clean.parquet` archives are excluded from `global_clean_registry.parquet` indexing and are transparent to all pipeline stages. See `src/devtools/trajectory_manager.py` and `Architecture Blueprint.md §3.2` for full conventions.
+
 ## 5. CLI Usage Guide
 
 ### 5.1 Workflow A — Batch EKF Smoothing (`kalman_filter.py`)

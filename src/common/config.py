@@ -80,8 +80,11 @@ TRINO_QUERY_TIMEOUT_SECS: int = 300     # Trino query execution timeout in secon
 # Fetching filename conventions (§3.3.1)
 RAW_TRAJECTORY_SUFFIX: str = "_raw.parquet"
 RAW_CONCAT_SUFFIX: str = "_all_raw.parquet"
+CLEAN_TRAJECTORY_SUFFIX: str = "_clean_si.parquet"
+CLEAN_CONCAT_SUFFIX: str = "_all_clean.parquet"
 FETCH_RUNS_DIRNAME: str = "runs"
 RAW_TRAJECTORY_DIRNAME: str = "raw"
+CLEAN_TRAJECTORY_DIRNAME: str = "clean"
 
 # Target aircraft typecode families
 A320_NEO_FAMILY = ["A19N", "A20N", "A21N"]
