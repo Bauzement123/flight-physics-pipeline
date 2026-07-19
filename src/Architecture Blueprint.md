@@ -326,49 +326,75 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
 
 ## 5. End-to-End Data Workflow
 
+### Part 1: Acquisition & Route Summary
+
 ```mermaid
 flowchart TD
-    subgraph Input_Layer ["1. Acquisition & Input Layer"]
-        A[OpenSky / Raw Schedules] -->|build_master_population.py| B[(Master Flights DB)]
-        B -->|build_route_summary.py| C[(Route Summary Table)]
-        C -->|population_filter.py| D[Corridor Flight Lists]
+    subgraph Acquisition ["1. Acquisition & Regional Scoping Layer"]
+        A1[Raw ADS-B Schedules] -->|build_master_population.py| A2["ParentPopulation_*.parquet"]
+        B1[Raw Aircraft DBs] -->|fleet_builder.py| B2["*_Enriched_Fleet.parquet"]
+        W1[Copernicus CDS API] -->|era5_manager.py| W2[(ERA5 NetCDF Cache)]
+        
+        A2 --> M[master_merger.py]
+        B2 --> M
+        M --> C[(master_flights.parquet)]
+        
+        C -->|build_route_summary.py| D[(master_flights_route_summary.parquet)]
+    end
+```
+
+**Regional Scoping & Airport Indicators:**
+This initial phase is where we define the bounding box and geographical region we want to simulate. The flight schedules, route generation, and ERA5 weather downloads are all constrained to this target region (e.g., Europe vs. North America) via the CLI dates and boundary parameters.
+
+> [!WARNING]
+> **Note on Airport Indicators (America):** When querying `flightdata4/trino` for North American regions, many flights are recorded using three- to five-character alphanumeric **FAA location identifiers** (FAA LIDs) instead of standard 4-letter **ICAO identifiers**. The pipeline's departure/arrival prefix filters and downstream location merging logic must account for this discrepancy when scoping non-European simulations.
+
+### Part 2: Calibration & Data Quality Phase
+
+Before entering the main execution pipeline, the system verifies data quality and parameter stability via an isolated **Calibration Phase**:
+- **Trajectory Overfetching**: A small subset of trajectories is overfetched from the OpenSky Trino API.
+- **Filter Evaluation**: The raw data is passed through the `kalman_filter` and clustering components purely to evaluate and tune the **Pre-Filter** and **Post-Filter** parameters.
+- **Verification**: This ensures the thresholds for outlier rejection, physical limit violations (e.g., velocity, acceleration), and Silhouette clustering scores are optimal before bulk processing begins.
+
+### Part 3: The Main Waterfall Pipeline (Fetching to Simulation)
+
+```mermaid
+flowchart TD
+    subgraph Fetching ["2. Fetching"]
+        D[(master_flights_route_summary.parquet)] -->|fetcher_orchestrator.py| E1[OpenSky Trino API]
+        C[(master_flights.parquet)] -->|opensky_fetcher.py| E1
+        E1 --> E2["Raw Trajectories (*_raw.parquet)"]
+        E2 -->|Update| E3[(GLOBAL_TRAJECTORY_REGISTRY)]
+        E2 -->|Update| E3A[(Concat Buffer)]
     end
 
-    subgraph Fetching_Layer ["2. Trajectory Fetching Layer"]
-        D -->|fetcher_orchestrator.py| E[OpenSky Trino Database]
-        E -->|opensky_fetcher.py| F[Raw Trajectories<br/>*_raw.parquet]
-        F -->|Update| G[(GLOBAL_TRAJECTORY_REGISTRY)]
+    subgraph EKF_PostFilter ["3. EKF & Post-Filtering"]
+        E3 -->|kalman_filter.py| E4[Extended Kalman Filter & RTS]
+        D --> E4
+        E4 --> E5["Clean SI Trajectories (*_clean_si.parquet)"]
+        E5 -->|Update| E6[(GLOBAL_CLEAN_REGISTRY)]
+        
+        E6 -->|postfilter_cli.py| P1[Load Flights & Check Filters]
+        P1 -->|Update| E6
     end
 
-    subgraph Processing_Layer ["3. Processing & Smoothing Layer"]
-        F -->|kalman_filter.py<br/>Traffic EKF| H[Clean SI Trajectories<br/>*_clean_si.parquet]
-        H -->|Update| I[(GLOBAL_CLEAN_REGISTRY)]
+    subgraph Corridor_Synthesis ["4. Corridor Clustering"]
+        E6 -->|corridor_clustering_cli.py| F1[Load Filter-Passed Clean Flights]
+        F1 --> F2[Sampling & Z-Norm]
+        F2 --> F3[PCA & DTW Clustering]
+        
+        F3 --> F4["Synthesized Centroids / Medoids"]
+        F3 --> F5[(GLOBAL_FLIGHT_CLUSTER_MAP)]
+        F4 -->|Update| F6[(GLOBAL_MODEL_REGISTRY)]
     end
 
-    subgraph Corridor_Layer ["4. Corridor & Synthesis Layer"]
-        H -->|pca_compressor.py| J[PCA Feature Matrix]
-        J -->|path_generator.py<br/>DTW Clustering| K[Synthesized Centroids<br/>*_synthesized_cID.parquet]
-        K -->|Update| L[(GLOBAL_MODEL_REGISTRY<br/>& STABILITY_REGISTRY)]
-    end
-
-    subgraph Weather_Layer ["5. Weather Acquisition Layer"]
-        M[Copernicus CDS API] -->|era5_manager.py| N[(ERA5 NetCDF Cache)]
-    end
-
-    subgraph Simulation_Layer ["6. Physics Simulation Layer"]
-        H -->|simulation.py<br/>+ ERA5 Weather| O[Simulated Trajectories<br/>*_simulated.parquet]
-        K -->|clone_simulation.py<br/>+ Temporal Offsets| P[Cloned Corridor Results<br/>data/results/corridor_simulations/]
-        O -->|Update| Q[(GLOBAL_SIMULATION_REGISTRY)]
-        P -->|Update| R[(GLOBAL_CORRIDOR_SIM_REGISTRY)]
-        O -.->|Unsupported Airframes| S[skipped_aircraft.log]
-        P -.->|Unsupported Airframes| S
-    end
-
-    subgraph Analysis_Layer ["7. Analysis & Campaigns Layer"]
-        H -->|flight_analysis.py<br/>flight_level_analysis.py| T[Verification Plots & Reports]
-        P -->|variational_orchestrator.py| U[Phase Quality Campaign Plots]
-        T -->|Save| V[data/analysis/]
-        U -->|Save| V
+    subgraph Physics_Simulation ["5. Clone Simulation"]
+        W1[(ERA5 Weather Cache)] -->|clone_simulation.py| S1[Load Corridors & Shift Times]
+        F6 --> S1
+        C --> S1
+        D --> S1
+        S1 -->|PSFlight & CoCiP| S2["Corridor Simulation Results (*_flight.parquet)"]
+        S2 -->|Update| S3[(GLOBAL_CORRIDOR_SIM_REGISTRY)]
     end
 ```
 
