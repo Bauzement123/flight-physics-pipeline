@@ -1,0 +1,21 @@
+# Flight Physics Pipeline — Environment Dependencies
+# Tested on Python 3.10 - 3.12
+# Generated via src.devtools.find_dependencies
+
+airportsdata==20260315
+cartopy==0.25.0
+matplotlib==3.10.9
+numpy==2.4.6
+openap==2.4
+pandas==2.3.3
+psutil==7.2.2
+pyarrow==24.0.0
+pycontrails==0.63.0
+pyopensky==2.16
+pyproj==3.7.2
+scipy==1.17.1
+scikit-learn==1.8.0
+sqlalchemy==2.0.49
+threadpoolctl==3.6.0
+traffic==2.13
+xarray==2026.4.0

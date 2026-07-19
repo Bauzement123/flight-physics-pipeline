@@ -9,9 +9,12 @@ The `analysis` module provides tools and scripts to aggregate flight trajectory 
 ```text
 src/analysis/verification/
 ├── flight_analysis.py             # CLI execution script for distance vs altitude analysis
-├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
-├── route_class_analysis.py        # CLI execution script for route class distribution histogram
 ├── flight_level_analysis.py       # CLI execution script for cruise Flight Level distribution boxplots
+├── matlab_prepare.py              # CLI script for MATLAB verification data exports
+├── plot_corridor_clusters.py      # CLI script for dual-panel cluster, medoid, & altitude visualizations
+├── route_class_analysis.py        # CLI execution script for route class distribution histogram
+├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
+├── summarize_population.py        # CLI inspection tool for master_flights route summary tables
 └── README.md                      # This module documentation
 ```
 
@@ -166,6 +169,17 @@ python -m src.analysis.verification.flight_level_analysis --top-k-percent 10
 
 # Generate 200km binned distance bracket boxplot distribution
 python -m src.analysis.verification.flight_level_analysis --dist-step 200 --top-k-percent 10
+```
+
+#### Trajectory Cluster & Medoid Visualization (`plot_corridor_clusters.py`)
+* `--route-id` (string): Target route ID (e.g. `LEPA-LEBL`). Default: `LEPA-LEBL`.
+* `--out-file` (string): Path to save output plot (default: `data/analysis/plots/<route_id>_clusters.svg`).
+* `--show` (flag): Display interactive matplotlib plot window.
+
+### CLI Syntax Examples (Cluster & Medoid Visualization)
+```bash
+# Generate dual-panel GeoMap and Altitude Profile plot for route LEPA-LEBL
+python -m src.analysis.verification.plot_corridor_clusters --route-id LEPA-LEBL
 ```
 
 ### Logging
