@@ -205,10 +205,10 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
    │    ├── Inputs: Raw ADS-B schedule databases and airport prefix filters
    │    ├── Outputs: MASTER_FLIGHTS_FILE (`data/databases/master_flights/master_flights.parquet`)
    │    └── Safety: Logs progress to `acquisition.log`; skips malformed schedule rows
-   ├── Route Enrichment: enrich_route_summary.py::enrich_summary()
-   │    ├── Inputs: Master flight schedules and airport coordinates cache
-   │    ├── Outputs: ROUTE_SUMMARY_PARQUET / ROUTE_SUMMARY_PKL
-   │    └── Safety: Vectorized Haversine geodesic distance calculation
+   ├── Route Summary & Enrichment: build_route_summary.py::main()
+   │    ├── Inputs: master_flights.parquet dataset and airport coordinates cache
+   │    ├── Outputs: ROUTE_SUMMARY_PARQUET / ROUTE_SUMMARY_PKL / ROUTE_SUMMARY_CSV and report files
+   │    └── Safety: Vectorized Haversine geodesic distance calculation and spatial quality filters
    └── Fleet Construction: fleet_builder.py / master_merger.py
         ├── Inputs: OpenAirframes database (`openairframes_adsb_2024-01-01_2026-02-23.csv.gz`)
         └── Outputs: Enriched flight schedules with validated ICAO typecodes and engine families
@@ -323,7 +323,7 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
 flowchart TD
     subgraph Input_Layer ["1. Acquisition & Input Layer"]
         A[OpenSky / Raw Schedules] -->|build_master_population.py| B[(Master Flights DB)]
-        B -->|enrich_route_summary.py| C[(Route Summary Table)]
+        B -->|build_route_summary.py| C[(Route Summary Table)]
         C -->|population_filter.py| D[Corridor Flight Lists]
     end
 
@@ -366,7 +366,7 @@ flowchart TD
 ```
 
 **Step-by-Step Description:**
-1. **Schedule Acquisition & Enrichment**: `build_master_population.py` ingests raw ADS-B schedules to build the master flights database (`master_flights.parquet`). `enrich_route_summary.py` calculates Haversine geodesic distances and populates the route summary tables.
+1. **Schedule Acquisition & Enrichment**: `build_master_population.py` ingests raw ADS-B schedules to build the master flights database (`master_flights.parquet`). `build_route_summary.py` calculates Haversine geodesic distances and populates the route summary tables.
 2. **Corridor Slicing**: Corridor schedules are sliced into specific airport pair flight lists (`data/flight_lists/`) based on geographic bounding boxes and route popularity ranks.
 3. **Trajectory Fetching**: `fetcher_orchestrator.py` reads the corridor flight lists and queries OpenSky Trino via `opensky_fetcher.py`. Raw waypoint parquets (`*_raw.parquet`) are saved to `data/trajectories/raw/`, and `GLOBAL_TRAJECTORY_REGISTRY` is updated atomically.
 4. **EKF Smoothing**: `kalman_filter.py` reads raw waypoints, projects coordinates to a local Lambert azimuthal equal-area plane, applies an Extended Kalman Filter (EKF), and resamples to a uniform 1-minute grid. Clean SI parquets (`*_clean_si.parquet`) are saved to `data/trajectories/clean/`, updating `GLOBAL_CLEAN_REGISTRY`.

@@ -13,7 +13,7 @@ import logging
 from src.common.config import (
     ROUTE_SUMMARY_PARQUET, TRAJECTORIES_DIR, BASE_DIR, LOGS_DIR,
     BACKOFF_MAX_RETRIES, BACKOFF_INITIAL_DELAY, BACKOFF_FACTOR, BACKOFF_MAX_DELAY,
-    UNSUPPORTED_TYPECODE_FLAG,
+    UNSUPPORTED_TYPECODE_FLAG, AIRPORTS_CACHE_PATH,
 )
 from src.common.exceptions import RetryError
 
@@ -28,7 +28,7 @@ def log_skipped_aircraft(
     """
     Appends an entry to data/logs/skipped_aircraft.log when an aircraft or flight is skipped
     due to a NaN, missing, or non-target family typecode.
-    Conforms to the global audit log format: id \\t typecode \\t reason.
+    Conforms to the global audit log format: id \t typecode \t reason.
     """
     skipped_log = LOGS_DIR / "skipped_aircraft.log"
     tc_str = str(typecode) if pd.notna(typecode) and typecode is not None and str(typecode).strip() != "" else UNSUPPORTED_TYPECODE_FLAG
@@ -74,6 +74,88 @@ def load_route_summary(summary_path: str | Path | None = None) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading RouteSummary file ({suffix}): {e}")
         return pd.DataFrame()
+
+
+def haversine_distance_m(
+    lat1: pd.Series | float,
+    lon1: pd.Series | float,
+    lat2: pd.Series | float,
+    lon2: pd.Series | float,
+) -> pd.Series | float:
+    """
+    Vectorized NumPy Haversine formula. Returns great-circle distance in metres.
+    Accepts pd.Series or scalar floats. Replaces local haversine implementations.
+    """
+    import numpy as np
+    R = 6_371_000.0  # volumetric mean Earth radius in metres
+    lat1_r, lon1_r, lat2_r, lon2_r = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lat2_r) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * R * np.arcsin(np.sqrt(a))
+
+
+def resolve_airport_coordinates(unique_icaos: list) -> dict:
+    """
+    Cache-backed resolver: ICAO code -> {"lat": float, "lon": float}.
+    Checks AIRPORTS_CACHE_PATH first; resolves missing entries via airportsdata
+    (primary) or traffic.data.airports (fallback); writes updates back to cache.
+    """
+    airports_db = {}
+    cache_updated = False
+
+    # 1. Try to load from local JSON cache first
+    if AIRPORTS_CACHE_PATH.exists():
+        logger.info(f"Loading airport coordinates from local cache: {AIRPORTS_CACHE_PATH}")
+        try:
+            with open(AIRPORTS_CACHE_PATH, 'r', encoding='utf-8') as f:
+                airports_db = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read airport coordinates cache: {e}")
+
+    # 2. Check if there are any missing ICAOs
+    missing_icaos = [icao for icao in unique_icaos if icao not in airports_db]
+
+    if missing_icaos:
+        logger.info(f"Found {len(missing_icaos)} airports missing from local coordinates cache. Resolving them...")
+        
+        resolved_new = {}
+        try:
+            import airportsdata
+            logger.info("Resolving missing airport coordinates using airportsdata library...")
+            data = airportsdata.load()
+            for icao in missing_icaos:
+                if icao in data:
+                    resolved_new[icao] = {"lat": data[icao]["lat"], "lon": data[icao]["lon"]}
+        except ImportError:
+            logger.warning("airportsdata not installed. Falling back to traffic library airports database...")
+            try:
+                from traffic.data import airports
+                traffic_db = {
+                    row.icao: {"lat": row.latitude, "lon": row.longitude}
+                    for row in airports.data.dropna(subset=['icao']).itertuples()
+                }
+                for icao in missing_icaos:
+                    if icao in traffic_db:
+                        resolved_new[icao] = traffic_db[icao]
+            except ImportError:
+                logger.error("Could not import airportsdata or traffic. Airport coordinates cannot be resolved.")
+
+        if resolved_new:
+            airports_db.update(resolved_new)
+            cache_updated = True
+            logger.info(f"Successfully resolved {len(resolved_new)} new airport coordinate entries.")
+
+    if cache_updated:
+        try:
+            AIRPORTS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(AIRPORTS_CACHE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(airports_db, f, indent=4)
+            logger.info(f"Saved updated airport coordinates cache to: {AIRPORTS_CACHE_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to write airport coordinates cache: {e}")
+
+    return airports_db
 
 
 def split_route_string(route_str: str) -> tuple[str, str]:

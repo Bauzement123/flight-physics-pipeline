@@ -162,6 +162,7 @@ ROUTE_SUMMARY_PKL = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.pkl"
 ROUTE_SUMMARY_PARQUET = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.parquet"
 ROUTE_SUMMARY_CSV = MASTER_FLIGHTS_DB_DIR / "master_flights_route_summary.csv"
 MASTER_FLIGHTS_FILE = MASTER_FLIGHTS_DB_DIR / "master_flights.parquet"
+MASTER_FLIGHTS_REPORTS_DIR = MASTER_FLIGHTS_DB_DIR / "reports"
 
 # ERA5 Weather Parameters
 ERA5_PRESSURE_LEVEL_VARIABLES = [
@@ -259,7 +260,7 @@ def init_runtime() -> None:
     """
     for directory in [
         DATA_DIR, MASTER_FLIGHTS_DB_DIR, AIRCRAFT_DB_DIR, REGISTRIES_DIR,
-        LOGS_DIR, REPORTS_DIR, TEMP_DIR,
+        LOGS_DIR, REPORTS_DIR, MASTER_FLIGHTS_REPORTS_DIR, TEMP_DIR,
         DATA_DIR / "analysis" / "plots",
     ]:
         directory.mkdir(parents=True, exist_ok=True)

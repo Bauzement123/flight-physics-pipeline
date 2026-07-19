@@ -269,21 +269,13 @@ def recompute_airport_distances(df_clean: pd.DataFrame, airport_coords: dict) ->
         * 'dist_vert_ft' - airport-to-airport vertical distance (dest - origin elevation) (ft)
         * 'dist_total_nm' - combined 3D distance
     """
-    from math import radians, sin, cos, sqrt, atan2
-    
-    def haversine(lat1, lon1, lat2, lon2):
-        R = 6371.0  # Earth radius in km
-        φ1, φ2 = map(radians, [lat1, lat2])
-        Δφ = radians(lat2 - lat1)
-        Δλ = radians(lon2 - lon1)
-        a = sin(Δφ / 2) ** 2 + cos(φ1) * cos(φ2) * sin(Δλ / 2) ** 2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return R * c
+    from math import sqrt
+    from src.common.utils import haversine_distance_m
         
     o_lat, o_lon, o_elev_ft = airport_coords["origin"]
     d_lat, d_lon, d_elev_ft = airport_coords["dest"]
     
-    horiz_km = haversine(o_lat, o_lon, d_lat, d_lon)
+    horiz_km = haversine_distance_m(o_lat, o_lon, d_lat, d_lon) / 1000.0
     horiz_nm = horiz_km * 0.539957
     vert_ft = d_elev_ft - o_elev_ft
     
@@ -356,7 +348,7 @@ def passes_distance_prefilters(df_clean: pd.DataFrame, thresholds: dict) -> tupl
     Check if the first and last waypoints of df_clean are within distance pre-filter limits
     of the origin and destination airports.
     """
-    from math import radians, sin, cos, sqrt, atan2
+    from src.common.utils import haversine_distance_m
     
     dep_col = "estdepartureairport"
     arr_col = "estarrivalairport"
@@ -394,19 +386,10 @@ def passes_distance_prefilters(df_clean: pd.DataFrame, thresholds: dict) -> tupl
     last_lon = df_sorted[lon_col].iloc[-1]
     last_alt = df_sorted[alt_col].iloc[-1]
     
-    def haversine_m(lat1, lon1, lat2, lon2):
-        R = 6371000.0  # Earth radius in meters
-        φ1, φ2 = map(radians, [lat1, lat2])
-        Δφ = radians(lat2 - lat1)
-        Δλ = radians(lon2 - lon1)
-        a = sin(Δφ / 2) ** 2 + cos(φ1) * cos(φ2) * sin(Δλ / 2) ** 2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return R * c
-        
-    dep_horiz = haversine_m(first_lat, first_lon, o_lat, o_lon)
+    dep_horiz = haversine_distance_m(first_lat, first_lon, o_lat, o_lon)
     dep_vert = abs(first_alt - o_elev_m)
     
-    arr_horiz = haversine_m(last_lat, last_lon, d_lat, d_lon)
+    arr_horiz = haversine_distance_m(last_lat, last_lon, d_lat, d_lon)
     arr_vert = abs(last_alt - d_elev_m)
     
     metrics = {
