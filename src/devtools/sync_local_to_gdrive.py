@@ -8,7 +8,9 @@ files that exist locally but are missing or older on the G: Drive.
 USAGE
 -----
 1. Set LOCAL_PIPELINE_DIR below to the root of your local pipeline copy.
-2. Run:  python src/devtools/sync_local_to_gdrive.py [--dry-run] [--verbose]
+2. Run:  python -m src.devtools.sync_local_to_gdrive [--dry-run] [--verbose]
+3. When done, apply the registry dump:
+         python -m src.devtools.sync_local_to_gdrive --apply-dump
 
 WHAT GETS SYNCED
 ----------------
@@ -16,27 +18,42 @@ The script performs TWO operations in order:
 
   1. Registry diff  — reads both global_trajectory_registry.parquet files
                       into memory to find LOCAL-only flight_ids. Registries
-                      are NEVER written or copied — they must be rebuilt by
-                      build_global_manifest after the sync.
+                      are NEVER written or copied — they are updated only via
+                      --apply-dump or build_global_manifest.
   2. Trajectory dirs — every route folder under data/trajectories/ whose
                        flight_ids appear in the LOCAL registry but are missing
                        from the G: Drive registry, OR where any individual
                        parquet file is newer locally, OR the folder is entirely
                        absent on the G: Drive.
 
+REGISTRY DUMP (WAL)
+-------------------
+After each route folder is successfully copied, the script appends an entry
+for every raw parquet that was written to:
+
+    data/registries/registry_dump.tmp.parquet   (on G: Drive)
+
+Schema: flight_id (str), file_path (str, relative to G: Drive root)
+
+This file survives interrupted syncs. Once the sync (or partial sync) is
+complete, run --apply-dump to merge it into global_trajectory_registry.parquet
+and delete the tmp file. This avoids running the slow build_global_manifest
+directory scan on the G: Drive.
+
 CORRECT WORKFLOW
 ----------------
   1. python -m src.common.build_global_manifest --only raw   (on LOCAL machine)
   2. python -m src.devtools.sync_local_to_gdrive --dry-run   (preview)
   3. python -m src.devtools.sync_local_to_gdrive             (apply)
-  4. python -m src.common.build_global_manifest --only raw   (on G: Drive)
+  4. python -m src.devtools.sync_local_to_gdrive --apply-dump
 
 SAFETY
 ------
   - Never deletes anything on the G: Drive.
   - Skips files that are already byte-for-byte identical (same size + mtime).
-  - Prints a detailed diff summary before any writes are performed.
-  - Pass --dry-run to preview all operations without copying a single byte.
+  - Registry dump is append-only; running twice does not create duplicates.
+  - Pass --dry-run to preview all operations without copying a single byte
+    (dump is also skipped in dry-run mode).
 """
 
 from __future__ import annotations
@@ -59,6 +76,12 @@ Example:  r"C:\\Dev\\PythonPipeline"
 # Hardcoded intentionally — this script is devtools-only, for code-literate users.
 _EXCLUDED_SUFFIXES: tuple[str, ...] = ("_all_raw.parquet", "_all_clean.parquet")
 
+# Raw trajectory suffix used to identify parquets that map to a flight_id.
+_RAW_SUFFIX = "_raw.parquet"
+
+# Name of the WAL file written to G: Drive data/registries/ during sync.
+_DUMP_FILENAME = "registry_dump.tmp.parquet"
+
 import argparse
 import shutil
 import sys
@@ -67,7 +90,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Low-level file helpers
 # ---------------------------------------------------------------------------
 
 def _fmt_bytes(n: int) -> str:
@@ -82,7 +105,6 @@ def _needs_copy(src: Path, dst: Path) -> bool:
     """Return True if src should overwrite dst (newer, larger, or missing)."""
     if not dst.exists():
         return True
-    # Same size AND mtime within 2 seconds → already in sync
     src_stat = src.stat()
     dst_stat = dst.stat()
     if src_stat.st_size != dst_stat.st_size:
@@ -105,10 +127,26 @@ def _copy_file(src: Path, dst: Path, dry_run: bool, verbose: bool) -> int:
     return src.stat().st_size
 
 
-def _copy_dir(src: Path, dst: Path, dry_run: bool, verbose: bool) -> tuple[int, int]:
+def _copy_dir(
+    src: Path,
+    dst: Path,
+    gdrive_root: Path,
+    dry_run: bool,
+    verbose: bool,
+) -> tuple[int, int, list[dict]]:
     """Recursively copy every file in src that needs updating in dst.
-    Returns (files_copied, bytes_copied)."""
+
+    Returns
+    -------
+    files_copied  : int
+    bytes_copied  : int
+    reg_entries   : list of {flight_id, file_path} dicts for every
+                    *_raw.parquet that was successfully written — used to
+                    build the registry dump WAL.
+    """
     files, total_bytes = 0, 0
+    reg_entries: list[dict] = []
+
     for src_file in src.rglob("*"):
         if src_file.is_dir():
             continue
@@ -119,7 +157,13 @@ def _copy_dir(src: Path, dst: Path, dry_run: bool, verbose: bool) -> tuple[int, 
         if _needs_copy(src_file, dst_file):
             total_bytes += _copy_file(src_file, dst_file, dry_run, verbose)
             files += 1
-    return files, total_bytes
+            # Record a registry entry for every raw trajectory parquet written.
+            if src_file.name.endswith(_RAW_SUFFIX) and not dry_run:
+                flight_id = src_file.stem.removesuffix("_raw")
+                rel_path = str(dst_file.relative_to(gdrive_root)).replace("\\", "/")
+                reg_entries.append({"flight_id": flight_id, "file_path": rel_path})
+
+    return files, total_bytes, reg_entries
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +196,7 @@ def _compare_trajectory_registries(
     """
     import pandas as pd
 
-    local_df = _load_registry(local_reg_path)
+    local_df  = _load_registry(local_reg_path)
     gdrive_df = _load_registry(gdrive_reg_path)
 
     def _ids(df: "pd.DataFrame | None") -> set[str]:
@@ -160,42 +204,79 @@ def _compare_trajectory_registries(
             return set()
         return set(df["flight_id"].dropna().astype(str))
 
-    local_ids = _ids(local_df)
+    local_ids  = _ids(local_df)
     gdrive_ids = _ids(gdrive_df)
 
     return local_ids - gdrive_ids, gdrive_ids - local_ids, local_ids & gdrive_ids
 
 
 # ---------------------------------------------------------------------------
-# Route-folder discovery
+# Registry dump (WAL) helpers
 # ---------------------------------------------------------------------------
 
-def _route_folders_for_flight_ids(
-    trajectories_dir: Path, flight_ids: set[str]
-) -> set[Path]:
+def _append_registry_dump(dump_path: Path, new_entries: list[dict]) -> None:
+    """Append new_entries to the registry dump parquet, deduplicating on flight_id.
+
+    Called after each route folder completes so partial syncs produce a usable dump.
     """
-    Walk trajectories_dir to find route folders that contain at least one
-    parquet file whose stem starts with a flight_id in *flight_ids*.
+    if not new_entries:
+        return
+    import pandas as pd
+    df_new = pd.DataFrame(new_entries, columns=["flight_id", "file_path"])
+    if dump_path.exists():
+        try:
+            df_old = pd.read_parquet(dump_path)
+            df_new = pd.concat([df_old, df_new], ignore_index=True)
+        except Exception as exc:
+            print(f"  [WARN] Could not read existing dump, starting fresh: {exc}")
+    df_new = df_new.drop_duplicates(subset=["flight_id"], keep="last")
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    df_new.to_parquet(dump_path, index=False)
 
-    Fast path: if a route folder is entirely missing on the destination,
-    we flag the whole folder regardless of flight_id matching.
+
+def apply_registry_dump(gdrive_root: Path) -> None:
+    """Merge registry_dump.tmp.parquet into global_trajectory_registry.parquet
+    on the G: Drive, then delete the dump file.
+
+    Safe to run multiple times — idempotent due to flight_id deduplication.
     """
-    matched: set[Path] = set()
-    if not trajectories_dir.exists():
-        return matched
+    import pandas as pd
 
-    for route_dir in trajectories_dir.iterdir():
-        if not route_dir.is_dir() or route_dir.name == "runs":
-            continue
-        # Check any parquet inside raw/ or clean/ or at root level
-        for pq in route_dir.rglob("*.parquet"):
-            stem = pq.stem
-            # flight_id typically appears in the filename as a substring
-            if any(fid in stem for fid in flight_ids):
-                matched.add(route_dir)
-                break
-    return matched
+    dump_path     = gdrive_root / "data" / "registries" / _DUMP_FILENAME
+    registry_path = gdrive_root / "data" / "registries" / "global_trajectory_registry.parquet"
 
+    print("\n" + "=" * 70)
+    print("  Apply Registry Dump")
+    print("=" * 70)
+
+    if not dump_path.exists():
+        print(f"  [INFO] No {_DUMP_FILENAME} found — nothing to apply.")
+        print("=" * 70 + "\n")
+        return
+
+    df_dump = pd.read_parquet(dump_path)
+    print(f"  Dump entries      : {len(df_dump):>6}")
+
+    if registry_path.exists():
+        df_reg = pd.read_parquet(registry_path)
+        print(f"  Registry (before) : {len(df_reg):>6} flight_ids")
+        df_merged = pd.concat([df_reg, df_dump], ignore_index=True)
+    else:
+        print("  Registry (before) : not found — will be created from dump")
+        df_merged = df_dump
+
+    df_merged = df_merged.drop_duplicates(subset=["flight_id"], keep="last")
+    df_merged.to_parquet(registry_path, index=False)
+    print(f"  Registry (after)  : {len(df_merged):>6} flight_ids")
+
+    dump_path.unlink()
+    print(f"  Dump deleted      : {dump_path.name}")
+    print("=" * 70 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Route-folder discovery
+# ---------------------------------------------------------------------------
 
 def _all_route_folders(trajectories_dir: Path) -> list[Path]:
     if not trajectories_dir.exists():
@@ -233,9 +314,11 @@ def run_sync(
 
     total_files = 0
     total_bytes = 0
+    total_dump_entries = 0
 
     local_reg_dir  = local_root  / "data" / "registries"
     gdrive_reg_dir = gdrive_root / "data" / "registries"
+    dump_path      = gdrive_reg_dir / _DUMP_FILENAME
 
     # ------------------------------------------------------------------
     # Step 1: Compare trajectory registries (READ-ONLY — never written)
@@ -269,39 +352,33 @@ def run_sync(
     print("STEP 2 — Trajectory route folders  (data/trajectories/)")
     print("─" * 70)
 
-    local_traj_dir = local_root / "data" / "trajectories"
+    local_traj_dir  = local_root  / "data" / "trajectories"
     gdrive_traj_dir = gdrive_root / "data" / "trajectories"
 
-    local_all_routes = _all_route_folders(local_traj_dir)
+    local_all_routes   = _all_route_folders(local_traj_dir)
     gdrive_route_names = {d.name for d in _all_route_folders(gdrive_traj_dir)}
 
     route_files_copied = 0
-    routes_processed = 0
+    routes_processed   = 0
 
     for route_dir in sorted(local_all_routes):
-        dst_route_dir = gdrive_traj_dir / route_dir.name
+        dst_route_dir    = gdrive_traj_dir / route_dir.name
         is_entirely_missing = route_dir.name not in gdrive_route_names
 
-        # Determine whether this folder is relevant:
-        #   a) Entirely absent on G: Drive  → always copy
-        #   b) Has flight_ids that are LOCAL-only  → copy updated files
-        #   c) Otherwise check file-level mtimes for any file that changed
         should_sync = is_entirely_missing
 
         if not should_sync and local_only_ids:
-            # Quick check: does any parquet in this folder relate to a local-only id?
             for pq in route_dir.rglob("*.parquet"):
                 if any(fid in pq.stem for fid in local_only_ids):
                     should_sync = True
                     break
 
         if not should_sync:
-            # Still check mtime on every file for updates (concat files excluded)
+            # Mtime scan — concat files excluded
             for src_file in route_dir.rglob("*.parquet"):
                 if src_file.name.endswith(_EXCLUDED_SUFFIXES):
                     continue
-                rel = src_file.relative_to(route_dir)
-                dst_file = dst_route_dir / rel
+                dst_file = dst_route_dir / src_file.relative_to(route_dir)
                 if _needs_copy(src_file, dst_file):
                     should_sync = True
                     break
@@ -311,10 +388,18 @@ def run_sync(
 
         status = "NEW" if is_entirely_missing else "UPDATE"
         print(f"\n  [{status}] {route_dir.name}")
-        f, b = _copy_dir(route_dir, dst_route_dir, dry_run, verbose)
+
+        f, b, reg_entries = _copy_dir(route_dir, dst_route_dir, gdrive_root, dry_run, verbose)
         route_files_copied += f
-        total_files += f
-        total_bytes += b
+        total_files        += f
+        total_bytes        += b
+
+        # Append registry entries to the dump WAL after each folder
+        if reg_entries:
+            _append_registry_dump(dump_path, reg_entries)
+            total_dump_entries += len(reg_entries)
+            print(f"    → {len(reg_entries)} raw flight(s) logged to registry dump")
+
         routes_processed += 1
 
     if routes_processed == 0:
@@ -322,7 +407,7 @@ def run_sync(
     else:
         print(
             f"\n  → {routes_processed} route folder(s) processed, "
-            f"{route_files_copied} file(s) queued."
+            f"{route_files_copied} file(s) copied."
         )
 
     # ------------------------------------------------------------------
@@ -341,6 +426,12 @@ def run_sync(
             f"  SYNC COMPLETE — {total_files} file(s) copied"
             f"  ({_fmt_bytes(total_bytes)})"
         )
+        if total_dump_entries:
+            print(
+                f"  Registry dump    — {total_dump_entries} entry/entries written to "
+                f"{_DUMP_FILENAME}"
+            )
+            print("  Run --apply-dump to merge the dump into global_trajectory_registry.parquet.")
     print("=" * 70 + "\n")
 
 
@@ -350,7 +441,7 @@ def run_sync(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Sync local pipeline → G: Drive (trajectory registries + files).",
+        description="Sync local pipeline → G: Drive (trajectory files + registry dump).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -372,18 +463,27 @@ def _parse_args() -> argparse.Namespace:
             "Example: --local-dir C:\\Dev\\PythonPipeline"
         ),
     )
+    parser.add_argument(
+        "--apply-dump",
+        action="store_true",
+        help=(
+            f"Merge {_DUMP_FILENAME} into global_trajectory_registry.parquet "
+            "on G: Drive and delete the dump. Run this after sync completes."
+        ),
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
 
-    # Resolve local dir (CLI flag overrides the top-level constant)
     local_dir_str = args.local_dir if args.local_dir else LOCAL_PIPELINE_DIR
-    local_root = Path(local_dir_str).resolve()
+    local_root    = Path(local_dir_str).resolve()
+    gdrive_root   = Path(r"G:\Meine Ablage\UNI\SS26\PythonPipeline - Kopie")
 
-    # G: Drive root is always the canonical project location
-    gdrive_root = Path(r"G:\Meine Ablage\UNI\SS26\PythonPipeline - Kopie")
+    if args.apply_dump:
+        apply_registry_dump(gdrive_root)
+        sys.exit(0)
 
     t0 = time.perf_counter()
     run_sync(
