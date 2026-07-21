@@ -12,15 +12,24 @@ USAGE
 
 WHAT GETS SYNCED
 ----------------
-The script performs THREE sync operations in order:
+The script performs TWO operations in order:
 
-  1. Registry files  — all *.parquet in data/registries/
+  1. Registry diff  — reads both global_trajectory_registry.parquet files
+                      into memory to find LOCAL-only flight_ids. Registries
+                      are NEVER written or copied — they must be rebuilt by
+                      build_global_manifest after the sync.
   2. Trajectory dirs — every route folder under data/trajectories/ whose
                        flight_ids appear in the LOCAL registry but are missing
-                       from the G: Drive registry (or where the parquet
-                       modification-time is newer locally).
-  3. Full-trajectory copy — if a route folder exists locally but is entirely
-                            absent on the G: Drive, the whole folder is copied.
+                       from the G: Drive registry, OR where any individual
+                       parquet file is newer locally, OR the folder is entirely
+                       absent on the G: Drive.
+
+CORRECT WORKFLOW
+----------------
+  1. python -m src.common.build_global_manifest --only raw   (on LOCAL machine)
+  2. python -m src.devtools.sync_local_to_gdrive --dry-run   (preview)
+  3. python -m src.devtools.sync_local_to_gdrive             (apply)
+  4. python -m src.common.build_global_manifest --only raw   (on G: Drive)
 
 SAFETY
 ------
@@ -225,40 +234,18 @@ def run_sync(
     total_files = 0
     total_bytes = 0
 
-    # ------------------------------------------------------------------
-    # Step 1: Sync ALL registry files
-    # ------------------------------------------------------------------
-    print("─" * 70)
-    print("STEP 1 — Registry files  (data/registries/)")
-    print("─" * 70)
-
-    local_reg_dir = local_root / "data" / "registries"
+    local_reg_dir  = local_root  / "data" / "registries"
     gdrive_reg_dir = gdrive_root / "data" / "registries"
 
-    reg_copied = 0
-    if local_reg_dir.exists():
-        for src_file in local_reg_dir.glob("*.parquet"):
-            dst_file = gdrive_reg_dir / src_file.name
-            if _needs_copy(src_file, dst_file):
-                action = "copy" if not dst_file.exists() else "update"
-                print(f"  [{action.upper()}] {src_file.name}  ({_fmt_bytes(src_file.stat().st_size)})")
-                total_bytes += _copy_file(src_file, dst_file, dry_run, verbose)
-                reg_copied += 1
-                total_files += 1
-    if reg_copied == 0:
-        print("  ✓ All registry files are already up-to-date.")
-    else:
-        print(f"  → {reg_copied} registry file(s) queued.")
-
     # ------------------------------------------------------------------
-    # Step 2: Compare trajectory registries
+    # Step 1: Compare trajectory registries (READ-ONLY — never written)
     # ------------------------------------------------------------------
-    print()
     print("─" * 70)
-    print("STEP 2 — Trajectory registry diff  (global_trajectory_registry.parquet)")
+    print("STEP 1 — Trajectory registry diff  (global_trajectory_registry.parquet)")
     print("─" * 70)
+    print("  [registries are read into memory only — never copied to G: Drive]")
 
-    local_traj_reg = local_reg_dir / "global_trajectory_registry.parquet"
+    local_traj_reg  = local_reg_dir  / "global_trajectory_registry.parquet"
     gdrive_traj_reg = gdrive_reg_dir / "global_trajectory_registry.parquet"
 
     local_only_ids, gdrive_only_ids, common_ids = _compare_trajectory_registries(
@@ -275,11 +262,11 @@ def run_sync(
         print(f"\n  Sample LOCAL-only IDs: {', '.join(preview)}{suffix}")
 
     # ------------------------------------------------------------------
-    # Step 3: Copy missing/outdated trajectory route folders
+    # Step 2: Copy missing/outdated trajectory route folders
     # ------------------------------------------------------------------
     print()
     print("─" * 70)
-    print("STEP 3 — Trajectory route folders  (data/trajectories/)")
+    print("STEP 2 — Trajectory route folders  (data/trajectories/)")
     print("─" * 70)
 
     local_traj_dir = local_root / "data" / "trajectories"
