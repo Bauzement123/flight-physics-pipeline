@@ -11,14 +11,19 @@ from src.common.config import (
     BASE_DIR,
     POSTFILTER_BATCH_SIZE_DEFAULT,
     PROCESSING_DEFAULT_MAX_WORKERS,
-    POSTFILTER_COL_VELOCITY_PASS,
-    POSTFILTER_COL_VELOCITY_REASON,
-    POSTFILTER_COL_COORD_VEL_PASS,
-    POSTFILTER_COL_COORD_VEL_REASON,
+    POSTFILTER_COL_HORIZ_VEL_PASS,
+    POSTFILTER_COL_HORIZ_VEL_REASON,
+    POSTFILTER_COL_VERT_VEL_PASS,
+    POSTFILTER_COL_VERT_VEL_REASON,
+    POSTFILTER_COL_COORD_HORIZ_VEL_PASS,
+    POSTFILTER_COL_COORD_HORIZ_VEL_REASON,
+    POSTFILTER_COL_COORD_VERT_VEL_PASS,
+    POSTFILTER_COL_COORD_VERT_VEL_REASON,
     POSTFILTER_COL_ACCEL_PASS,
     POSTFILTER_COL_ACCEL_REASON,
     POSTFILTER_COL_DISTANCE_PASS,
     POSTFILTER_COL_DISTANCE_REASON,
+    _LEGACY_VELOCITY_COLS,
 )
 from .filter_result import FilterResult
 from .postfilter_worker import _worker_init, process_batch
@@ -27,10 +32,12 @@ logger = logging.getLogger(__name__)
 
 # Maps filter name → (pass_column, reason_column) in the clean registry
 FILTER_COL_MAP: dict[str, tuple[str, str]] = {
-    "velocity":            (POSTFILTER_COL_VELOCITY_PASS,  POSTFILTER_COL_VELOCITY_REASON),
-    "coordinate_velocity": (POSTFILTER_COL_COORD_VEL_PASS, POSTFILTER_COL_COORD_VEL_REASON),
-    "acceleration":        (POSTFILTER_COL_ACCEL_PASS,     POSTFILTER_COL_ACCEL_REASON),
-    "distance":            (POSTFILTER_COL_DISTANCE_PASS,  POSTFILTER_COL_DISTANCE_REASON),
+    "horiz_velocity":       (POSTFILTER_COL_HORIZ_VEL_PASS,       POSTFILTER_COL_HORIZ_VEL_REASON),
+    "vert_velocity":        (POSTFILTER_COL_VERT_VEL_PASS,        POSTFILTER_COL_VERT_VEL_REASON),
+    "coord_horiz_velocity": (POSTFILTER_COL_COORD_HORIZ_VEL_PASS, POSTFILTER_COL_COORD_HORIZ_VEL_REASON),
+    "coord_vert_velocity":  (POSTFILTER_COL_COORD_VERT_VEL_PASS,  POSTFILTER_COL_COORD_VERT_VEL_REASON),
+    "acceleration":         (POSTFILTER_COL_ACCEL_PASS,           POSTFILTER_COL_ACCEL_REASON),
+    "distance":             (POSTFILTER_COL_DISTANCE_PASS,        POSTFILTER_COL_DISTANCE_REASON),
 }
 
 
@@ -45,11 +52,19 @@ def _chunks(lst: list, n: int) -> Generator[list, None, None]:
 
 
 def _load_registry(registry_path: Path, filters_to_run: list[str]) -> pd.DataFrame:
-    """Read the clean registry, set flight_id index, and add missing filter columns."""
+    """Read the clean registry, set flight_id index, add missing filter columns, and
+    drop any legacy 3-D combined velocity columns left over from the old filter logic."""
     if not registry_path.exists():
         raise FileNotFoundError(f"Registry file not found: {registry_path}")
     df = pd.read_parquet(registry_path)
     df.set_index("flight_id", drop=False, inplace=True)
+
+    # Drop legacy combined-velocity columns if present
+    legacy_present = [c for c in _LEGACY_VELOCITY_COLS if c in df.columns]
+    if legacy_present:
+        df.drop(columns=legacy_present, inplace=True)
+        logger.info(f"Dropped {len(legacy_present)} legacy velocity column(s): {legacy_present}")
+
     for f in filters_to_run:
         pass_col, reason_col = FILTER_COL_MAP[f]
         if pass_col not in df.columns:

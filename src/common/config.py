@@ -217,22 +217,37 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 
 # Default post-filter thresholds
 DEFAULT_POSTFILTER_THRESHOLDS = {
-    "max_velocity_kt": 650.0,        # max 3D velocity (knots)
-    "max_acceleration_mps2": 10,     # max 3D acceleration (m/s^2)
+    "max_horiz_velocity_kt":        650.0,   # max horizontal speed from gs          (kt)
+    "max_vert_velocity_fpm":       8000.0,   # max vertical speed from rocd          (ft/min)
+    "max_coord_horiz_velocity_kt": 650.0,   # max horizontal coord-derived speed    (kt)
+    "max_coord_vert_velocity_fpm": 8000.0,  # max vertical coord-derived speed      (ft/min)
+    "max_acceleration_mps2":         10,    # max 3D acceleration                   (m/s²)
 }
 
 # Post-filter stage defaults
 POSTFILTER_BATCH_SIZE_DEFAULT: int = 200
 
 # Clean-registry column names written by the post-filter stage
-POSTFILTER_COL_VELOCITY_PASS: str = "velocity_pass"
-POSTFILTER_COL_VELOCITY_REASON: str = "velocity_reject_reason"
-POSTFILTER_COL_COORD_VEL_PASS: str = "coordinate_velocity_pass"
-POSTFILTER_COL_COORD_VEL_REASON: str = "coordinate_velocity_reject_reason"
-POSTFILTER_COL_ACCEL_PASS: str = "acceleration_pass"
-POSTFILTER_COL_ACCEL_REASON: str = "acceleration_reject_reason"
-POSTFILTER_COL_DISTANCE_PASS: str = "distance_pass"
+# Split-axis velocity filters (gs / rocd)
+POSTFILTER_COL_HORIZ_VEL_PASS: str         = "horiz_velocity_pass"
+POSTFILTER_COL_HORIZ_VEL_REASON: str       = "horiz_velocity_reject_reason"
+POSTFILTER_COL_VERT_VEL_PASS: str          = "vert_velocity_pass"
+POSTFILTER_COL_VERT_VEL_REASON: str        = "vert_velocity_reject_reason"
+# Split-axis coordinate-derived velocity filters
+POSTFILTER_COL_COORD_HORIZ_VEL_PASS: str   = "coord_horiz_velocity_pass"
+POSTFILTER_COL_COORD_HORIZ_VEL_REASON: str = "coord_horiz_velocity_reject_reason"
+POSTFILTER_COL_COORD_VERT_VEL_PASS: str    = "coord_vert_velocity_pass"
+POSTFILTER_COL_COORD_VERT_VEL_REASON: str  = "coord_vert_velocity_reject_reason"
+# Acceleration and distance filters
+POSTFILTER_COL_ACCEL_PASS: str    = "acceleration_pass"
+POSTFILTER_COL_ACCEL_REASON: str  = "acceleration_reject_reason"
+POSTFILTER_COL_DISTANCE_PASS: str   = "distance_pass"
 POSTFILTER_COL_DISTANCE_REASON: str = "distance_reject_reason"
+# Legacy column names (written by the old 3-D combined velocity filters — now dropped from registry)
+_LEGACY_VELOCITY_COLS: list[str] = [
+    "velocity_pass", "velocity_reject_reason",
+    "coordinate_velocity_pass", "coordinate_velocity_reject_reason",
+]
 
 # Flag to force a re-computation of airport distance metrics before filtering
 RECOMPUTE_AIRPORT_DISTANCES = True

@@ -160,7 +160,8 @@ Module Objective
            └── Output : *_clean_si.parquet + GLOBAL_CLEAN_REGISTRY updated
 
  Objective 2 (Post-Filtering)
-  └── Annotate clean-registry flights with trajectory quality post-filter outcomes (velocity, coordinate velocity, acceleration, distance).
+  └── Annotate clean-registry flights with trajectory quality post-filter outcomes
+      (horiz velocity, vert velocity, coord horiz velocity, coord vert velocity, acceleration, distance).
        │
        ├── Sub-objective 1 — CLI & corridor resolution
        │    ├── Input : corridor ranks, routes, or custom source directory, and filters selection
@@ -249,13 +250,13 @@ flowchart TD
 
 ### 4.2 Workflow B — Trajectory Post-Filtering (`postfilter_cli.py`)
 
-This workflow applies physical threshold checks (velocity, coordinate velocity, acceleration, and distance) to already-smoothed trajectories (`_clean_si.parquet`), annotating the global registry with boolean outcome columns.
+This workflow applies physical threshold checks (horizontal velocity, vertical velocity, coordinate-derived horizontal velocity, coordinate-derived vertical velocity, acceleration, and distance) to already-smoothed trajectories (`_clean_si.parquet`), annotating the global registry with boolean outcome columns.
 
 ```mermaid
 flowchart TD
     A["CLI: python -m src.core.processing.postfilter_cli\n--routes / --ranks / --filters\n--batch-size N --max-workers W"] --> B["setup_file_logger('processing.log')\ninit_runtime()"]
     B --> C["Resolve target flights from GLOBAL_CLEAN_REGISTRY\nusing ranks, routes, or source_dir"]
-    C --> D["run_postfilters()\nLoad GLOBAL_CLEAN_REGISTRY into memory DataFrame"]
+    C --> D["run_postfilters()\nLoad GLOBAL_CLEAN_REGISTRY into memory DataFrame\nDrop legacy velocity_pass / coordinate_velocity_pass columns if present"]
     D --> E["Prepare missing columns (pass / reject_reason)\nBuild list of FilterResult stubs"]
     E --> F{"overwrite == False?"}
     F -->|Yes| G["Skip flights where all requested filters are already non-NA"]
@@ -263,7 +264,7 @@ flowchart TD
     G --> I["Partition remaining flights into batches of size N"]
     H --> I
     I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer loads airportsdata once per worker process"]
-    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\nRun check_velocity, check_coordinate_velocity,\ncheck_acceleration, check_distance\nReturn list of updated FilterResult stubs"]
+    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\ncheck_horiz_velocity (gs kt limit)\ncheck_vert_velocity (rocd fpm limit)\ncheck_coord_horiz_velocity (Haversine kt limit)\ncheck_coord_vert_velocity (coord alt-diff fpm limit)\ncheck_acceleration (3D m/s² limit)\ncheck_distance (airport proximity)\nReturn list of updated FilterResult stubs"]
     K --> L["Main process: future as_completed\nMerge outcomes back to index of in-memory DataFrame\nFlush full DataFrame to global_clean_registry.tmp.parquet"]
     L --> M["Final step: overwrite original global_clean_registry.parquet\nDelete .tmp.parquet snapshot"]
 ```
@@ -271,16 +272,18 @@ flowchart TD
 **Step-by-step:**
 
 1. **CLI Ingestion**: `postfilter_cli.py` invokes `setup_file_logger("processing.log")` and parses parameters, including `--filters` list and corridor constraints.
-2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory and sets the index to `flight_id` for efficient in-place updates. It appends missing pass/reason columns as `pd.NA`.
+2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory and sets the index to `flight_id` for efficient in-place updates. **Legacy columns** (`velocity_pass`, `velocity_reject_reason`, `coordinate_velocity_pass`, `coordinate_velocity_reject_reason`) are automatically dropped if present, then the 8 new split-axis pass/reason columns are added as `pd.NA` where missing.
 3. **Target Scope & Overwrite Logic**: For each target flight:
    - If `--overwrite` is specified, it is processed unconditionally.
    - If `--overwrite` is not specified, it is skipped only if all requested filters have non-null outcomes. If even one requested filter is still `pd.NA`, the flight is added to the queue to re-run all requested checks.
 4. **Child Process Initializer**: The process pool launches under the `"spawn"` context. Its initializer `_worker_init` loads the `airportsdata` database once and caches it in a process-level global, avoiding redundant I/O during distance checks.
-5. **Parallel Batch Filtering**: Workers load each `_clean_si.parquet` file via its absolute path. The worker evaluates the trajectory using pure mathematics:
-   - `check_velocity()`: Computes 3D ground/vertical speed in m/s, compares it against the converted SI threshold, and flags anomalies.
-   - `check_coordinate_velocity()`: Computes step-to-step 3D speed directly from latitude, longitude, and altitude (in m/s).
-   - `check_acceleration()`: Computes 3D step-to-step acceleration from ground speed and vertical rate.
-   - `check_distance()`: Wrapper that computes absolute horizontal and vertical deviations from origin/destination airport coordinates.
+5. **Parallel Batch Filtering**: Workers load each `_clean_si.parquet` file via its absolute path. The worker evaluates the trajectory using four independent single-axis velocity checks plus acceleration and distance:
+   - `check_horiz_velocity()`: Compares maximum `gs` (ground speed, m/s → kt) against `max_horiz_velocity_kt`.
+   - `check_vert_velocity()`: Compares maximum absolute `rocd` (m/s → fpm) against `max_vert_velocity_fpm`.
+   - `check_coord_horiz_velocity()`: Computes step-to-step Haversine horizontal speed from coordinates (m/s → kt), compares against `max_coord_horiz_velocity_kt`.
+   - `check_coord_vert_velocity()`: Computes step-to-step vertical speed from altitude differences (m/s → fpm), compares against `max_coord_vert_velocity_fpm`.
+   - `check_acceleration()`: Computes 3D step-to-step acceleration from ground speed and vertical rate (m/s²).
+   - `check_distance()`: Computes absolute horizontal and vertical deviations from origin/destination airport coordinates.
 6. **Double-Sanitization**: Dataclass attributes are sanitized during instantiation (`__post_init__`) and again upon export (`as_dict()`). Any non-boolean/non-NA value is replaced with `pd.NA` and logged as a warning.
 7. **Atomic Parquet Snapshot Flush**: As each batch future resolves, the orchestrator merges updated dataclass values into the master in-memory DataFrame, immediately saving a full registry copy to `global_clean_registry.tmp.parquet`.
 8. **Finalization**: On successful completion, the original registry is safely overwritten with the complete data, and the temporary snapshot is deleted. On crash, the `.tmp.parquet` remains for diagnostic recovery.
@@ -439,19 +442,19 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 
 #### Bash
 ```bash
-# Post-filter specific corridor volume ranks, running only velocity and distance checks
-python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters velocity distance --max-workers 8
+# Post-filter specific corridor volume ranks, running only horizontal velocity and distance checks
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity distance --max-workers 8
 
-# Force re-running and overwriting all four post-filters on all clean flights
+# Force re-running and overwriting all six post-filters on all clean flights
 python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 ```
 
 #### PowerShell
 ```powershell
-# Post-filter specific corridor volume ranks, running only velocity and distance checks
-python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters velocity distance --max-workers 8
+# Post-filter specific corridor volume ranks, running only horizontal velocity and distance checks
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity distance --max-workers 8
 
-# Force re-running and overwriting all four post-filters on all clean flights
+# Force re-running and overwriting all six post-filters on all clean flights
 python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 ```
 
@@ -466,7 +469,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `--overwrite` | flag | `False` | No | When set, ignores cached columns and re-evaluates all target rows. |
 | `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` (currently `4`). |
 | `--batch-size` | `int` | `200` | No | Number of rows processed per worker batch. |
-| `--filters` | `str` (list) | all four | No | List of sub-filters to run. Choices: `velocity`, `coordinate_velocity`, `acceleration`, `distance`. |
+| `--filters` | `str` (list) | all six | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `distance`. |
 
 ---
 
@@ -495,20 +498,25 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 | `POSTFILTER_BATCH_SIZE_DEFAULT` | `200` (int) | Default batch size of stubs evaluated per worker process during post-filtering |
-| `POSTFILTER_COL_VELOCITY_PASS` | `"velocity_pass"` (str) | Clean-registry column indicating if flight passed the raw gs/rocd physical limit check |
-| `POSTFILTER_COL_VELOCITY_REASON` | `"velocity_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the velocity check |
-| `POSTFILTER_COL_COORD_VEL_PASS` | `"coordinate_velocity_pass"` (str) | Clean-registry column indicating if flight passed the coordinates-derived speed check |
-| `POSTFILTER_COL_COORD_VEL_REASON` | `"coordinate_velocity_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the coordinate velocity check |
+| `POSTFILTER_COL_HORIZ_VEL_PASS` | `"horiz_velocity_pass"` (str) | Clean-registry column: flight passed horizontal gs speed check (`gs` ≤ `max_horiz_velocity_kt`) |
+| `POSTFILTER_COL_HORIZ_VEL_REASON` | `"horiz_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for horizontal velocity check |
+| `POSTFILTER_COL_VERT_VEL_PASS` | `"vert_velocity_pass"` (str) | Clean-registry column: flight passed vertical rocd speed check (`|rocd|` ≤ `max_vert_velocity_fpm`) |
+| `POSTFILTER_COL_VERT_VEL_REASON` | `"vert_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for vertical velocity check |
+| `POSTFILTER_COL_COORD_HORIZ_VEL_PASS` | `"coord_horiz_velocity_pass"` (str) | Clean-registry column: flight passed coordinate-derived horizontal speed check (Haversine ≤ `max_coord_horiz_velocity_kt`) |
+| `POSTFILTER_COL_COORD_HORIZ_VEL_REASON` | `"coord_horiz_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for coordinate horizontal velocity check |
+| `POSTFILTER_COL_COORD_VERT_VEL_PASS` | `"coord_vert_velocity_pass"` (str) | Clean-registry column: flight passed coordinate-derived vertical speed check (alt-diff ≤ `max_coord_vert_velocity_fpm`) |
+| `POSTFILTER_COL_COORD_VERT_VEL_REASON` | `"coord_vert_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for coordinate vertical velocity check |
 | `POSTFILTER_COL_ACCEL_PASS` | `"acceleration_pass"` (str) | Clean-registry column indicating if flight passed the step-to-step 3D acceleration check |
-| `POSTFILTER_COL_ACCEL_REASON` | `"acceleration_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the acceleration check |
+| `POSTFILTER_COL_ACCEL_REASON` | `"acceleration_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the acceleration check |
 | `POSTFILTER_COL_DISTANCE_PASS` | `"distance_pass"` (str) | Clean-registry column indicating if flight passed origin/destination horizontal and vertical bounds |
-| `POSTFILTER_COL_DISTANCE_REASON` | `"distance_reject_reason"` (str) | Clean-registry column containing fail reason or "PASSED" for the distance check |
+| `POSTFILTER_COL_DISTANCE_REASON` | `"distance_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the distance check |
+| `_LEGACY_VELOCITY_COLS` | `list[str]` | The 4 old 3-D combined velocity column names; automatically dropped from registry on first `_load_registry()` call |
 
 ### Registry Files
 
 | File | Access | Description |
 | :--- | :--- | :--- |
-| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight mapping: contains `flight_id`, `file_path`, and the 8 boolean/reason post-filter columns. |
+| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight mapping: contains `flight_id`, `file_path`, and the 12 boolean/reason post-filter columns (4 velocity axes + acceleration + distance). Legacy 3-D combined velocity columns are automatically dropped on first post-filter run. |
 | `data/registries/global_ekf_diag_registry.parquet` (`GLOBAL_EKF_DIAG_REGISTRY`) | **Written** | EKF diagnostics index: maps `flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, and `ekf_max_trace_p`. |
 | `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
 | `data/logs/processing.log` | **Written** | All `logging` output from EKF smoothing (`kalman_filter.py`) and post-filtering (`postfilter_cli.py`) runs. |

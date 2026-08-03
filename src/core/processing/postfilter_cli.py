@@ -35,9 +35,17 @@ def main() -> None:
         "--filters",
         type=str,
         nargs="+",
-        choices=["velocity", "coordinate_velocity", "acceleration", "distance"],
-        default=["velocity", "coordinate_velocity", "acceleration", "distance"],
-        help="Sub-filters to run (default: all four)."
+        choices=[
+            "horiz_velocity", "vert_velocity",
+            "coord_horiz_velocity", "coord_vert_velocity",
+            "acceleration", "distance",
+        ],
+        default=[
+            "horiz_velocity", "vert_velocity",
+            "coord_horiz_velocity", "coord_vert_velocity",
+            "acceleration", "distance",
+        ],
+        help="Sub-filters to run (default: all six).",
     )
     args = parser.parse_args()
     

@@ -8,8 +8,10 @@ import airportsdata
 from src.common.utils import setup_file_logger
 from .filter_result import FilterResult
 from .trajectory_filters import (
-    check_velocity,
-    check_coordinate_velocity,
+    check_horiz_velocity,
+    check_vert_velocity,
+    check_coord_horiz_velocity,
+    check_coord_vert_velocity,
     check_acceleration,
     check_distance,
 )
@@ -51,15 +53,21 @@ def process_batch(
                 raise ValueError("Trajectory dataframe is empty")
                 
             # 2. Run selected filters
-            if "velocity" in filters_to_run:
-                fr.velocity_pass, fr.velocity_reject_reason = check_velocity(df, _thresholds)
-                
-            if "coordinate_velocity" in filters_to_run:
-                fr.coordinate_velocity_pass, fr.coordinate_velocity_reject_reason = check_coordinate_velocity(df, _thresholds)
-                
+            if "horiz_velocity" in filters_to_run:
+                fr.horiz_velocity_pass, fr.horiz_velocity_reject_reason = check_horiz_velocity(df, _thresholds)
+
+            if "vert_velocity" in filters_to_run:
+                fr.vert_velocity_pass, fr.vert_velocity_reject_reason = check_vert_velocity(df, _thresholds)
+
+            if "coord_horiz_velocity" in filters_to_run:
+                fr.coord_horiz_velocity_pass, fr.coord_horiz_velocity_reject_reason = check_coord_horiz_velocity(df, _thresholds)
+
+            if "coord_vert_velocity" in filters_to_run:
+                fr.coord_vert_velocity_pass, fr.coord_vert_velocity_reject_reason = check_coord_vert_velocity(df, _thresholds)
+
             if "acceleration" in filters_to_run:
                 fr.acceleration_pass, fr.acceleration_reject_reason = check_acceleration(df, _thresholds)
-                
+
             if "distance" in filters_to_run:
                 fr.distance_pass, fr.distance_reject_reason = check_distance(df, _airports, _thresholds)
                 
@@ -68,12 +76,18 @@ def process_batch(
             logger.error(f"Error processing flight {fr.flight_id} from {fr.file_path}: {exc}")
             
             # Fail all requested filters with the load error reason
-            if "velocity" in filters_to_run:
-                fr.velocity_pass = False
-                fr.velocity_reject_reason = err_msg
-            if "coordinate_velocity" in filters_to_run:
-                fr.coordinate_velocity_pass = False
-                fr.coordinate_velocity_reject_reason = err_msg
+            if "horiz_velocity" in filters_to_run:
+                fr.horiz_velocity_pass = False
+                fr.horiz_velocity_reject_reason = err_msg
+            if "vert_velocity" in filters_to_run:
+                fr.vert_velocity_pass = False
+                fr.vert_velocity_reject_reason = err_msg
+            if "coord_horiz_velocity" in filters_to_run:
+                fr.coord_horiz_velocity_pass = False
+                fr.coord_horiz_velocity_reject_reason = err_msg
+            if "coord_vert_velocity" in filters_to_run:
+                fr.coord_vert_velocity_pass = False
+                fr.coord_vert_velocity_reject_reason = err_msg
             if "acceleration" in filters_to_run:
                 fr.acceleration_pass = False
                 fr.acceleration_reject_reason = err_msg

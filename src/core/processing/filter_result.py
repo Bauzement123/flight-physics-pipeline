@@ -8,8 +8,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _PASS_FIELDS = [
-    "velocity_pass",
-    "coordinate_velocity_pass",
+    "horiz_velocity_pass",
+    "vert_velocity_pass",
+    "coord_horiz_velocity_pass",
+    "coord_vert_velocity_pass",
     "acceleration_pass",
     "distance_pass",
 ]
@@ -19,13 +21,21 @@ class FilterResult:
     flight_id: str
     file_path: str  # absolute path to _clean_si.parquet
 
-    # velocity check
-    velocity_pass: Optional[bool] = None
-    velocity_reject_reason: Optional[str] = None
+    # horizontal velocity check (gs)
+    horiz_velocity_pass: Optional[bool] = None
+    horiz_velocity_reject_reason: Optional[str] = None
 
-    # coordinate velocity check
-    coordinate_velocity_pass: Optional[bool] = None
-    coordinate_velocity_reject_reason: Optional[str] = None
+    # vertical velocity check (rocd)
+    vert_velocity_pass: Optional[bool] = None
+    vert_velocity_reject_reason: Optional[str] = None
+
+    # coordinate-derived horizontal velocity check
+    coord_horiz_velocity_pass: Optional[bool] = None
+    coord_horiz_velocity_reject_reason: Optional[str] = None
+
+    # coordinate-derived vertical velocity check
+    coord_vert_velocity_pass: Optional[bool] = None
+    coord_vert_velocity_reject_reason: Optional[str] = None
 
     # acceleration check
     acceleration_pass: Optional[bool] = None
