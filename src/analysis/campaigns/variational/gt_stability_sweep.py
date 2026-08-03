@@ -32,7 +32,7 @@ from src.common.config import (
     CHAOS_VARIANCE_THRESHOLD,
 )
 from src.common.registry_utils import load_trajectory_registry
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, to_registry_path
 from src.core.corridor.pca_compressor import (
     normalize_vectors,
     vectorize_cohort,
@@ -366,10 +366,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         
         out_path = _save_oracle_corridor(medoid_flight, dep, arr, c_id, r_class, k_oracle)
         
-        try:
-            rel_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
-        except ValueError:
-            rel_path = out_path.resolve().as_posix()
+        rel_path = to_registry_path(out_path)
             
         corridor_records.append({
             "cluster_id": c_id,

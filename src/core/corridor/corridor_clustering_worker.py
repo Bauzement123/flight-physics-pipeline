@@ -19,7 +19,7 @@ from src.common.adapters import (
     dataframe_to_pycontrails,
     pycontrails_to_parquet,
 )
-from src.common.utils import log_skipped_aircraft
+from src.common.utils import log_skipped_aircraft, to_registry_path
 from src.core.corridor.corridor_clustering_engine import run_clustering
 
 logger = logging.getLogger(__name__)
@@ -226,10 +226,7 @@ def cluster_route(
             final_flight = Flight(data=df_final, crs="EPSG:4326", **attrs)
             pycontrails_to_parquet(final_flight, out_path)
 
-            try:
-                rel_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
-            except ValueError:
-                rel_path = out_path.resolve().as_posix()
+            rel_path = to_registry_path(out_path)
 
             corridors.append({
                 "cluster_id": cluster_id,

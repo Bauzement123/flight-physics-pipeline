@@ -63,6 +63,7 @@ from src.common.utils import (
     extract_target_routes,
     log_skipped_aircraft,
     setup_file_logger,
+    to_registry_path,
     update_global_registry,
 )
 from src.common.concurrency import set_numeric_thread_env, limit_numeric_threads
@@ -495,7 +496,7 @@ def _save_diagnostics(
         e_k=e_hist, S_k=S_hist, P_k=P_hist,
         metrics=np.array(metrics, dtype=np.float64),
     )
-    return diag_out_path.resolve().relative_to(BASE_DIR).as_posix()
+    return to_registry_path(diag_out_path)
 
 
 def _finalize_resampled_flight(
@@ -691,7 +692,7 @@ def _process_single_raw_file(
         pc_flights.append(pc_out)
         registry_entries.append({
             "flight_id":       fid,
-            "file_path":       out_path.resolve().relative_to(BASE_DIR).as_posix(),
+            "file_path":       to_registry_path(out_path),
             "ekf_quality_score": q,
             "ekf_mean_nis":    nis,
             "ekf_max_trace_p": tr,

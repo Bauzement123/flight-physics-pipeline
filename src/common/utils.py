@@ -20,6 +20,27 @@ from src.common.exceptions import RetryError
 logger = logging.getLogger(__name__)
 
 
+def to_registry_path(path: "Path | str", base: "Path" = None) -> str:
+    """
+    Computes a portable POSIX relative path from base to path,
+    safe against symlinked directories (e.g., data/ symlinked to NFS mount).
+
+    Uses os.path.relpath() which performs pure string arithmetic without
+    following symlinks, unlike Path.resolve().relative_to() which breaks
+    when path and base reside on different physical filesystems.
+
+    Args:
+        path: Absolute or relative path to the target file.
+        base: Base directory. Defaults to BASE_DIR from config.
+    Returns:
+        POSIX-style relative path string, e.g. 'data/results/file.parquet'
+    """
+    from src.common.config import BASE_DIR as _BASE_DIR
+    if base is None:
+        base = _BASE_DIR
+    return Path(os.path.relpath(path, base)).as_posix()
+
+
 def log_skipped_aircraft(
     flight_or_icao_id: str,
     typecode: Any,

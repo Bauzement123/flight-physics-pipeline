@@ -28,7 +28,7 @@ from src.common.config import (
     ERA5_GRID,
     WEATHER_BOUNDS_BBOX
 )
-from src.common.utils import setup_file_logger, log_skipped_aircraft
+from src.common.utils import setup_file_logger, log_skipped_aircraft, to_registry_path
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ def run_physics_pipeline(
         from src.common.utils import update_global_registry
         
         sim_registry_file = GLOBAL_SIMULATION_REGISTRY
-        rel_sim_path = out_path.resolve().relative_to(BASE_DIR).as_posix()
+        rel_sim_path = to_registry_path(out_path)
         new_entries = [
             {
                 "flight_id": f.attrs['flight_id'],

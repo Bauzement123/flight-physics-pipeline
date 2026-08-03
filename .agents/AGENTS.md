@@ -73,6 +73,11 @@ All pipeline-wide settings must live in `src/common/config.py`. No module may de
 * **No unused imports of config constants.** Before committing, verify every constant imported from `config.py` is actually referenced in the file. Remove unused imports.
 * **No local shadowing.** A module must never define a variable with the same name as a `config.py` constant (e.g., `FLIGHT_REGISTRY_DIR = ...` locally).
 * **Paths are always `pathlib.Path` objects**, never bare strings. Downstream code calls `.exists()`, `/` operator, etc. directly.
+* **Never use `path.resolve().relative_to(BASE_DIR)` for registry path computation.**
+  `Path.resolve()` follows OS-level symlinks, which breaks when the `data/` directory
+  is a symlink to a separate filesystem (e.g., NFS mount on the VM).
+  Use `to_registry_path(path)` from `src.common.utils` instead. It calls
+  `os.path.relpath()` which is pure string arithmetic and symlink-safe.
 
 ---
 

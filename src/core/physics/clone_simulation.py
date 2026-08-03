@@ -28,7 +28,7 @@ from src.common.config import (
     UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode,
     WEATHER_IO_WORKERS
 )
-from src.common.utils import load_route_summary, split_route_string, update_global_registry, setup_file_logger, log_skipped_aircraft
+from src.common.utils import load_route_summary, split_route_string, to_registry_path, update_global_registry, setup_file_logger, log_skipped_aircraft
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel, create_simulation_models
 
@@ -625,7 +625,7 @@ def run_batch_clone_simulation(
                     logger.info(f"Skipping {flight_id}: output file exists.")
                     daily_skipped += 1
                     daily_trajectories += 1
-                    rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
+                    rel_out_path = to_registry_path(out_file)
                     new_registry_entries.append({
                         "flight_id": flight_id,
                         "file_path": rel_out_path,
@@ -677,7 +677,7 @@ def run_batch_clone_simulation(
                 row, out_file, cluster_id, route_key = flight_to_meta_map[fid]
                 try:
                     write_flights_to_parquet([fl], out_file)
-                    rel_out_path = out_file.resolve().relative_to(BASE_DIR).as_posix()
+                    rel_out_path = to_registry_path(out_file)
                     total_contrail_ef = float(np.nansum(fl["ef"])) if "ef" in fl.data else 0.0
                     new_registry_entries.append({
                         "flight_id": fid, 
