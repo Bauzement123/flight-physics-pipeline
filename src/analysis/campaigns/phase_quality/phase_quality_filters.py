@@ -418,48 +418,73 @@ def passes_distance_prefilters(df_clean: pd.DataFrame, thresholds: dict) -> tupl
     return False, "PASSED", metrics
 
 
+from src.core.processing.trajectory_filters import (
+    check_horiz_velocity,
+    check_vert_velocity,
+    check_coord_horiz_velocity,
+    check_coord_vert_velocity,
+    check_acceleration,
+)
+
+
 def apply_trajectory_postfilters(
     df_clean: pd.DataFrame,
     df_raw: pd.DataFrame,
     thresholds: Dict[str, Any]
 ) -> Tuple[bool, str, dict]:
     """
-    Evaluates a loaded trajectory against max 3D speed, max 3D acceleration,
-    and recomputed distance pre-filters.
-    
+    Evaluates a loaded trajectory against canonical processing pipeline post-filters:
+    - check_horiz_velocity (max horizontal speed from gs <= max_horiz_velocity_kt)
+    - check_vert_velocity (max vertical rate from rocd <= max_vert_velocity_fpm)
+    - check_coord_horiz_velocity (max coord-derived horizontal speed <= max_coord_horiz_velocity_kt)
+    - check_coord_vert_velocity (max coord-derived vertical rate <= max_coord_vert_velocity_fpm)
+    - check_acceleration (max 3D acceleration <= max_acceleration_mps2)
+    - distance pre-filters (endpoint airport proximity checks)
+
     Returns (rejected: bool, reason: str, metrics: dict).
     """
-    if df_clean.empty:
+    if df_clean is None or df_clean.empty:
         return True, "EMPTY_CLEAN_TRAJECTORY", {}
-        
+
+    from src.common import config
+    merged_post_thresholds = config.DEFAULT_POSTFILTER_THRESHOLDS.copy()
+    merged_post_thresholds.update(thresholds)
+
     all_metrics = {}
-    
-    # 1. Max Velocity
-    rejected, reason, metrics = filter_max_velocity(df_clean, thresholds)
+
+    # 1. Horizontal Speed Filter (gs)
+    passed, reason = check_horiz_velocity(df_clean, merged_post_thresholds)
+    if not passed:
+        return True, reason, all_metrics
+
+    # 2. Vertical Speed Filter (rocd)
+    passed, reason = check_vert_velocity(df_clean, merged_post_thresholds)
+    if not passed:
+        return True, reason, all_metrics
+
+    # 3. Coordinate-Derived Horizontal Speed Filter
+    passed, reason = check_coord_horiz_velocity(df_clean, merged_post_thresholds)
+    if not passed:
+        return True, reason, all_metrics
+
+    # 4. Coordinate-Derived Vertical Speed Filter
+    passed, reason = check_coord_vert_velocity(df_clean, merged_post_thresholds)
+    if not passed:
+        return True, reason, all_metrics
+
+    # 5. 3D Acceleration Filter
+    passed, reason = check_acceleration(df_clean, merged_post_thresholds)
+    if not passed:
+        return True, reason, all_metrics
+
+    # 6. Distance Pre-filters / Proximity
+    merged_pre_thresholds = config.DEFAULT_PREFILTER_THRESHOLDS.copy()
+    merged_pre_thresholds.update(thresholds)
+
+    rejected, reason, metrics = passes_distance_prefilters(df_clean, merged_pre_thresholds)
     all_metrics.update(metrics)
     if rejected:
         return True, reason, all_metrics
 
-    # 1.5. Max 3D Velocity
-    rejected, reason, metrics = filter_max_coordinate_velocity(df_clean, thresholds)
-    all_metrics.update(metrics)
-    if rejected:
-        return True, reason, all_metrics
-    
-    # 2. Max Acceleration
-    rejected, reason, metrics = filter_max_acceleration(df_clean, thresholds)
-    all_metrics.update(metrics)
-    if rejected:
-        return True, reason, all_metrics
-        
-    # 3. Distance Pre-filters
-    from src.common import config
-    merged_thresholds = config.DEFAULT_PREFILTER_THRESHOLDS.copy()
-    merged_thresholds.update(thresholds)
-    
-    rejected, reason, metrics = passes_distance_prefilters(df_clean, merged_thresholds)
-    all_metrics.update(metrics)
-    if rejected:
-        return True, reason, all_metrics
-        
     return False, "PASSED", all_metrics
+

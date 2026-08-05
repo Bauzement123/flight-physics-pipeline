@@ -42,16 +42,13 @@ Phase Quality Campaign Objectives
       │         └── Outputs: Annotated DataFrame with status, fail_stage, and reject_reason
       │
       ├── Sub-objective 3: Evaluate Trajectory Post-Filters (Script 2 Part B)
-      │    └── Solution: apply_trajectory_postfilters() in phase_quality_filters.py
-      │         ├── Helper: calculate_coordinate_velocity_3d(df_clean) → pd.Series of 3D m/s step-to-step via Haversine + altitude diff
-      │         ├── Helper: calculate_acceleration(df_clean) → pd.Series of 3D m/s² step-to-step
-      │         ├── Helper: get_airport_coords(origin_icao, dest_icao) → dict via airportsdata
-      │         ├── Helper: recompute_airport_distances(df_clean, airport_coords) → df with dist_hor_nm, dist_vert_ft, dist_total_nm
-      │         ├── filter_max_coordinate_velocity(df_clean, thresholds): coordinate-derived 3D speed = √(v_horiz_kt² + v_vert_kt²) via Haversine; rejects if max_speed_3d_kt > max_velocity_kt (650 kt); metric: max_speed_3d_kt
-      │         ├── filter_max_velocity(df_clean, thresholds): kinematic-column 3D speed = √(gs_kt² + rocd_kt²); reject if > max_velocity_kt (650 kt)
-      │         ├── filter_max_acceleration(df_clean, thresholds): step-to-step 3D acceleration; reject if > max_acceleration_mps2 (340.29 m/s² ≈ Mach 1)
-      │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport; reject on configured horiz/vert limits
-      │         ├── Short-circuit: filter chain stops at first rejection (coord velocity → kinematic velocity → acceleration → distance)
+      │    └── Solution: apply_trajectory_postfilters() in phase_quality_filters.py (delegates to src.core.processing.trajectory_filters)
+      │         ├── check_horiz_velocity(df_clean, thresholds): ground speed gs vs max_horiz_velocity_kt (650 kt)
+      │         ├── check_vert_velocity(df_clean, thresholds): vertical rate rocd vs max_vert_velocity_fpm (8000 fpm)
+      │         ├── check_coord_horiz_velocity(df_clean, thresholds): Haversine coordinate speed vs max_coord_horiz_velocity_kt (650 kt)
+      │         ├── check_coord_vert_velocity(df_clean, thresholds): coordinate vertical rate vs max_coord_vert_velocity_fpm (8000 fpm)
+      │         ├── check_acceleration(df_clean, thresholds): step-to-step 3D acceleration vs max_acceleration_mps2 (10 m/s²)
+      │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport
       │         └── Outputs: (rejected: bool, reason: str, metrics: dict) per flight; aggregated POSTFILTER status written to filter_evaluation.csv
       │
       ├── Sub-objective 4: Orchestrate Multi-Route Campaign Runs (Script 2 Part C)
@@ -131,11 +128,13 @@ flowchart TD
 6. Dispatch multi-page PDF compilation tasks across parallel worker processes using `ProcessPoolExecutor`.
 7. Each worker loads raw parquet trajectory files for its assigned route. If `--use-clean` is active (default: `True`), it resolves clean EKF trajectory files using `GLOBAL_CLEAN_REGISTRY` keyed by `flight_id`.
 8. For each flight that passed pre-filtering and has a clean trajectory, the worker optionally calls `recompute_airport_distances()` (when `RECOMPUTE_AIRPORT_DISTANCES = True`) to augment the clean DataFrame with freshly computed `dist_hor_nm`, `dist_vert_ft`, and `dist_total_nm` columns using the `airportsdata` library.
-9. `apply_trajectory_postfilters()` is invoked per flight with short-circuit semantics:
-   - **Step 1.0 — Coordinate-derived 3-D velocity**: `filter_max_coordinate_velocity()` computes `max_speed_3d_kt` using `calculate_coordinate_velocity_3d()` — the Haversine horizontal distance between consecutive GPS waypoints plus altitude delta — converted to knots. Rejects if `max_speed_3d_kt` exceeds `DEFAULT_POSTFILTER_THRESHOLDS["max_velocity_kt"]` (650 kt).
-   - **Step 1.5 — Kinematic-column velocity**: `filter_max_velocity()` checks the same velocity limit using reported `gs` and `rocd` columns instead of GPS-derived values.
-   - **Step 2 — Acceleration**: `filter_max_acceleration()` rejects if max step-to-step 3D acceleration exceeds `max_acceleration_mps2` (≈ Mach 1).
-   - **Step 3 — Distance prefilters**: `passes_distance_prefilters()` checks re-computed waypoint-to-airport distances. The chain stops at the first rejection.
+9. `apply_trajectory_postfilters()` delegates directly to `src.core.processing.trajectory_filters` with short-circuit evaluation:
+   - **Step 1 — Horizontal Velocity**: `check_horiz_velocity()` verifies reported `gs` $\le$ `max_horiz_velocity_kt` (650.0 kt).
+   - **Step 2 — Vertical Velocity**: `check_vert_velocity()` verifies reported `rocd` $\le$ `max_vert_velocity_fpm` (8000.0 fpm).
+   - **Step 3 — Coordinate Horizontal Speed**: `check_coord_horiz_velocity()` computes Haversine step-to-step speed $\le$ `max_coord_horiz_velocity_kt` (650.0 kt).
+   - **Step 4 — Coordinate Vertical Speed**: `check_coord_vert_velocity()` computes coordinate vertical rate $\le$ `max_coord_vert_velocity_fpm` (8000.0 fpm).
+   - **Step 5 — 3D Acceleration**: `check_acceleration()` verifies step-to-step 3D acceleration $\le$ `max_acceleration_mps2` (10.0 m/s²).
+   - **Step 6 — Distance Prefilters**: `passes_distance_prefilters()` verifies waypoint-to-airport distance cutoffs.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
 11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**:
     - **Row 1 (Raw + Prefilter)** and **Row 2 (Those But Clean)** show only pre-filter rejections (rendered as light-red/pink dashed lines via `REJECTED_PREFILTER_COLOR = "#ff7f7f"`).
