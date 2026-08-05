@@ -84,7 +84,7 @@ graph TD
     D[data/registries/global_clean_registry.parquet] -->|3. Load clean trajectory registry| B
     
     B -->|4. Filter cohort rows by require_pass| E[Cohort Pre-filtering]
-    E -->|5. Check min flight threshold MIN_FLIGHTS_FOR_CLUSTERING >= 50| F[Eligible Route Cohorts]
+    E -->|5. Check min flight threshold MIN_FLIGHTS_FOR_CLUSTERING| F[Eligible Route Cohorts]
     
     F -->|6. Dispatch tasks to process pool| G[corridor_clustering_worker.py: cluster_route]
     G -->|7. Group & load clean flight files| H[Trajectory Parquet Files]
@@ -110,7 +110,7 @@ graph TD
 2. **Model Registry Check**: If `--overwrite` is `False`, the orchestrator loads `global_model_registry.parquet` and excludes any routes that have already been processed.
 3. **Clean Registry Load**: The orchestrator loads the central trajectory tracking file `global_clean_registry.parquet` once into memory.
 4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`velocity_pass`, `coordinate_velocity_pass`, `acceleration_pass`, `distance_pass`).
-5. **Minimum Cohort Threshold Verification**: The orchestrator counts qualifying flights per cohort. If a route has fewer than `MIN_FLIGHTS_FOR_CLUSTERING` (default 50) valid flights, it is skipped with a warning.
+5. **Minimum Cohort Threshold Verification**: The orchestrator counts qualifying flights per cohort. If a route has fewer than `MIN_FLIGHTS_FOR_CLUSTERING` valid flights (threshold value configured in [`src/common/config.py`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py#L144)), it is skipped with a warning.
 6. **Worker Pool Dispatching**: The orchestrator initializes a `ProcessPoolExecutor` using the `spawn` context and dispatches eligible route tasks to `corridor_clustering_worker.py: cluster_route`. Each process initializes worker logging to `data/logs/corridor.log` and caps numeric BLAS threads.
 7. **Batch Trajectory Loading**: The worker process groups flight IDs by their respective parquet file paths and reads each parquet file once, minimizing disk I/O overhead.
 8. **Clustering Engine Invocation**: The worker passes loaded flight DataFrames to `corridor_clustering_engine.py: run_clustering`.
@@ -295,7 +295,7 @@ python -m src.core.corridor.stability_orchestrator `
 | `GLOBAL_FLIGHT_CLUSTER_MAP` | `Path` | Registry mapping historical flights to assigned cluster IDs (`global_flight_cluster_map.parquet`). |
 | `GLOBAL_STABILITY_REGISTRY` | `Path` | Registry storing Stage 2 stability metric results (`global_stability_registry.parquet`). |
 | `CORRIDOR_PATHS_DIR` | `Path` | Directory where synthesized 4D medoid parquet files are saved (`data/corridor_paths/`). |
-| `MIN_FLIGHTS_FOR_CLUSTERING` | `int` | Minimum qualifying flight count required to attempt clustering (default `50`). |
+| `MIN_FLIGHTS_FOR_CLUSTERING` | `int` | Minimum qualifying flight count required to attempt clustering (configured in `src/common/config.py`). |
 | `CORRIDOR_CLUSTERING_THREADS_PER_WORKER` | `int` | Default CPU BLAS threads allocated per worker process (default `2`). |
 | `CORRIDOR_IO_THREADS` | `int` | Worker thread pool size for concurrent parquet file reading. |
 | `CLUSTERING_MAX_K` | `int` | Maximum candidate cluster count $K$ evaluated during silhouette sweeps (default `10`). |
