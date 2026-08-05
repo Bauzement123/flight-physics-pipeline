@@ -1,4 +1,4 @@
-﻿# Large data directories and caches
+# Large data directories and caches
 data/
 weather_cache/
 
@@ -15,6 +15,7 @@ recovered*_chat_history.md
 recovered_today_chat_history.md
 pipeline_changes.diff
 step*.md
+VM_QUICKSTART.md
 
 # Agent sandbox and local tool directories
 .claw/

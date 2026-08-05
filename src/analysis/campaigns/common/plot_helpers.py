@@ -23,7 +23,7 @@ from src.common.config import (
 from src.core.corridor.stability_worker import _load_route_flights
 from src.core.corridor.pca_compressor import classify_and_normalize_cohort, vectorize_flight
 
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, to_registry_path
 from src.common.concurrency import limit_numeric_threads
 
 logger = logging.getLogger(__name__)
@@ -346,7 +346,7 @@ def _render_plot_if_needed(task: dict, registry_df: pd.DataFrame = None) -> dict
             crop_airports=crop_airports, crop_padding=crop_padding
         )
         
-        rel_path = out_path.relative_to(BASE_DIR).as_posix()
+        rel_path = to_registry_path(out_path)
         return {
             "status": "success",
             "task": task,

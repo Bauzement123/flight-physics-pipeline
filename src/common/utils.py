@@ -473,25 +473,13 @@ def retry_backoff(
     raise RetryError(f"Operation {getattr(fn, '__name__', str(fn))} failed after {max_retries} retries: {last_exc}") from last_exc
 
 
-def to_project_relative(path: Path) -> str:
+def to_project_relative(path: "Path | str") -> str:
     """
     Returns a POSIX-style path relative to BASE_DIR.
-    Raises ValueError if path is not under BASE_DIR.
+    Safe against symlinked directories (e.g., data/ symlinked to NFS mount).
     Used for every flight_id -> file_path entry written to GLOBAL_TRAJECTORY_REGISTRY.
     """
-    p_res = Path(path).resolve()
-    b_res = BASE_DIR.resolve()
-    try:
-        rel = p_res.relative_to(b_res)
-        return rel.as_posix()
-    except ValueError:
-        # On Windows, try case-insensitive path comparison if standard relative_to fails
-        p_str = p_res.as_posix()
-        b_str = b_res.as_posix()
-        if p_str.lower().startswith(b_str.lower().rstrip('/') + '/'):
-            rel_str = p_str[len(b_str.rstrip('/')) + 1:]
-            return rel_str
-        raise ValueError(f"Path {path} is not under BASE_DIR ({BASE_DIR})")
+    return to_registry_path(path)
 
 
 class _DataclassJSONEncoder(json.JSONEncoder):

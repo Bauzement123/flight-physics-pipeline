@@ -24,6 +24,7 @@ if str(BASE_DIR) not in sys.path:
 
 from src.common.config import MASTER_FLIGHTS_FILE
 from src.common.utils import setup_file_logger
+from src.common.config import DEFAULT_PREFILTER_THRESHOLDS
 
 logger = logging.getLogger(__name__)
 
@@ -173,14 +174,14 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate custom parameter and duration retention.")
     p.add_argument("--top-k-routes", type=int, default=5000, help="Top K routes by volume (default: 5000).")
     p.add_argument("--min-route-flights", type=int, default=50, help="Min flights for corridor survival (default: 50).")
-    p.add_argument("--max-dep-horiz-dist", type=float, default=None, help="Max departure horiz dist in m.")
-    p.add_argument("--max-dep-vert-dist", type=float, default=None, help="Max departure vert dist in m.")
-    p.add_argument("--max-arr-horiz-dist", type=float, default=None, help="Max arrival horiz dist in m.")
-    p.add_argument("--max-arr-vert-dist", type=float, default=None, help="Max arrival vert dist in m.")
-    p.add_argument("--max-dep-candidates", type=int, default=None, help="Max departure candidate count.")
-    p.add_argument("--max-arr-candidates", type=int, default=None, help="Max arrival candidate count.")
-    p.add_argument("--max-duration-pct-above-median", type=float, default=None, help="Max %% duration above route median.")
-    p.add_argument("--min-duration-pct-below-median", type=float, default=None, help="Min %% duration below route median.")
+    p.add_argument("--max-dep-horiz-dist", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_dep_horiz_dist"), help="Max departure horiz dist in m.")
+    p.add_argument("--max-dep-vert-dist", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_dep_vert_dist"), help="Max departure vert dist in m.")
+    p.add_argument("--max-arr-horiz-dist", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_arr_horiz_dist"), help="Max arrival horiz dist in m.")
+    p.add_argument("--max-arr-vert-dist", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_arr_vert_dist"), help="Max arrival vert dist in m.")
+    p.add_argument("--max-dep-candidates", type=int, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_dep_candidates"), help="Max departure candidate count.")
+    p.add_argument("--max-arr-candidates", type=int, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_arr_candidates"), help="Max arrival candidate count.")
+    p.add_argument("--max-duration-pct-above-median", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("max_duration_pct_above_median"), help="Max %% duration above route median.")
+    p.add_argument("--min-duration-pct-below-median", type=float, default=DEFAULT_PREFILTER_THRESHOLDS.get("min_duration_pct_below_median"), help="Min %% duration below route median.")
     return p.parse_args()
 
 
