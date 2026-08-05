@@ -5,8 +5,8 @@ The **OpenSky Trajectory Fetching Module** retrieves raw ADS-B trajectory state 
 Located at `src/core/fetching/`, this module sits after master population acquisition and filtering, serving as the primary data ingestion engine before trajectory processing (Kalman filtering), corridor synthesis, weather acquisition, and flight physics simulation.
 
 The module operates under a two-tier execution model:
-1. `opensky_fetcher.py` — A single-route worker script responsible for resolving, retrieving, and caching trajectories for an individual departure-arrival airport pair.
-2. `fetcher_orchestrator.py` — A batch-processing orchestration engine that selects ranked corridors from route summary metadata, computes dynamic sample quotas, and sequentially drives the worker across multiple corridors under a **Two-Pass Concat Architecture** that is safe on Windows Google Drive FUSE mounts.
+1. `worker_cli.py` / `opensky_fetcher.py` — A single-route worker responsible for resolving, retrieving, and caching trajectories for an individual departure-arrival airport pair.
+2. `batch_cli.py` / `fetcher_orchestrator.py` — A batch-processing orchestration engine that selects ranked corridors from route summary metadata, computes dynamic sample quotas, and sequentially drives the worker across multiple corridors. Atomic concatenation is handled directly in a **Single-Pass Execution Architecture**, ensuring FUSE safety on Windows Google Drive mounts.
 
 ---
 
@@ -16,10 +16,12 @@ The module operates under a two-tier execution model:
 src/core/fetching/
 ├── README.md                   # Technical specification and workflow documentation
 ├── __init__.py                 # Package initializer
-├── models.py                   # Dataclasses for data contracts (FetchRunParams, FlightFetchOutcome, RouteFetchResult, RouteFetchSummary, BatchFetchSummary)
+├── models.py                   # Dataclasses for data contracts
 ├── helpers.py                  # Pure helper functions for cohort preparation, atomic Parquet I/O
-├── opensky_fetcher.py          # Worker: 3-step cache lookup (Registry -> Concat -> Trino) and trajectory downloader
-└── fetcher_orchestrator.py     # Orchestrator: batch route selection, quota calculation, Two-Pass concat rebuild
+├── batch_cli.py                # CLI Entrypoint for batch-processing orchestration
+├── worker_cli.py               # CLI Entrypoint for single-route worker
+├── opensky_fetcher.py          # Worker: 3-step cache lookup, trajectory downloader, and route-level concatenation
+└── fetcher_orchestrator.py     # Orchestrator: batch route selection, quota calculation, and single-pass orchestration
 ```
 
 ---
@@ -100,14 +102,15 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │         ├── Config constants: ROUTE_SUMMARY_PARQUET, MIN_DISTANCE_KM, MASTER_FLIGHTS_FILE
  │         └── Safety behavior: Evaluates filters in-memory; skips corridors with zero post-filter capacity
  │
- └── Sub-objective: Orchestrate batch fetching across ranked corridors (Two-Pass Concat)
+ └── Sub-objective: Orchestrate batch fetching across ranked corridors
       └── Solution: fetcher_orchestrator.py::run_batch()
            ├── Inputs: Execution plan, run_id, seed, filtering arguments, resume flag
            ├── Outputs: Route-level trajectory datasets, run manifests, and orchestrator summary manifest
            ├── Config constants: TRAJECTORIES_DIR, FETCH_RUNS_DIRNAME, GLOBAL_TRAJECTORY_REGISTRY
            └── Safety behavior:
-                ├── Pass 1: Workers save individual raw/ files with update_concat=False per corridor
-                ├── Pass 2: After all corridor FUSE writes complete, batch rebuild of all concat files
+                ├── Passes pre-computed flight records directly to worker to avoid re-reading master_flights.parquet
+                ├── Worker handles atomic route-level concat updates internally per corridor
+                ├── Explicit gc.collect() prevents memory leaks over thousands of batch iterations
                 ├── Resume mode: Only skips corridors whose manifest explicitly records success=True
                 └── Catches corridor-level exceptions without aborting the batch pipeline
 ```
@@ -177,7 +180,7 @@ If the route summary cannot be loaded or a route median is unavailable, duration
 
 ```mermaid
 flowchart TD
-    CLI["CLI: python -m src.core.fetching.opensky_fetcher"] --> Init["init_runtime() + setup_file_logger('fetching.log')"]
+    CLI["CLI: python -m src.core.fetching.worker_cli"] --> Init["init_runtime() + setup_file_logger('fetching.log')"]
     Init --> Cohort["_prepare_cohort(): Load master flights from --flight-source"]
     Cohort --> Filter["apply_flight_filters(): start_date, end_date, typecode"]
     Filter --> MetaFilter["_apply_metadata_prefilters(): DEFAULT_PREFILTER_THRESHOLDS"]
@@ -216,10 +219,11 @@ flowchart TD
     NextLoop -->|No| RegUpdate["update_global_registry(GLOBAL_TRAJECTORY_REGISTRY, new_entries)"]
     RegUpdate --> ConcatCheck{"update_concat == True?"}
     ConcatCheck -->|Yes| ConcatUpdate["update_raw_concat():\nwrite_parquet_atomic() for <route>_all_raw.parquet"]
-    ConcatCheck -->|No| SkipConcat["Skip concat rebuild (Pass 1 mode)"]
+    ConcatCheck -->|No| SkipConcat["Skip concat rebuild (if disabled)"]
     ConcatUpdate --> Manifest["write_run_manifest(): Save RouteFetchResult to runs/<run_id>.json"]
     SkipConcat --> Manifest
-    Manifest --> Done["Return RouteFetchResult"]
+    Manifest --> GC["Release memory: gc.collect() & pyarrow pool release"]
+    GC --> Done["Return RouteFetchResult"]
 ```
 
 **Step-by-step Walkthrough:**
@@ -236,7 +240,7 @@ flowchart TD
 8. **PyArrow Nanosecond Safety in `label_flight_phase()`**: Before calling `fp.set_trajectory()`, timestamps are normalized: `ts_series.dt.total_seconds().values` if a `.dt` accessor is available, or `.values` otherwise. All arrays (`ts`, `alt`, `spd`, `roc`) are explicitly cast to `np.asarray(..., dtype=float)` to strip PyArrow extension types. Without this normalization, PyArrow-typed timestamps produce raw nanosecond integers ($10^9$/second), causing `max(ts)//60 > 37 billion` iterations and freezing the CPU.
 9. **Failure Handling**: If Step 3 yields no waypoints or fails after exponential backoff, the flight is marked as failed, logged at ERROR level, and skipped.
 10. **Global Registry Update**: All newly fetched or recovered trajectories are atomically appended to `GLOBAL_TRAJECTORY_REGISTRY` via `update_global_registry()`.
-11. **Incremental Concat Update (if `update_concat=True`)**: `update_raw_concat()` merges all successful DataFrames with any existing rows in `<route>_all_raw.parquet`, deduplicating by `flight_id` and writing via `write_parquet_atomic()`.
+11. **Incremental Concat Update (if `update_concat=True`)**: `update_raw_concat()` merges all successful DataFrames with the in-memory concat backup (`concat_df`), deduplicating by `flight_id` and writing via `write_parquet_atomic()`. This avoids a redundant disk read of the route concat file.
 12. **Manifest Serialization**: A complete `RouteFetchResult` dataclass is serialized to `<out_dir>/runs/<run_id>.json` via `write_run_manifest()`.
 
 ---
@@ -245,7 +249,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    CLI["CLI: python -m src.core.fetching.fetcher_orchestrator"] --> Init["init_runtime() + setup_file_logger('fetching.log')"]
+    CLI["CLI: python -m src.core.fetching.batch_cli"] --> Init["init_runtime() + setup_file_logger('fetching.log')"]
     Init --> Validate["Validate mutually exclusive rank args & seed range"]
     Validate --> RunID["generate_dataset_name(): Create dynamic run_id"]
 
@@ -276,23 +280,23 @@ flowchart TD
 
     NextRoute -->|No| PlanExist{"Execution plan non-empty?"}
     PlanExist -->|No| StopNoPlan["Log ERROR and terminate"]
-    PlanExist -->|Yes| BatchLoop["run_batch() Pass 1: Loop over planned corridors (1..M)\nupdate_concat=False for every worker call"]
+    PlanExist -->|Yes| BatchLoop["run_batch(): Loop over planned corridors (1..M)"]
 
     BatchLoop --> ResumeCheck{"--resume active & manifest success=True?"}
     ResumeCheck -->|Yes| SkipResumed["Log checkpoint hit; skip worker execution"]
-    ResumeCheck -->|No| ExecWorker["Call opensky_fetcher.fetch_trajectories(update_concat=False)"]
+    ResumeCheck -->|No| ExecWorker["Call opensky_fetcher.fetch_trajectories(update_concat=True)"]
 
     ExecWorker --> WorkerResult{"RouteFetchResult.success == True?"}
     WorkerResult -->|Yes| LogSucc["Record corridor success metrics"]
     WorkerResult -->|No| LogErr["Log corridor failure; continue pipeline"]
 
     SkipResumed --> NextCorridor{"More corridors in plan?"}
-    LogSucc --> NextCorridor
-    LogErr --> NextCorridor
+    LogSucc --> GCWorker["gc.collect()"]
+    LogErr --> GCWorker
+    GCWorker --> NextCorridor
 
     NextCorridor -->|Yes| BatchLoop
-    NextCorridor -->|No| Pass2["Pass 2: Rebuild all <route>_all_raw.parquet concat files\n(FUSE file handles now flushed)"]
-    Pass2 --> PrintSum["print_batch_summary(): Display execution summary table"]
+    NextCorridor -->|No| PrintSum["print_batch_summary(): Display execution summary table"]
     PrintSum --> SaveOrchManifest["write_orchestrator_manifest(): Save BatchFetchSummary to runs/<run_id>_orchestrator.json"]
 ```
 
@@ -304,11 +308,10 @@ flowchart TD
 5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` loads flights directly from `--flight-source` into memory and applies date, aircraft typecode, and `DEFAULT_PREFILTER_THRESHOLDS` metadata filters. This in-memory evaluation ensures that sample quotas are calculated against actual post-filter capacity rather than raw pre-filter totals.
 6. **Strategy Application**: `_calculate_target_quota()` computes the sample target based on `--strategy`: `fixed` → `min(int(value), capacity)`, `percent` → `min(ceil(capacity * value / 100.0), capacity)`, `all` → `capacity`.
 7. **Plan Display**: `print_batch_plan()` outputs a clean table to the console detailing every planned corridor, its rank, requested sample size, and total available capacity.
-8. **Pass 1 — Sequential Batch Execution**: `run_batch()` iterates through the execution plan sequentially, calling `fetch_trajectories(..., update_concat=False)` for each corridor. Workers save only individual raw files to `raw/` without touching route concat files. FUSE lock contention is avoided because no file is immediately re-read after being written.
+8. **Sequential Batch Execution**: `run_batch()` iterates through the execution plan sequentially, calling `fetch_trajectories(..., update_concat=True)` for each corridor and passing the pre-computed `records` array. The worker handles its own route-level concatenation and FUSE-safe atomic file swapping internally. After each corridor completes, explicit memory cleanup is performed via `gc.collect()`.
    - **Resume Evaluation**: If `--resume` is enabled and `<out_dir>/runs/<run_id>.json` exists, the manifest is parsed and the corridor is skipped only if `result.success == True`.
-9. **Pass 2 — Concat Rebuild**: After all corridor passes complete and all FUSE file handles have flushed, the orchestrator iterates over all planned corridors, reads the individual `raw/` files, and rebuilds each `<route>_all_raw.parquet` via `update_raw_concat()` using `write_parquet_atomic()`.
-10. **Summary Reporting**: `print_batch_summary()` outputs a terminal summary table showing total corridors processed, success counts, and per-route retrieval statistics.
-11. **Orchestrator Manifest Serialization**: `write_orchestrator_manifest()` saves a `BatchFetchSummary` JSON manifest to `data/trajectories/runs/<run_id>_orchestrator.json`.
+9. **Summary Reporting**: `print_batch_summary()` outputs a terminal summary table showing total corridors processed, success counts, and per-route retrieval statistics.
+10. **Orchestrator Manifest Serialization**: `write_orchestrator_manifest()` saves a `BatchFetchSummary` JSON manifest to `data/trajectories/runs/<run_id>_orchestrator.json`.
 
 ---
 
@@ -319,17 +322,17 @@ flowchart TD
 * **Incremental Concat Recovery (Low-Disk Mode)**: If individual trajectory files in `raw/` are deleted to save disk space, Step 2 of `resolve_flight()` automatically reconstructs them on-demand from the route-level `<route>_all_raw.parquet` consolidated file without querying Trino over the network.
 * **Lazy Database Initialization**: The `pyopensky` Trino client is initialized lazily only when a cache miss forces a Step 3 network query. Entirely cached runs execute in milliseconds with zero network overhead.
 * **FUSE-Safe Atomic Parquet Writes**: Generic Parquet files (route-level concat files, recovered cache slices, registry-like tables, and already-normalized outputs) are written via `write_parquet_atomic()` in `helpers.py`, which does not enforce Golden Schema. Newly fetched OpenSky Trino outputs are written via `write_parquet_atomic_PyOpenSky()`, which first converts OpenSky aliases to Golden Schema and then uses the same temp-file plus `os.replace()` pattern. JSON manifests use the analogous `write_json_dataclass()` from `src/common/utils.py`.
-* **Two-Pass Concat Architecture**: The orchestrator separates individual file writes (Pass 1 — one corridor at a time) from concat rebuilding (Pass 2 — all corridors after the batch loop). This ensures FUSE buffers are fully flushed before any file is re-read for consolidation, preventing 4-byte truncated footer errors.
+* **Single-Pass Execution Architecture**: The orchestrator relies on the worker to manage atomic Parquet concatenation (`update_raw_concat()`) incrementally at the end of each corridor processing step. All intermediate data structures and caches are explicitly freed via `gc.collect()` at the bottom of the loop to prevent memory bloat over thousands of iterations.
 
 ---
 
 ## 5. CLI Usage Guide
 
-### 5.1 Worker CLI (`opensky_fetcher.py`)
+### 5.1 Worker CLI (`worker_cli.py`)
 
 #### Bash Syntax
 ```bash
-python -m src.core.fetching.opensky_fetcher \
+python -m src.core.fetching.worker_cli \
     --dep EDDF \
     --arr EGLL \
     --out-dir data/trajectories/rank_001_EDDF-EGLL \
@@ -345,7 +348,7 @@ python -m src.core.fetching.opensky_fetcher \
 
 #### PowerShell Syntax
 ```powershell
-python -m src.core.fetching.opensky_fetcher `
+python -m src.core.fetching.worker_cli `
     --dep EDDF `
     --arr EGLL `
     --out-dir data/trajectories/rank_001_EDDF-EGLL `
@@ -380,11 +383,11 @@ python -m src.core.fetching.opensky_fetcher `
 
 ---
 
-### 5.2 Orchestrator CLI (`fetcher_orchestrator.py`)
+### 5.2 Orchestrator CLI (`batch_cli.py`)
 
 #### Bash Syntax
 ```bash
-python -m src.core.fetching.fetcher_orchestrator \
+python -m src.core.fetching.batch_cli \
     --route-summary data/databases/master_flights/master_flights_route_summary.parquet \
     --flight-source data/databases/master_flights/master_flights.parquet \
     --format roundtrip \
@@ -399,7 +402,7 @@ python -m src.core.fetching.fetcher_orchestrator \
 
 #### PowerShell Syntax
 ```powershell
-python -m src.core.fetching.fetcher_orchestrator `
+python -m src.core.fetching.batch_cli `
     --route-summary data/databases/master_flights/master_flights_route_summary.parquet `
     --flight-source data/databases/master_flights/master_flights.parquet `
     --format roundtrip `

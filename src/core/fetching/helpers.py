@@ -52,6 +52,21 @@ def load_master_flights_for_route(
             return pd.DataFrame()
 
 
+_ROUTE_SUMMARY_CACHE: pd.DataFrame | None = None
+
+
+def _get_route_summary_cache() -> pd.DataFrame:
+    """Lazy loader and in-memory cache for ROUTE_SUMMARY_PARQUET."""
+    global _ROUTE_SUMMARY_CACHE
+    if _ROUTE_SUMMARY_CACHE is None:
+        try:
+            _ROUTE_SUMMARY_CACHE = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
+        except Exception as e:
+            logger.warning(f"Could not load route summary for duration pre-filter: {e}")
+            _ROUTE_SUMMARY_CACHE = pd.DataFrame()
+    return _ROUTE_SUMMARY_CACHE
+
+
 def _apply_metadata_prefilters(df: pd.DataFrame) -> pd.DataFrame:
     """Applies metadata pre-filters based on DEFAULT_PREFILTER_THRESHOLDS config."""
     active_thresholds = {k: v for k, v in DEFAULT_PREFILTER_THRESHOLDS.items() if v is not None}
@@ -67,14 +82,11 @@ def _apply_metadata_prefilters(df: pd.DataFrame) -> pd.DataFrame:
         "min_duration_pct_below_median" in active_thresholds
     )
     if duration_check_active:
-        try:
-            df_route_summary = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
-            if not df_route_summary.empty and "route" in df_route_summary.columns and "route_duration_median" in df_route_summary.columns:
-                for _, row in df_route_summary.iterrows():
-                    clean_route = str(row["route"]).replace(" -> ", "-").replace(" ", "")
-                    route_medians_min[clean_route] = float(row["route_duration_median"])
-        except Exception as e:
-            logger.warning(f"Could not load route summary for duration pre-filter: {e}")
+        df_route_summary = _get_route_summary_cache()
+        if not df_route_summary.empty and "route" in df_route_summary.columns and "route_duration_median" in df_route_summary.columns:
+            for _, row in df_route_summary.iterrows():
+                clean_route = str(row["route"]).replace(" -> ", "-").replace(" ", "")
+                route_medians_min[clean_route] = float(row["route_duration_median"])
 
     # Compute duration in seconds if lastseen/firstseen columns are present and duration is not in columns
     if duration_check_active and 'duration_s' not in res.columns:
@@ -218,18 +230,11 @@ def sample_flights(
 def build_flight_id(row: Any) -> str | None:
     """Constructs unique flight_id: {icao24}_{callsign}_{dep}-{arr}_{fs_str}."""
     try:
-        if isinstance(row, dict):
-            icao24 = row.get('icao24')
-            callsign = row.get('callsign')
-            dep = row.get('estdepartureairport', 'UNK')
-            arr = row.get('estarrivalairport', 'UNK')
-            fs_val = row.get('firstseen')
-        else:
-            icao24 = row.get('icao24') if 'icao24' in row else None
-            callsign = row.get('callsign') if 'callsign' in row else None
-            dep = row.get('estdepartureairport', 'UNK') if 'estdepartureairport' in row else 'UNK'
-            arr = row.get('estarrivalairport', 'UNK') if 'estarrivalairport' in row else 'UNK'
-            fs_val = row.get('firstseen') if 'firstseen' in row else None
+        icao24 = row.get('icao24') if 'icao24' in row else None
+        callsign = row.get('callsign') if 'callsign' in row else None
+        dep = row.get('estdepartureairport', 'UNK') if 'estdepartureairport' in row else 'UNK'
+        arr = row.get('estarrivalairport', 'UNK') if 'estarrivalairport' in row else 'UNK'
+        fs_val = row.get('firstseen') if 'firstseen' in row else None
 
         if pd.isna(icao24) or pd.isna(fs_val):
             return None
@@ -312,7 +317,6 @@ def prepare_flight_records(df: pd.DataFrame, route_dir: Path) -> list[dict[str, 
             "fs_str": fs_str,
             "raw_path": path,
             "rel_path": rel,
-            "raw_row": row.to_dict(),
         })
     return records
 

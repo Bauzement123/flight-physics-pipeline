@@ -77,7 +77,7 @@ class RouteFetchSummary:
     fetch_from_trino: int = 0
     fails: int = 0
     error: str | None = None
-    new_dfs: list[str] = field(default_factory=list)
+    failed_flight_ids: list[str] = field(default_factory=list)
     concat_path: str | None = None
     duration_seconds: float = 0.0
 
@@ -112,13 +112,13 @@ class RouteFetchSummary:
             succeeded=res.succeeded,
             failed=res.failed,
             resumed=False,
-            new_dfs=res.failed_flight_ids,
-            concat_path=str(res.concat_path) if getattr(res, "concat_path", None) else None,
-            cache_hits=getattr(res, "registry_hits", 0),
-            restore_from_concat=getattr(res, "concat_recoveries", 0),
-            fetch_from_trino=getattr(res, "trino_fetches", 0),
+            failed_flight_ids=res.failed_flight_ids,
+            concat_path=str(res.concat_path) if res.concat_path else None,
+            cache_hits=res.registry_hits,
+            restore_from_concat=res.concat_recoveries,
+            fetch_from_trino=res.trino_fetches,
             fails=res.failed,
-            duration_seconds=res.duration_seconds if getattr(res, "duration_seconds", None) is not None else 0.0,
+            duration_seconds=res.duration_seconds if res.duration_seconds is not None else 0.0,
         )
 
     @classmethod
