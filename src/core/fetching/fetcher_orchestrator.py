@@ -126,7 +126,7 @@ def print_batch_plan(execution_plan: list[dict[str, Any]], run_id: str) -> None:
     print("=" * 70)
     for i, item in enumerate(execution_plan, 1):
         print(f"{i:02d}.  Rank {item['rank']:03d} | {item['dep']} -> {item['arr']} | Sample Size: {item['target']}/{item['capacity']}")
-    print("=" * 70 + "\n")
+    print("=" * 70 + "\n", flush=True)
 
 
 def print_batch_summary(results: list[RouteFetchSummary]) -> None:
