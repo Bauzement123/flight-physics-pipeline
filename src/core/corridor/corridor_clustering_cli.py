@@ -75,6 +75,12 @@ def main() -> None:
         default=50,
         help="Number of completed routes between registry flushes (default: 50).",
     )
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="euclidean",
+        help="Distance metric to use for K-Medoids clustering (default: euclidean).",
+    )
 
     args = parser.parse_args()
 
@@ -112,6 +118,7 @@ def main() -> None:
         max_workers=workers,
         overwrite=args.overwrite,
         batch_size=args.batch_size,
+        metric=args.metric,
     )
 
 

@@ -22,6 +22,7 @@ from src.common.utils import (
 from src.common.registry_utils import (
     load_model_registry,
     batch_register_corridors,
+    load_clean_cohort,
 )
 from src.core.corridor.corridor_clustering_worker import (
     _worker_init,
@@ -78,6 +79,7 @@ def run_corridor_clustering(
     max_workers: int | None = None,
     overwrite: bool = False,
     batch_size: int = 50,
+    metric: str = "euclidean",
 ) -> None:
     """
     Runs the corridor clustering orchestrator. Loads target routes based on rank, rank-range,
@@ -166,14 +168,14 @@ def run_corridor_clustering(
     else:
         done_routes = set()
 
-    # 3. Load GLOBAL_CLEAN_REGISTRY
+    # 3. Load GLOBAL_CLEAN_REGISTRY and metrics
     if not GLOBAL_CLEAN_REGISTRY.exists():
         logger.critical(f"Clean trajectory registry does not exist at {GLOBAL_CLEAN_REGISTRY}. Aborting.")
         sys.exit(1)
 
-    logger.info(f"Loading clean trajectory registry from {GLOBAL_CLEAN_REGISTRY}...")
+    logger.info(f"Loading clean trajectory registry and metrics...")
     try:
-        df_registry = pd.read_parquet(GLOBAL_CLEAN_REGISTRY)
+        df_registry = load_clean_cohort(require_metrics=True)
     except Exception as exc:
         logger.critical(f"Failed to load clean registry: {exc}")
         sys.exit(1)
@@ -234,7 +236,7 @@ def run_corridor_clustering(
         initargs=(threads_per_worker,),
     ) as pool:
         futures = {
-            pool.submit(cluster_route, route_id, rank, cohort_rows): route_id
+            pool.submit(cluster_route, route_id, rank, cohort_rows, 60, metric): route_id
             for route_id, rank, cohort_rows in eligible_routes
         }
 

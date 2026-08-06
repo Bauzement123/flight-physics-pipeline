@@ -45,7 +45,7 @@ Module Objectives
  │    │
  │    └── Sub-objective 1.4: Trajectory Compression & Cluster Optimization (Engine)
  │         └── Solution: corridor_clustering_engine.py
- │              ├── Inputs: Flight DataFrames, PCA components (D_PCA = 13), k_max (CLUSTERING_MAX_K = 10)
+ │              ├── Inputs: Flight DataFrames, PCA components (D_PCA = 13), k_max (CLUSTERING_MAX_K = 1)
  │              └── Outputs: ClusteringResult (optimal K, route class 1-4, silhouette score, cluster labels, medoid indices)
  │
  └── Objective 2: Quantify trajectory cohort convergence & variance via Stage 2 Stability Sampling
@@ -109,13 +109,13 @@ graph TD
 1. **Target Route Resolution**: The orchestrator receives target corridor specifications from the CLI (specific ranks, rank ranges, or explicit `DEP-ARR` route strings) and resolves them to route pairs using traffic volume ranks in `master_flights_route_summary.parquet`.
 2. **Model Registry Check**: If `--overwrite` is `False`, the orchestrator loads `global_model_registry.parquet` and excludes any routes that have already been processed.
 3. **Clean Registry Load**: The orchestrator loads the central trajectory tracking file `global_clean_registry.parquet` once into memory.
-4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`velocity_pass`, `coordinate_velocity_pass`, `acceleration_pass`, `distance_pass`).
+4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`horiz_velocity_pass`, `vert_velocity_pass`, `coord_horiz_velocity_pass`, `coord_vert_velocity_pass`, `acceleration_pass`, `distance_pass`).
 5. **Minimum Cohort Threshold Verification**: The orchestrator counts qualifying flights per cohort. If a route has fewer than `MIN_FLIGHTS_FOR_CLUSTERING` valid flights (threshold value configured in [`src/common/config.py`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py#L144)), it is skipped with a warning.
 6. **Worker Pool Dispatching**: The orchestrator initializes a `ProcessPoolExecutor` using the `spawn` context and dispatches eligible route tasks to `corridor_clustering_worker.py: cluster_route`. Each process initializes worker logging to `data/logs/corridor.log` and caps numeric BLAS threads.
 7. **Batch Trajectory Loading**: The worker process groups flight IDs by their respective parquet file paths and reads each parquet file once, minimizing disk I/O overhead.
 8. **Clustering Engine Invocation**: The worker passes loaded flight DataFrames to `corridor_clustering_engine.py: run_clustering`.
 9. **Feature Compression & PCA Projection**: The engine standardizes trajectories onto a 100-waypoint grid flattening `[lat, lon, alt]` into a 300-dimensional vector per flight, applies Z-score normalization, and fits PCA to project vectors to `D_PCA` (13) dimensions.
-10. **K-Medoids & Silhouette Optimization**: The engine evaluates KMeans configurations for $k \in [2, \text{CLUSTERING\_MAX\_K}]$ (default 10) and selects the optimal $K$ that maximizes the mean silhouette score. If no candidate exceeds `SILHOUETTE_THRESHOLD` (0.35), $K=1$ is assigned. Route shape class (1=Single, 2=Binary, 3=Multi-Track, 4=Chaos) is assigned based on $K$ and total PCA variance.
+10. **K-Medoids & Silhouette Optimization**: The engine evaluates K-Medoids configurations for $k \in [2, \text{CLUSTERING\_MAX\_K}]$ (default 10) and selects the optimal $K$ that maximizes the mean silhouette score. If no candidate exceeds `SILHOUETTE_THRESHOLD` (0.35), $K=1$ is assigned. Route shape class (1=Single, 2=Binary, 3=Multi-Track, 4=Chaos) is assigned based on $K$ and total PCA variance.
 11. **Medoid Selection**: For each cluster $c \in [0, K-1]$, the engine computes Euclidean distances in PCA space to the cluster centroid and selects the closest historical flight as the medoid.
 12. **Strict Aircraft Typecode Verification**: The worker inspects the medoid flight's `typecode`. If the typecode is missing, `NaN`, or not in `ALL_TARGET_FAMILIES` (verified via `is_supported_typecode`), it appends a record to `data/logs/skipped_aircraft.log` and aborts processing for that route cohort.
 13. **Time-Shifting and Interpolation**: Valid medoid DataFrames are converted to PyContrails `Flight` structures, resampled to a uniform 60s temporal grid (`CORRIDOR_TIME_GRID_SECONDS`), and shifted to start precisely at baseline timestamp `2025-01-01 00:00:00 UTC`.
@@ -228,6 +228,7 @@ python -m src.core.corridor.corridor_clustering_cli `
 | `--max-workers` | `int` | *None* | Maximum parallel worker processes (defaults to `CPU count // threads_per_worker`). |
 | `--overwrite` | `flag` | `False` | Overwrites existing corridor templates and registry mapping. |
 | `--batch-size` | `int` | `50` | Number of completed routes to accumulate before flushing registry files. |
+| `--metric` | `str` | `euclidean` | Distance metric to use for K-Medoids clustering. |
 
 ---
 
@@ -280,7 +281,7 @@ python -m src.core.corridor.stability_orchestrator `
 ### Python Libraries
 * `pandas` & `pyarrow` (Parquet table storage and fast registry I/O)
 * `numpy` & `scipy` (Numerical array operations, interpolation, and matrix linear algebra)
-* `scikit-learn` (`PCA`, `KMeans`, `silhouette_score` metric evaluation)
+* `scikit-learn` & `scikit-learn-extra` (`PCA`, `KMedoids`, `silhouette_score` metric evaluation)
 * `pycontrails` (`Flight` data structures, spatial resampling, and time-grid interpolation)
 * `traffic` (`TrafficFlight` trajectory handling and airborne phase filtering)
 
@@ -298,7 +299,7 @@ python -m src.core.corridor.stability_orchestrator `
 | `MIN_FLIGHTS_FOR_CLUSTERING` | `int` | Minimum qualifying flight count required to attempt clustering (configured in `src/common/config.py`). |
 | `CORRIDOR_CLUSTERING_THREADS_PER_WORKER` | `int` | Default CPU BLAS threads allocated per worker process (default `2`). |
 | `CORRIDOR_IO_THREADS` | `int` | Worker thread pool size for concurrent parquet file reading. |
-| `CLUSTERING_MAX_K` | `int` | Maximum candidate cluster count $K$ evaluated during silhouette sweeps (default `10`). |
+| `CLUSTERING_MAX_K` | `int` | Maximum candidate cluster count $K$ evaluated during silhouette sweeps (capped to `1` to produce single representative medoid per route). |
 | `SILHOUETTE_THRESHOLD` | `float` | Minimum silhouette score required to accept $K > 1$ (default `0.35`). |
 | `CHAOS_VARIANCE_THRESHOLD` | `float` | PCA variance threshold to classify un-clustered cohorts as Chaos class 4 (default `200.0`). |
 | `D_PCA` | `int` | Calibrated PCA feature dimensions (default `13`). |

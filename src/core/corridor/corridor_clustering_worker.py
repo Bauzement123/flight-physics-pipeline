@@ -86,6 +86,7 @@ def cluster_route(
     rank: int,
     cohort_rows: list[dict],
     time_grid_seconds: int = 60,
+    metric: str = "euclidean",
 ) -> dict:
     """
     Worker task to perform clustering and corridor templates generation for a single route.
@@ -159,6 +160,7 @@ def cluster_route(
             k_max=CLUSTERING_MAX_K,
             silhouette_threshold=SILHOUETTE_THRESHOLD,
             chaos_variance_threshold=CHAOS_VARIANCE_THRESHOLD,
+            metric=metric,
         )
     except Exception as exc:
         res = dict(_NULL_RESULT)

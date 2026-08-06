@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
+from pyclustering.cluster.kmedoids import kmedoids
+from scipy.spatial.distance import pdist, squareform
 from sklearn.metrics import silhouette_score
 
 @dataclass
@@ -135,9 +136,10 @@ def silhouette_sweep(
     X: np.ndarray,
     k_range: range | list[int],
     threshold: float,
+    metric: str = "euclidean",
 ) -> tuple[int, float, np.ndarray]:
     """
-    Evaluates KMeans clustering models for values of k.
+    Evaluates K-Medoids clustering models for values of k.
     Selects the k with the highest silhouette score that meets or exceeds the threshold.
     If no k passes the threshold, returns k=1 with label 0 for all elements.
 
@@ -164,14 +166,28 @@ def silhouette_sweep(
     best_labels = np.zeros(X.shape[0], dtype=int)
     n_samples = X.shape[0]
 
+    # Precompute distance matrix
+    dist_matrix = squareform(pdist(X, metric=metric))
+
     for k in k_range:
         if k >= n_samples:
             continue
 
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto")
-        labels = kmeans.fit_predict(X)
+        # Deterministic initialization of medoids
+        np.random.seed(42 + k)
+        initial_medoids = np.random.choice(n_samples, k, replace=False).tolist()
 
-        score = silhouette_score(X, labels, random_state=42)
+        kmedoids_instance = kmedoids(dist_matrix, initial_medoids, data_type="distance_matrix")
+        kmedoids_instance.process()
+        clusters = kmedoids_instance.get_clusters()
+
+        labels = np.zeros(n_samples, dtype=int)
+        for cluster_id, cluster_indices in enumerate(clusters):
+            for idx in cluster_indices:
+                labels[idx] = cluster_id
+
+        # Pass dist_matrix and metric="precomputed" for consistency with the cluster geometry
+        score = silhouette_score(dist_matrix, labels, metric="precomputed", random_state=42)
         if score >= threshold and score > best_score:
             best_score = score
             best_k = k
@@ -244,6 +260,7 @@ def run_clustering(
     k_max: int = 4,
     silhouette_threshold: float = 0.35,
     chaos_variance_threshold: float = 200.0,
+    metric: str = "euclidean",
 ) -> ClusteringResult:
     """
     Stateless, high-level entry point to run the full corridor clustering math.
@@ -305,7 +322,7 @@ def run_clustering(
     max_k_eval = min(k_max, n_samples - 1)
     if max_k_eval >= 2:
         k_range = range(2, max_k_eval + 1)
-        best_k, best_score, labels = silhouette_sweep(X_pca, k_range, silhouette_threshold)
+        best_k, best_score, labels = silhouette_sweep(X_pca, k_range, silhouette_threshold, metric)
     else:
         best_k = 1
         best_score = np.nan
