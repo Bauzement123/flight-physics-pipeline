@@ -75,86 +75,63 @@ def _calc_acceleration_mps2(df: pd.DataFrame) -> pd.Series:
     return pd.Series(acc_3d, index=df_sorted.index)
 
 # ---------------------------------------------------------------------------
-# Velocity filters - four independent single-axis checks
+# Metric Extractors - Feature computation
 # ---------------------------------------------------------------------------
 
-def check_horiz_velocity(df: pd.DataFrame, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify max horizontal speed from gs does not exceed limit (kt)."""
-    if df.empty:
-        return False, "EMPTY_TRAJECTORY"
-    max_gs_kt = df["gs"].max() * MPS_TO_KT
-    limit_kt  = thresholds.get("max_horiz_velocity_kt", 650.0)
-    if max_gs_kt > limit_kt:
-        return False, f"max horiz speed {max_gs_kt:.1f} kt > {limit_kt:.1f} kt"
-    return True, "PASSED"
+def extract_horiz_velocity_metric(df: pd.DataFrame) -> float:
+    """Extract max horizontal speed from gs (kt)."""
+    if df.empty or "gs" not in df.columns:
+        return float("nan")
+    return float(df["gs"].max() * MPS_TO_KT)
 
-def check_vert_velocity(df: pd.DataFrame, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify max vertical speed from rocd does not exceed limit (fpm)."""
-    if df.empty:
-        return False, "EMPTY_TRAJECTORY"
-    max_rocd_fpm = df["rocd"].abs().max() * MPS_TO_FPM
-    limit_fpm    = thresholds.get("max_vert_velocity_fpm", 8000.0)
-    if max_rocd_fpm > limit_fpm:
-        return False, f"max vert speed {max_rocd_fpm:.0f} fpm > {limit_fpm:.0f} fpm"
-    return True, "PASSED"
+def extract_vert_velocity_metric(df: pd.DataFrame) -> float:
+    """Extract max vertical speed from rocd (fpm)."""
+    if df.empty or "rocd" not in df.columns:
+        return float("nan")
+    return float(df["rocd"].abs().max() * MPS_TO_FPM)
 
-def check_coord_horiz_velocity(df: pd.DataFrame, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify max horizontal coordinate-derived speed does not exceed limit (kt)."""
-    if df.empty:
-        return False, "EMPTY_TRAJECTORY"
+def extract_coord_horiz_velocity_metric(df: pd.DataFrame) -> float:
+    """Extract max horizontal coordinate-derived speed (kt)."""
+    if df.empty or "latitude" not in df.columns or "longitude" not in df.columns:
+        return float("nan")
     vel_horiz_mps, _ = _calc_coord_velocity_mps(df)
-    max_horiz_kt     = vel_horiz_mps.max() * MPS_TO_KT
-    limit_kt         = thresholds.get("max_coord_horiz_velocity_kt", 650.0)
-    if max_horiz_kt > limit_kt:
-        return False, f"max coord horiz speed {max_horiz_kt:.1f} kt > {limit_kt:.1f} kt"
-    return True, "PASSED"
+    return float(vel_horiz_mps.max() * MPS_TO_KT)
 
-def check_coord_vert_velocity(df: pd.DataFrame, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify max vertical coordinate-derived speed does not exceed limit (fpm)."""
-    if df.empty:
-        return False, "EMPTY_TRAJECTORY"
+def extract_coord_vert_velocity_metric(df: pd.DataFrame) -> float:
+    """Extract max vertical coordinate-derived speed (fpm)."""
+    if df.empty or "altitude" not in df.columns:
+        return float("nan")
     _, vel_vert_mps = _calc_coord_velocity_mps(df)
-    max_vert_fpm    = vel_vert_mps.abs().max() * MPS_TO_FPM
-    limit_fpm       = thresholds.get("max_coord_vert_velocity_fpm", 8000.0)
-    if max_vert_fpm > limit_fpm:
-        return False, f"max coord vert speed {max_vert_fpm:.0f} fpm > {limit_fpm:.0f} fpm"
-    return True, "PASSED"
+    return float(vel_vert_mps.abs().max() * MPS_TO_FPM)
 
-# ---------------------------------------------------------------------------
-# Acceleration filter
-# ---------------------------------------------------------------------------
-
-def check_acceleration(df: pd.DataFrame, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify maximum 3D acceleration does not exceed limit (m/s^2)."""
-    if df.empty:
-        return False, "EMPTY_TRAJECTORY"
-
+def extract_acceleration_metric(df: pd.DataFrame) -> float:
+    """Extract maximum 3D acceleration (m/s^2)."""
+    if df.empty or "gs" not in df.columns or "rocd" not in df.columns:
+        return float("nan")
     acc_3d = _calc_acceleration_mps2(df)
-    max_acc = acc_3d.max()
-    limit = thresholds.get("max_acceleration_mps2", 10.0)
+    return float(acc_3d.max())
 
-    if max_acc > limit:
-        return False, f"max 3D acceleration {max_acc:.2f} m/s^2 > {limit} m/s^2"
-    return True, "PASSED"
-
-# ---------------------------------------------------------------------------
-# Airport distance filter
-# ---------------------------------------------------------------------------
-
-def check_distance(df: pd.DataFrame, airports: dict, thresholds: dict[str, float]) -> tuple[bool, str]:
-    """Verify origin/destination proximity limits (meters)."""
+def extract_distance_metrics(df: pd.DataFrame, airports: dict) -> dict[str, float]:
+    """Extract origin/destination proximity distances (meters)."""
+    result = {
+        "dep_horiz_dist_m": float("nan"),
+        "dep_vert_dist_m": float("nan"),
+        "arr_horiz_dist_m": float("nan"),
+        "arr_vert_dist_m": float("nan"),
+    }
+    
     if df.empty or "estdepartureairport" not in df.columns or "estarrivalairport" not in df.columns:
-        return False, "EMPTY_OR_MISSING_AIRPORTS"
+        return result
 
     dep_icao = df["estdepartureairport"].iloc[0]
     arr_icao = df["estarrivalairport"].iloc[0]
 
     if pd.isna(dep_icao) or pd.isna(arr_icao):
-        return False, "MISSING_AIRPORT_ICAO"
+        return result
 
     dep_icao, arr_icao = str(dep_icao).strip().upper(), str(arr_icao).strip().upper()
     if dep_icao not in airports or arr_icao not in airports:
-        return False, f"AIRPORT_NOT_FOUND: {dep_icao}/{arr_icao}"
+        return result
 
     dep_lat, dep_lon, dep_elev_ft = airports[dep_icao]["lat"], airports[dep_icao]["lon"], airports[dep_icao]["elevation"]
     arr_lat, arr_lon, arr_elev_ft = airports[arr_icao]["lat"], airports[arr_icao]["lon"], airports[arr_icao]["elevation"]
@@ -162,20 +139,9 @@ def check_distance(df: pd.DataFrame, airports: dict, thresholds: dict[str, float
     dep_elev_m, arr_elev_m = dep_elev_ft / 3.280839895, arr_elev_ft / 3.280839895
     df_sorted = df.sort_values(by="time")
 
-    dep_horiz = _calc_horiz_dist_m(df_sorted["latitude"].iloc[0], df_sorted["longitude"].iloc[0], dep_lat, dep_lon)
-    arr_horiz = _calc_horiz_dist_m(df_sorted["latitude"].iloc[-1], df_sorted["longitude"].iloc[-1], arr_lat, arr_lon)
-    dep_vert = _calc_vert_dist_m(df_sorted["altitude"].iloc[0], dep_elev_m)
-    arr_vert = _calc_vert_dist_m(df_sorted["altitude"].iloc[-1], arr_elev_m)
+    result["dep_horiz_dist_m"] = float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[0], df_sorted["longitude"].iloc[0], dep_lat, dep_lon))
+    result["arr_horiz_dist_m"] = float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[-1], df_sorted["longitude"].iloc[-1], arr_lat, arr_lon))
+    result["dep_vert_dist_m"]  = float(_calc_vert_dist_m(df_sorted["altitude"].iloc[0], dep_elev_m))
+    result["arr_vert_dist_m"]  = float(_calc_vert_dist_m(df_sorted["altitude"].iloc[-1], arr_elev_m))
 
-    checks = [
-        ("max_dep_horiz_dist", dep_horiz, "DEP_HORIZ"),
-        ("max_dep_vert_dist",  dep_vert,  "DEP_VERT"),
-        ("max_arr_horiz_dist", arr_horiz, "ARR_HORIZ"),
-        ("max_arr_vert_dist",  arr_vert,  "ARR_VERT"),
-    ]
-    for key, val, name in checks:
-        limit = thresholds.get(key)
-        if limit is not None and val > limit:
-            return False, f"{name}_DIST ({val:.1f} > {limit:.1f}m)"
-
-    return True, "PASSED"
+    return result

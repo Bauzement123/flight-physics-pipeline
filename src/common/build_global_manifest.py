@@ -135,6 +135,10 @@ def index_parquet_files(
     else:
         df_new = pd.DataFrame(new_mappings)
         if existing_df is not None:
+            # Force existing_df to only keep the columns present in df_new to strip out
+            # any legacy/quality metrics that might have been coupled previously.
+            keep_cols = [c for c in existing_df.columns if c in df_new.columns]
+            existing_df = existing_df[keep_cols]
             df_updated = pd.concat([existing_df, df_new])
         else:
             df_updated = df_new

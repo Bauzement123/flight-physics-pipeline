@@ -8,33 +8,31 @@ import airportsdata
 from src.common.utils import setup_file_logger
 from .filter_result import FilterResult
 from .trajectory_filters import (
-    check_horiz_velocity,
-    check_vert_velocity,
-    check_coord_horiz_velocity,
-    check_coord_vert_velocity,
-    check_acceleration,
-    check_distance,
+    extract_horiz_velocity_metric,
+    extract_vert_velocity_metric,
+    extract_coord_horiz_velocity_metric,
+    extract_coord_vert_velocity_metric,
+    extract_acceleration_metric,
+    extract_distance_metrics,
 )
 
 logger = logging.getLogger(__name__)
 
 # Module-level globals for worker processes
 _airports: dict[str, dict[str, Any]] = {}
-_thresholds: dict[str, float] = {}
 
-def _worker_init(thresholds: dict[str, float]) -> None:
+def _worker_init() -> None:
     """Initialize process-level state for process pool workers."""
     # Initialize the log handler for the worker process (idempotent/spawn-safe)
     setup_file_logger(log_filename="processing.log")
     
-    global _airports, _thresholds
+    global _airports
     try:
         _airports = airportsdata.load()
     except Exception as e:
         logger.error(f"Failed to load airportsdata in worker process: {e}")
         _airports = {}
         
-    _thresholds = thresholds
     logger.debug("Worker process initialized successfully.")
 
 def process_batch(
@@ -43,7 +41,7 @@ def process_batch(
 ) -> list[FilterResult]:
     """
     Worker task: Processes a batch of flights by loading their clean trajectory Parquet files,
-    running the specified filters, and updating their FilterResult objects.
+    running the specified metric extractors, and updating their FilterResult objects.
     """
     for fr in batch:
         try:
@@ -52,47 +50,31 @@ def process_batch(
             if df.empty:
                 raise ValueError("Trajectory dataframe is empty")
                 
-            # 2. Run selected filters
+            # 2. Extract selected metrics
             if "horiz_velocity" in filters_to_run:
-                fr.horiz_velocity_pass, fr.horiz_velocity_reject_reason = check_horiz_velocity(df, _thresholds)
+                fr.metric_max_horiz_speed_kt = extract_horiz_velocity_metric(df)
 
             if "vert_velocity" in filters_to_run:
-                fr.vert_velocity_pass, fr.vert_velocity_reject_reason = check_vert_velocity(df, _thresholds)
+                fr.metric_max_vert_speed_fpm = extract_vert_velocity_metric(df)
 
             if "coord_horiz_velocity" in filters_to_run:
-                fr.coord_horiz_velocity_pass, fr.coord_horiz_velocity_reject_reason = check_coord_horiz_velocity(df, _thresholds)
+                fr.metric_max_coord_horiz_speed_kt = extract_coord_horiz_velocity_metric(df)
 
             if "coord_vert_velocity" in filters_to_run:
-                fr.coord_vert_velocity_pass, fr.coord_vert_velocity_reject_reason = check_coord_vert_velocity(df, _thresholds)
+                fr.metric_max_coord_vert_speed_fpm = extract_coord_vert_velocity_metric(df)
 
             if "acceleration" in filters_to_run:
-                fr.acceleration_pass, fr.acceleration_reject_reason = check_acceleration(df, _thresholds)
+                fr.metric_max_acceleration_mps2 = extract_acceleration_metric(df)
 
             if "distance" in filters_to_run:
-                fr.distance_pass, fr.distance_reject_reason = check_distance(df, _airports, _thresholds)
+                dist_metrics = extract_distance_metrics(df, _airports)
+                fr.metric_dep_horiz_dist_m = dist_metrics.get("dep_horiz_dist_m")
+                fr.metric_dep_vert_dist_m = dist_metrics.get("dep_vert_dist_m")
+                fr.metric_arr_horiz_dist_m = dist_metrics.get("arr_horiz_dist_m")
+                fr.metric_arr_vert_dist_m = dist_metrics.get("arr_vert_dist_m")
                 
         except Exception as exc:
-            err_msg = f"LOAD_ERROR: {str(exc)}"
             logger.error(f"Error processing flight {fr.flight_id} from {fr.file_path}: {exc}")
-            
-            # Fail all requested filters with the load error reason
-            if "horiz_velocity" in filters_to_run:
-                fr.horiz_velocity_pass = False
-                fr.horiz_velocity_reject_reason = err_msg
-            if "vert_velocity" in filters_to_run:
-                fr.vert_velocity_pass = False
-                fr.vert_velocity_reject_reason = err_msg
-            if "coord_horiz_velocity" in filters_to_run:
-                fr.coord_horiz_velocity_pass = False
-                fr.coord_horiz_velocity_reject_reason = err_msg
-            if "coord_vert_velocity" in filters_to_run:
-                fr.coord_vert_velocity_pass = False
-                fr.coord_vert_velocity_reject_reason = err_msg
-            if "acceleration" in filters_to_run:
-                fr.acceleration_pass = False
-                fr.acceleration_reject_reason = err_msg
-            if "distance" in filters_to_run:
-                fr.distance_pass = False
-                fr.distance_reject_reason = err_msg
+            # Missing metrics will be caught by FilterResult.__post_init__ or as_dict and safely mapped to pd.NA
 
     return batch

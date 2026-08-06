@@ -419,11 +419,11 @@ def passes_distance_prefilters(df_clean: pd.DataFrame, thresholds: dict) -> tupl
 
 
 from src.core.processing.trajectory_filters import (
-    check_horiz_velocity,
-    check_vert_velocity,
-    check_coord_horiz_velocity,
-    check_coord_vert_velocity,
-    check_acceleration,
+    extract_horiz_velocity_metric,
+    extract_vert_velocity_metric,
+    extract_coord_horiz_velocity_metric,
+    extract_coord_vert_velocity_metric,
+    extract_acceleration_metric,
 )
 
 
@@ -434,11 +434,11 @@ def apply_trajectory_postfilters(
 ) -> Tuple[bool, str, dict]:
     """
     Evaluates a loaded trajectory against canonical processing pipeline post-filters:
-    - check_horiz_velocity (max horizontal speed from gs <= max_horiz_velocity_kt)
-    - check_vert_velocity (max vertical rate from rocd <= max_vert_velocity_fpm)
-    - check_coord_horiz_velocity (max coord-derived horizontal speed <= max_coord_horiz_velocity_kt)
-    - check_coord_vert_velocity (max coord-derived vertical rate <= max_coord_vert_velocity_fpm)
-    - check_acceleration (max 3D acceleration <= max_acceleration_mps2)
+    - horiz_velocity (max horizontal speed from gs <= max_horiz_velocity_kt)
+    - vert_velocity (max vertical rate from rocd <= max_vert_velocity_fpm)
+    - coord_horiz_velocity (max coord-derived horizontal speed <= max_coord_horiz_velocity_kt)
+    - coord_vert_velocity (max coord-derived vertical rate <= max_coord_vert_velocity_fpm)
+    - acceleration (max 3D acceleration <= max_acceleration_mps2)
     - distance pre-filters (endpoint airport proximity checks)
 
     Returns (rejected: bool, reason: str, metrics: dict).
@@ -453,29 +453,39 @@ def apply_trajectory_postfilters(
     all_metrics = {}
 
     # 1. Horizontal Speed Filter (gs)
-    passed, reason = check_horiz_velocity(df_clean, merged_post_thresholds)
-    if not passed:
-        return True, reason, all_metrics
+    max_horiz_kt = extract_horiz_velocity_metric(df_clean)
+    all_metrics["metric_max_horiz_speed_kt"] = max_horiz_kt
+    limit = merged_post_thresholds.get("max_horiz_velocity_kt", 650.0)
+    if max_horiz_kt > limit:
+        return True, f"max horiz speed {max_horiz_kt:.1f} kt > {limit} kt", all_metrics
 
     # 2. Vertical Speed Filter (rocd)
-    passed, reason = check_vert_velocity(df_clean, merged_post_thresholds)
-    if not passed:
-        return True, reason, all_metrics
+    max_vert_fpm = extract_vert_velocity_metric(df_clean)
+    all_metrics["metric_max_vert_speed_fpm"] = max_vert_fpm
+    limit = merged_post_thresholds.get("max_vert_velocity_fpm", 8000.0)
+    if max_vert_fpm > limit:
+        return True, f"max vert speed {max_vert_fpm:.0f} fpm > {limit} fpm", all_metrics
 
     # 3. Coordinate-Derived Horizontal Speed Filter
-    passed, reason = check_coord_horiz_velocity(df_clean, merged_post_thresholds)
-    if not passed:
-        return True, reason, all_metrics
+    max_coord_horiz_kt = extract_coord_horiz_velocity_metric(df_clean)
+    all_metrics["metric_max_coord_horiz_speed_kt"] = max_coord_horiz_kt
+    limit = merged_post_thresholds.get("max_coord_horiz_velocity_kt", 650.0)
+    if max_coord_horiz_kt > limit:
+        return True, f"max coord horiz speed {max_coord_horiz_kt:.1f} kt > {limit} kt", all_metrics
 
     # 4. Coordinate-Derived Vertical Speed Filter
-    passed, reason = check_coord_vert_velocity(df_clean, merged_post_thresholds)
-    if not passed:
-        return True, reason, all_metrics
+    max_coord_vert_fpm = extract_coord_vert_velocity_metric(df_clean)
+    all_metrics["metric_max_coord_vert_speed_fpm"] = max_coord_vert_fpm
+    limit = merged_post_thresholds.get("max_coord_vert_velocity_fpm", 8000.0)
+    if max_coord_vert_fpm > limit:
+        return True, f"max coord vert speed {max_coord_vert_fpm:.0f} fpm > {limit} fpm", all_metrics
 
     # 5. 3D Acceleration Filter
-    passed, reason = check_acceleration(df_clean, merged_post_thresholds)
-    if not passed:
-        return True, reason, all_metrics
+    max_accel_mps2 = extract_acceleration_metric(df_clean)
+    all_metrics["metric_max_acceleration_mps2"] = max_accel_mps2
+    limit = merged_post_thresholds.get("max_acceleration_mps2", 10.0)
+    if max_accel_mps2 > limit:
+        return True, f"max 3D acceleration {max_accel_mps2:.2f} m/s^2 > {limit} m/s^2", all_metrics
 
     # 6. Distance Pre-filters / Proximity
     merged_pre_thresholds = config.DEFAULT_PREFILTER_THRESHOLDS.copy()

@@ -12,7 +12,9 @@ from src.common.config import (
     GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_STABILITY_REGISTRY,
     GLOBAL_MODEL_REGISTRY,
-    GLOBAL_FLIGHT_CLUSTER_MAP
+    GLOBAL_FLIGHT_CLUSTER_MAP,
+    GLOBAL_CLEAN_REGISTRY,
+    GLOBAL_CLEAN_QUALITY_REGISTRY
 )
 
 logger = logging.getLogger(__name__)
@@ -289,9 +291,10 @@ def register_corridors(
     df_new = pd.DataFrame(new_entries)
     df_updated = pd.concat([df, df_new], ignore_index=True) if not df.empty else df_new
     save_model_registry(df_updated)
+    sil_str = f"{silhouette_score:.4f}" if (silhouette_score is not None and pd.notna(silhouette_score)) else "N/A"
     logger.info(
         f"Registered {len(corridors)} corridors for route {route_id} "
-        f"(k_opt={optimal_k}, sil={silhouette_score:.4f}, class={route_class})."
+        f"(k_opt={optimal_k}, sil={sil_str}, class={route_class})."
     )
 
 
@@ -427,3 +430,47 @@ def load_synthesized_paths_map() -> dict[tuple[str, int], Path]:
         paths_map[(route_id, cluster_id)] = path
 
     return paths_map
+def join_flight_registries(registries: list[Path], how: str = "left") -> pd.DataFrame:
+    """
+    Generic helper to join multiple registry parquets on 'flight_id'.
+    The first registry in the list acts as the left-most dataframe.
+    """
+    if not registries:
+        return pd.DataFrame()
+    
+    df_combined = None
+    for reg_path in registries:
+        if not reg_path.exists():
+            logger.warning(f"Registry {reg_path} does not exist. Skipping in join.")
+            continue
+        try:
+            df = pd.read_parquet(reg_path)
+            if 'flight_id' not in df.columns:
+                logger.warning(f"Registry {reg_path} missing 'flight_id' column. Skipping.")
+                continue
+                
+            if df_combined is None:
+                df_combined = df.set_index('flight_id')
+            else:
+                df_combined = df_combined.join(df.set_index('flight_id'), how=how, rsuffix='_right')
+        except Exception as e:
+            logger.error(f"Error joining registry {reg_path}: {e}")
+            
+    if df_combined is None:
+        return pd.DataFrame()
+        
+    return df_combined.reset_index()
+
+
+def load_clean_cohort(require_metrics: bool = True) -> pd.DataFrame:
+    """
+    Loads the global clean registry locator (flight_id -> file_path).
+    If require_metrics is True, it automatically joins the dynamic quality metrics
+    from GLOBAL_CLEAN_QUALITY_REGISTRY so downstream scripts have access to
+    boolean pass/fail flags and scalar metrics without manual joining.
+    """
+    regs = [GLOBAL_CLEAN_REGISTRY]
+    if require_metrics:
+        regs.append(GLOBAL_CLEAN_QUALITY_REGISTRY)
+        
+    return join_flight_registries(regs, how="left")

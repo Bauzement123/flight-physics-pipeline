@@ -29,6 +29,7 @@ REPORTS_DIR = DATA_DIR / "analysis" / "reports"
 # Centralized Registry and Summary Files
 GLOBAL_TRAJECTORY_REGISTRY = REGISTRIES_DIR / "global_trajectory_registry.parquet"
 GLOBAL_CLEAN_REGISTRY = REGISTRIES_DIR / "global_clean_registry.parquet"
+GLOBAL_CLEAN_QUALITY_REGISTRY = REGISTRIES_DIR / "global_clean_quality_registry.parquet"
 GLOBAL_SIMULATION_REGISTRY = REGISTRIES_DIR / "global_simulation_registry.parquet"
 GLOBAL_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
 GLOBAL_CORRIDOR_SIM_REGISTRY = REGISTRIES_DIR / "global_corridor_simulation_registry.parquet"
@@ -65,7 +66,7 @@ DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
 # Pipeline Concurrency and Threading Defaults
 PROCESSING_DEFAULT_MAX_WORKERS: int = 4
 PROCESSING_NUMERIC_THREADS_PER_WORKER: int = 1
-PROCESSING_KALMAN_THREADS_PER_WORKER: int = 2
+PROCESSING_KALMAN_THREADS_PER_WORKER: int = 1
 WEATHER_IO_WORKERS: int = 2
 CORRIDOR_IO_THREADS: int = 4
 CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
@@ -138,7 +139,7 @@ STABILITY_MAX_RESAMPLE_ROUNDS = 3   # Hard cap: max resample rounds before forci
 
 # Clustering Hyperparameter Tuning Constants
 # Promoted from hardcoded literals in path_generator.py.
-CLUSTERING_MAX_K          = 4      # Maximum k to evaluate in Silhouette loop
+CLUSTERING_MAX_K          = 1      # Capped to 1 to produce single representative medoid per route
 SILHOUETTE_THRESHOLD      = 0.35   # Minimum silhouette score to accept k > 1
 CHAOS_VARIANCE_THRESHOLD  = 200.0  # Total coordinate variance above which k=1 is classified as Chaos
 MIN_FLIGHTS_FOR_CLUSTERING = 3     # Minimum cohort size; below this k=1 is forced
@@ -219,8 +220,8 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 DEFAULT_POSTFILTER_THRESHOLDS = {
     "max_horiz_velocity_kt":        650.0,   # max horizontal speed from gs          (kt)
     "max_vert_velocity_fpm":       7000.0,   # max vertical speed from rocd          (ft/min)
-    "max_coord_horiz_velocity_kt": 650.0,   # max horizontal coord-derived speed    (kt)
-    "max_coord_vert_velocity_fpm": 7000.0,  # max vertical coord-derived speed      (ft/min)
+    "max_coord_horiz_velocity_kt": 700.0,    # max horizontal coord-derived speed    (kt)
+    "max_coord_vert_velocity_fpm": 7000.0,   # max vertical coord-derived speed      (ft/min)
     "max_acceleration_mps2":         7.5,    # max 3D acceleration                   (m/s²)
 }
 
@@ -243,6 +244,17 @@ POSTFILTER_COL_ACCEL_PASS: str    = "acceleration_pass"
 POSTFILTER_COL_ACCEL_REASON: str  = "acceleration_reject_reason"
 POSTFILTER_COL_DISTANCE_PASS: str   = "distance_pass"
 POSTFILTER_COL_DISTANCE_REASON: str = "distance_reject_reason"
+
+# Clean Registry - Scalar Metric Feature Columns
+METRIC_COL_MAX_HORIZ_VEL: str       = "metric_max_horiz_speed_kt"
+METRIC_COL_MAX_VERT_VEL: str        = "metric_max_vert_speed_fpm"
+METRIC_COL_MAX_COORD_HORIZ_VEL: str = "metric_max_coord_horiz_speed_kt"
+METRIC_COL_MAX_COORD_VERT_VEL: str  = "metric_max_coord_vert_speed_fpm"
+METRIC_COL_MAX_ACCEL: str           = "metric_max_acceleration_mps2"
+METRIC_COL_DEP_HORIZ_DIST: str      = "metric_dep_horiz_dist_m"
+METRIC_COL_DEP_VERT_DIST: str       = "metric_dep_vert_dist_m"
+METRIC_COL_ARR_HORIZ_DIST: str      = "metric_arr_horiz_dist_m"
+METRIC_COL_ARR_VERT_DIST: str       = "metric_arr_vert_dist_m"
 # Legacy column names (written by the old 3-D combined velocity filters — now dropped from registry)
 _LEGACY_VELOCITY_COLS: list[str] = [
     "velocity_pass", "velocity_reject_reason",
