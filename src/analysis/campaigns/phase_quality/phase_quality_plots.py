@@ -68,7 +68,14 @@ def _extract_valid_coords_and_time(df_fl: pd.DataFrame) -> tuple[np.ndarray, np.
     """Extracts cleaned coordinates (lons, lats, alts, t_norm, phases) from a trajectory DataFrame."""
     lon_col = "lon" if "lon" in df_fl.columns else "longitude"
     lat_col = "lat" if "lat" in df_fl.columns else "latitude"
-    alt_col = "baroaltitude" if "baroaltitude" in df_fl.columns else ("geoaltitude" if "geoaltitude" in df_fl.columns else "altitude")
+    if "altitude" in df_fl.columns:
+        alt_col = "altitude"
+    elif "baroaltitude" in df_fl.columns:
+        alt_col = "baroaltitude"
+    else:
+        logger.error("SEVERE: Neither 'altitude' nor 'baroaltitude' found in trajectory! This indicates a Kalman filter failure or corrupted data.")
+        return None
+
     time_col = "time" if "time" in df_fl.columns else "timestamp"
 
     if not all(col in df_fl.columns for col in [lon_col, lat_col, alt_col]):
