@@ -218,9 +218,9 @@ DEFAULT_PREFILTER_THRESHOLDS = {
 
 # Default post-filter thresholds
 DEFAULT_POSTFILTER_THRESHOLDS = {
-    "max_horiz_velocity_kt":        650.0,   # max horizontal speed from gs          (kt)
+    "max_horiz_velocity_kt":        800.0,   # max horizontal speed from gs          (kt)
     "max_vert_velocity_fpm":       7000.0,   # max vertical speed from rocd          (ft/min)
-    "max_coord_horiz_velocity_kt": 700.0,    # max horizontal coord-derived speed    (kt)
+    "max_coord_horiz_velocity_kt": 800.0,    # max horizontal coord-derived speed    (kt)
     "max_coord_vert_velocity_fpm": 7000.0,   # max vertical coord-derived speed      (ft/min)
     "max_acceleration_mps2":         7.5,    # max 3D acceleration                   (m/s²)
 }
