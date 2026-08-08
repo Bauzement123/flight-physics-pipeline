@@ -4,13 +4,23 @@ import logging
 from src.common.utils import setup_file_logger
 from src.common.registry_utils import load_clean_cohort
 
+import argparse
+
 logger = logging.getLogger(__name__)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input-registry', type=str, help='Path to merged registry')
+    args = parser.parse_args()
+
     setup_file_logger(log_filename="calibration.log")
     logger.info("Starting Stage 3: Undirected Re-aggregation & Directional Stress Test")
 
-    df = load_clean_cohort(require_metrics=True)
+    if args.input_registry:
+        df = pd.read_parquet(args.input_registry)
+    else:
+        df = load_clean_cohort(require_metrics=True)
+        
     if df.empty:
         logger.error("Cohort registry is empty.")
         return

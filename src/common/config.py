@@ -139,7 +139,7 @@ STABILITY_MAX_RESAMPLE_ROUNDS = 3   # Hard cap: max resample rounds before forci
 CLUSTERING_MAX_K          = 1      # Capped to 1 to produce single representative medoid per route
 SILHOUETTE_THRESHOLD      = 0.35   # Minimum silhouette score to accept k > 1
 CHAOS_VARIANCE_THRESHOLD  = 200.0  # Total coordinate variance above which k=1 is classified as Chaos
-MIN_FLIGHTS_FOR_CLUSTERING = 3     # Minimum cohort size; below this k=1 is forced
+MIN_FLIGHTS_FOR_CLUSTERING = 10    # Minimum cohort size; below this k=1 is forced
 CORRIDOR_TIME_GRID_SECONDS = 60    # Temporal resolution of saved corridor parquets
 
 # Calibration Routes
