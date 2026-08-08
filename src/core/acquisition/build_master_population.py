@@ -93,7 +93,7 @@ def build_master_population(
     logging.info(f"Starting master population fetch: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
     
     # Define cache directories based on output_path or centralized database dir
-    cache_dir = MASTER_FLIGHTS_DB_DIR / "daily_cache"
+    cache_dir = MASTER_FLIGHTS_DB_DIR / f"daily_{output_path.stem}"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Unique prefix key strings to make caches param-specific
