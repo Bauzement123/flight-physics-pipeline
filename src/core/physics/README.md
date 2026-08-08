@@ -77,7 +77,7 @@ Module Objectives
 ```mermaid
 graph TD
     A["data/trajectories/<corridor>/clean/*_clean_si.parquet"] -->|1. Ingest clean flights| B(simulation.py)
-    C[data/weather/*.nc] -->|2. Crop to WEATHER_BOUNDS_BBOX| D[cropped MetDataset & MetDataArray]
+    C[data/weather/*.nc] -->|2. Crop to EUR_BBOX + WEATHER_PADDING| D[cropped MetDataset & MetDataArray]
     D -->|3. Load cropped dataset to RAM| E[In-memory weather cache]
     
     B -->|4. Pass flights to engine| F(engine.py: simulate_flights_parallel)
@@ -97,7 +97,7 @@ graph TD
 #### Step-by-Step Description: Standard Simulation
 1. **Trajectory Ingestion**: The standard simulation entrypoint in `simulation.py` reads EKF-cleaned flight trajectories (`*_clean_si.parquet`) from a specified file or folder.
 2. **Weather Timeframe Calculation**: The script dynamically scans the temporal bounds (min/max timestamps) of all flights to establish a weather query window, applying a 1-hour start buffer and a `max_age` (e.g., 48 hours) plus 1-hour end buffer.
-3. **Weather Loading & Spatial Slicing**: Using local cached ERA5 NetCDF files, the script opens the Pressure Level and Surface Level weather variables and crops them to the coordinates in `WEATHER_BOUNDS_BBOX` plus a 5.0-degree spatial padding buffer using `crop_met_dataset` in `engine.py`.
+3. **Weather Loading & Spatial Slicing**: Using local cached ERA5 NetCDF files, the script opens the Pressure Level and Surface Level weather variables and crops them to the coordinates in `EUR_BBOX` extended by the `WEATHER_PADDING` using `crop_met_dataset` in `engine.py`.
 4. **RAM Pre-loading**: Unless low-memory mode is active, the cropped datasets are eagerly loaded into system RAM (`.load()`) to speed up subsequent point calculations.
 5. **Parallel Batch Partitioning**: In `engine.py:simulate_flights_parallel`, the cohort is sliced into batch chunks (default: 50 flights) and evaluated in parallel via a `ThreadPoolExecutor`.
 6. **Aircraft Type Verification**: For each batch inside `engine.py:simulate_flight_batch`, aircraft typecodes are checked against the supported PSFlight aircraft list. Unsupported types are skipped and logged to `skipped_aircraft.log`.
@@ -114,7 +114,7 @@ graph TD
     A[data/flight_registry/master_flights.parquet] -->|1. Ingest flight schedules| B(clone_simulation.py)
     C[data/flight_registry/registries/global_model_registry.parquet] -->|2. Resolve synthesized base path| B
     D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_and_crop_weather]
-    E -->|4. Crop to WEATHER_BOUNDS_BBOX & load to RAM| F[Cached daily MetDatasets]
+    E -->|4. Crop to EUR_BBOX + WEATHER_PADDING & load to RAM| F[Cached daily MetDatasets]
     F -->|5. Concatenate days| G[In-memory 3-day weather window]
     
     B -->|6. Time-shift baseline path to schedule| H[Cloned Flight list]
@@ -152,7 +152,7 @@ graph TD
 To support simulation runs across a variety of hardware (from desktops with high RAM/CPU count to laptops with less than 1 GB of free RAM), the engine supports two distinct execution profiles:
 
 #### Standard Mode (High Performance)
-*   **Weather Dataset Loading**: The cropped weather datasets (covering `WEATHER_BOUNDS_BBOX` plus spatial padding) are fully loaded into RAM using `.load()` at the start of the cohort day. Slicing reduces the global grid down to a lightweight subset (under 400 MB), allowing fast memory access.
+*   **Weather Dataset Loading**: The cropped weather datasets (covering `EUR_BBOX` plus `WEATHER_PADDING`) are fully loaded into RAM using `.load()` at the start of the cohort day. Slicing reduces the global grid down to a lightweight subset (under 400 MB), allowing fast memory access.
 *   **Concurrency**: Batches of flights (default size: 50) are dispatched in parallel using a `ThreadPoolExecutor` (releasing Python's GIL inside NumPy/Pandas C-loops). 
 *   **RAM Safety**: Multiple threads read from the *same shared in-memory weather datasets*, ensuring weather grids are not duplicated in memory.
 *   **Streaming Write Safety**: Under parallel execution, the main thread serializes and evicts completed flight batches dynamically as workers finish them. This keeps peak RAM usage capped at only `max_workers` active batches (~200 flights across 4 threads) plus the weather dataset, regardless of total cohort size.

@@ -17,7 +17,9 @@ flowchart TD
         
         A2 --> M[master_merger.py]
         B2 --> M
-        M --> C[(master_flights.parquet)]
+        M --> M2["Merged Population (*_target_AirFrames.parquet)"]
+        
+        M2 -->|apply_bounds_and_filters.py| C[(master_flights.parquet)]
         
         C -->|build_route_summary.py| D[(master_flights_route_summary.parquet)]
     end
@@ -131,10 +133,13 @@ python -m src.core.acquisition.build_master_population --start-date 2025-01-01 -
 # 2. Build enriched aircraft fleet database
 python -m src.core.acquisition.fleet_builder
 
-# 3. Merge flight schedule and fleet databases into master_flights.parquet
+# 3. Merge flight schedule and fleet databases
 python -m src.core.acquisition.master_merger
 
-# 4. Generate geodesic route summary rankings and distance metrics
+# 4. Apply strict geographic bounding box and filters
+python -m src.core.acquisition.apply_bounds_and_filters
+
+# 5. Generate geodesic route summary rankings and distance metrics
 python -m src.core.acquisition.build_route_summary
 ```
 

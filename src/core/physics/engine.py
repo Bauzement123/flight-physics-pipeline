@@ -11,7 +11,7 @@ from pycontrails import Flight, MetDataset, Fleet
 from pycontrails.models.ps_model import PSFlight
 from pycontrails.models.cocip import Cocip
 from pycontrails.models.humidity_scaling import ConstantHumidityScaling
-from src.common.config import UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode
+from src.common.config import UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode, WEATHER_PADDING
 from src.common.utils import log_skipped_aircraft
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def crop_met_dataset(
     met: MetDataset, 
     bbox: list[float], 
-    pad: float = 5.0
+    pad: float = WEATHER_PADDING
 ) -> MetDataset:
     """
     Spatially crops an xarray-backed MetDataset to a bounding box [West, South, East, North]

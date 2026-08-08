@@ -26,7 +26,8 @@ from src.common.config import (
     ERA5_SURFACE_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS,
     ERA5_GRID,
-    WEATHER_BOUNDS_BBOX
+    EUR_BBOX,
+    WEATHER_PADDING
 )
 from src.common.utils import setup_file_logger, log_skipped_aircraft, to_registry_path
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel
@@ -109,9 +110,9 @@ def run_physics_pipeline(
     met = era5_pl.open_metdataset()
     rad = era5_sl.open_metdataset()
     
-    # Crop to WEATHER_BOUNDS_BBOX
-    met = crop_met_dataset(met, WEATHER_BOUNDS_BBOX)
-    rad = crop_met_dataset(rad, WEATHER_BOUNDS_BBOX)
+    # Crop to EUR_BBOX with padded meteorological buffer
+    met = crop_met_dataset(met, EUR_BBOX, pad=WEATHER_PADDING)
+    rad = crop_met_dataset(rad, EUR_BBOX, pad=WEATHER_PADDING)
     
     if not low_mem:
         logger.info("Loading weather datasets into RAM...")

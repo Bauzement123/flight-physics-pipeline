@@ -114,13 +114,12 @@ def is_supported_typecode(typecode: Any) -> bool:
     return tc_str in ALL_TARGET_FAMILIES
 
 
-# Geographic filtering limits (Padded European Bounding Box)
-# Recomputed from custom airport extent (LLRM, LTCF, ENAS, LPAZ/LPPD) with 5.0 degree padding
-# Base bounds: Lat [30.0, 80.0], Lon [-26.0, 45.0]
-EUR_LAT_MIN = 25.0
-EUR_LAT_MAX = 85.0
-EUR_LON_MIN = -31.0
-EUR_LON_MAX = 50.0
+# Geographic filtering limits (Strict European Airport Bounding Box)
+# Computed from custom airport extent (LLRM, LTCF, ENAS, LPAZ/LPPD)
+EUR_LAT_MIN = 30
+EUR_LAT_MAX = 79
+EUR_LON_MIN = -26
+EUR_LON_MAX = 44
 
 
 
@@ -192,9 +191,12 @@ ERA5_GRID = 0.5
 
 # --- Geographic Filtering Constants (European Bounding Box) ---
 # Encompasses edges: Azores (LPAZ/LPPD), Svalbard (ENAS), Turkey (LTCF), Israel (LLRM)
-# Built from base bounds Lat [30.0, 80.0], Lon [-26.0, 45.0]
-# west, south, east, north = [-26.0, 30.0, 45.0, 80.0]
-WEATHER_BOUNDS_BBOX = [-26.0, 30.0, 45.0, 80.0]
+# format: [west, south, east, north]
+EUR_BBOX = [EUR_LON_MIN, EUR_LAT_MIN, EUR_LON_MAX, EUR_LAT_MAX]
+
+# Padding (in degrees) to apply to the base EUR_BBOX when fetching/cropping weather 
+# data to ensure flights have sufficient meteorological buffer.
+WEATHER_PADDING = 10.0
 
 # Dynamic datasets and outcomes
 TRAJECTORIES_DIR = DATA_DIR / "trajectories"

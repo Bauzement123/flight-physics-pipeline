@@ -9,9 +9,11 @@ The `acquisition` module handles Track A (fetching flights from Trino), Track B 
 ```text
 src/core/acquisition/
 ├── build_master_population.py  # Queries Trino FlightsData4 (Track A)
-├── build_route_summary.py     # Generates & enriches master route summary directly from master_flights.parquet
+├── build_route_summary.py      # Generates & enriches master route summary directly from master_flights.parquet
 ├── fleet_builder.py            # Slices OpenAirframes & AircraftDB (Track B)
-├── master_merger.py            # Merges flight population and fleet registry into master_flights.parquet
+├── master_merger.py            # Merges flight population and fleet registry
+├── airport_extractor.py        # Extracts unique airports and fetches offline lat/lon cache
+├── apply_bounds_and_filters.py # Enforces EUR_BBOX geographic bounding filter
 └── README.md                   # This module documentation
 ```
 
@@ -50,7 +52,15 @@ Acquisition Module
 │   ├── Perform Inner Join on 'icao24' to align flights with fleet metadata
 │   ├── Validate typecodes against target families (`ALL_TARGET_FAMILIES`); drop and log invalid/NaN typecodes to `data/logs/skipped_aircraft.log`
 │   ├── Align and order schema with canonical columns
-│   └── Export final merged dataset (default: data/databases/master_flights/master_flights.parquet)
+│   └── Export final merged dataset (default: `ParentPopulation_*_target_AirFrames.parquet`)
+├── Extract Airports and Resolve Coordinates (airport_extractor.py)
+│   ├── Scan merged parquet for unique airports
+│   ├── Load existing cache and resolve missing airports via `ourairports.csv`
+│   └── Export `airport_coordinates.json`
+├── Apply Geographic Bounds & Filters (apply_bounds_and_filters.py)
+│   ├── Load `ParentPopulation_*_target_AirFrames.parquet` and airport cache
+│   ├── Filter flights strictly within `EUR_BBOX` from `config.py`
+│   └── Export canonical `master_flights.parquet`
 └── Build Route Summary (build_route_summary.py)
     ├── Load master_flights.parquet directly as single source of truth
     ├── Compute duration statistics per route (min, max, median, sum)
@@ -97,13 +107,22 @@ graph TD
     %% Merger Stage
     OutA --> Merge[master_merger.py]
     OutB --> Merge
-    Merge -->|Inner Join on icao24| OutM[data/databases/master_flights/master_flights.parquet]
+    Merge -->|Inner Join on icao24| OutM["*_target_AirFrames.parquet"]
+    
+    %% Bounding Box Filter
+    OutM --> Ext[airport_extractor.py]
+    Ext -->|Generate/Update Cache| Cache[airport_coordinates.json]
+    OutM --> FiltBox[apply_bounds_and_filters.py]
+    Cache --> FiltBox
+    FiltBox -->|EUR_BBOX Check| Final[data/databases/master_flights/master_flights.parquet]
 ```
 
 **Step-by-step:**
 1. **Track A (Flight Logs)**: `build_master_population.py` connects to Trino, iterates daily through `FlightsData4`, applies European airport prefix filters, deduplicates on `['icao24', 'firstseen']`, and saves `ParentPopulation_*.parquet`.
 2. **Track B (Fleet Preparation)**: `fleet_builder.py` streams OpenAirframes and OpenSky DBs in chunks, filters target typecodes, renames columns, performs an outer merge with cell-level coalescing, and exports `*_Enriched_Fleet.parquet`.
-3. **Merger Stage**: `master_merger.py` joins population and fleet records on `icao24`, drops unsupported airframes logging them to `skipped_aircraft.log`, and saves canonical `master_flights.parquet`.
+3. **Merger Stage**: `master_merger.py` joins population and fleet records on `icao24`, drops unsupported airframes logging them to `skipped_aircraft.log`, and saves `ParentPopulation_*_target_AirFrames.parquet`.
+4. **Coordinate Extraction**: `airport_extractor.py` scans the merged population for unique airports and updates `airport_coordinates.json` via local fallback datasets.
+5. **Geographic Filtering**: `apply_bounds_and_filters.py` enforces the `EUR_BBOX` from `config.py`, dropping out-of-bounds flights and generating the final canonical `master_flights.parquet`.
 
 ---
 
@@ -171,7 +190,19 @@ python -m src.core.acquisition.master_merger
 * **Parameters**:
   * `--flights`: Path to input flight population file. Auto-finds latest `ParentPopulation_*.parquet` if omitted.
   * `--fleet`: Path to input enriched fleet file. Auto-finds latest `*_Enriched_Fleet.parquet` if omitted.
-  * `--output`: Path to write final merged Parquet file (default: `data/databases/master_flights/master_flights.parquet`).
+  * `--output`: Path to write merged Parquet file (defaults to `ParentPopulation_*_target_AirFrames.parquet`).
+
+### Apply Geographic Bounding Box Filter
+```bash
+python -m src.core.acquisition.apply_bounds_and_filters
+```
+```powershell
+python -m src.core.acquisition.apply_bounds_and_filters
+```
+* **Parameters**:
+  * `--input`: Path to merged parquet file. Auto-finds latest `*_target_AirFrames.parquet`.
+  * `--output`: Path to output canonical parquet file (defaults to `master_flights.parquet`).
+  * `--no-bbox`: Disables the bounding box filter.
 
 ### Build Route Summary & Distance Enrichment
 ```bash

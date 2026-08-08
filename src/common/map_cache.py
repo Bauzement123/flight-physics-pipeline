@@ -56,8 +56,11 @@ class EuropeanMapCache:
                 for icao, pt in coords.items():
                     records.append({
                         "icao": icao,
-                        "lat": pt["lat"],
-                        "lon": pt["lon"]
+                        "lat": pt.get("lat"),
+                        "lon": pt.get("lon"),
+                        "is_icao_schema": pt.get("is_icao_schema", len(icao) == 4 and icao.isalpha()),
+                        "has_target_airframe": pt.get("has_target_airframe", True),
+                        "survived_bbox": pt.get("survived_bbox", True),
                     })
                 self.airports_df = pd.DataFrame(records)
                 logger.info(f"Loaded {len(self.airports_df)} airports from {AIRPORTS_CACHE_PATH.name}.")

@@ -24,7 +24,7 @@ from src.common.config import (
     BASE_DIR, WEATHER_DIR, RESULTS_DIR, MASTER_FLIGHTS_FILE,
     GLOBAL_CORRIDOR_SIM_REGISTRY,
     ERA5_PRESSURE_LEVEL_VARIABLES, ERA5_SURFACE_VARIABLES,
-    ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, WEATHER_BOUNDS_BBOX,
+    ERA5_REQUIRED_PRESSURE_LEVELS, ERA5_GRID, EUR_BBOX, WEATHER_PADDING,
     UNSUPPORTED_TYPECODE_FLAG, is_supported_typecode,
     WEATHER_IO_WORKERS
 )
@@ -293,7 +293,7 @@ def filter_cohort_flights(
 def _open_crop_and_load(era5_obj: ERA5, bbox: list[float], low_mem: bool) -> MetDataset:
     """Helper to open, crop, and conditionally load a single ERA5 dataset in a thread-safe manner."""
     met_ds = era5_obj.open_metdataset()
-    met_ds_cropped = crop_met_dataset(met_ds, bbox)
+    met_ds_cropped = crop_met_dataset(met_ds, bbox, pad=WEATHER_PADDING)
     if not low_mem:
         met_ds_cropped.data.load()
     return met_ds_cropped
@@ -537,7 +537,7 @@ def run_batch_clone_simulation(
                 start_time=weather_start,
                 end_time=weather_end,
                 weather_cache_dir=weather_cache,
-                bbox=WEATHER_BOUNDS_BBOX,
+                bbox=EUR_BBOX,
                 low_mem=low_mem
             )
         else:
@@ -565,7 +565,7 @@ def run_batch_clone_simulation(
                             start_time=nd,
                             end_time=nd + pd.Timedelta(hours=23),
                             weather_cache_dir=weather_cache,
-                            bbox=WEATHER_BOUNDS_BBOX,
+                            bbox=EUR_BBOX,
                             low_mem=low_mem
                         )
                         met_cache[nd] = met_day

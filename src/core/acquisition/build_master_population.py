@@ -17,12 +17,7 @@ except ImportError as e:
 
 from src.common.config import (
     MASTER_FLIGHTS_DB_DIR, 
-    DEFAULT_AIRPORT_PREFIXES, 
-    AIRPORTS_CACHE_PATH, 
-    EUR_LAT_MIN, 
-    EUR_LAT_MAX, 
-    EUR_LON_MIN, 
-    EUR_LON_MAX
+    DEFAULT_AIRPORT_PREFIXES
 )
 from src.common.utils import setup_file_logger
 
@@ -82,51 +77,12 @@ def fetch_daily_flights(trino_client, day_str, dep_prefixes, arr_prefixes):
 
     return fetch_daily_flights_with_backoff(trino_client, query, day_str)
 
-def apply_geographic_bbox_filter(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Filters flights in df using coordinates from AIRPORTS_CACHE_PATH and the
-    European bounding box limits in config.py.
-    """
-    if not AIRPORTS_CACHE_PATH.exists():
-        logging.warning(f"Airport coordinates cache not found at {AIRPORTS_CACHE_PATH}. Bounding box filtering skipped.")
-        return df
-
-    import json
-    import numpy as np
-    try:
-        with open(AIRPORTS_CACHE_PATH, "r", encoding="utf-8") as f:
-            airports_db = json.load(f)
-    except Exception as e:
-        logging.error(f"Failed to load airport coordinate cache: {e}. Bounding box filtering skipped.")
-        return df
-
-    initial_len = len(df)
-    
-    # Map coordinates
-    dep_lats = df['estdepartureairport'].map(lambda x: airports_db.get(x, {}).get('lat', np.nan))
-    dep_lons = df['estdepartureairport'].map(lambda x: airports_db.get(x, {}).get('lon', np.nan))
-    arr_lats = df['estarrivalairport'].map(lambda x: airports_db.get(x, {}).get('lat', np.nan))
-    arr_lons = df['estarrivalairport'].map(lambda x: airports_db.get(x, {}).get('lon', np.nan))
-
-    in_box_mask = (
-        (dep_lats.between(EUR_LAT_MIN, EUR_LAT_MAX)) &
-        (dep_lons.between(EUR_LON_MIN, EUR_LON_MAX)) &
-        (arr_lats.between(EUR_LAT_MIN, EUR_LAT_MAX)) &
-        (arr_lons.between(EUR_LON_MIN, EUR_LON_MAX))
-    )
-    
-    df_filtered = df[in_box_mask].copy()
-    dropped = initial_len - len(df_filtered)
-    logging.info(f"Geographic Bounding Box Filter complete. Dropped {dropped:,} of {initial_len:,} flights. Remaining: {len(df_filtered):,}")
-    return df_filtered
-
 def build_master_population(
     start_date: datetime,
     end_date: datetime,
     dep_prefixes: list,
     arr_prefixes: list,
     output_path: Path,
-    apply_bbox: bool = False,
     resume: bool = True
 ):
     """
@@ -235,9 +191,6 @@ def build_master_population(
     initial_len = len(df_all)
     df_all = df_all.drop_duplicates(subset=['icao24', 'firstseen'], keep='first')
     logging.info(f"Deduplication: dropped {initial_len - len(df_all)} duplicates. Remaining: {len(df_all)}")
-    
-    if apply_bbox:
-        df_all = apply_geographic_bbox_filter(df_all)
 
     # Save output (Support both CSV and Parquet depending on suffix)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,7 +217,6 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", default="2025-01-31", help="Inclusive end date (YYYY-MM-DD)")
     parser.add_argument("--dep_prefixes", default="", help="Comma-separated airport ICAO initials, empty = no filter")
     parser.add_argument("--arr_prefixes", default="", help="Comma-separated airport ICAO initials, empty = no filter")
-    parser.add_argument("--apply-bbox-filter", action="store_true", help="Apply European lat/lon bounding box filter after Trino fetch")
     parser.add_argument("--resume", action="store_true", help="Resume fetch using daily cache files, skipping completed days")
     parser.add_argument("--output", help="Path to save output (defaults to data/databases/master_flights/master_flights.parquet)")
 
@@ -288,6 +240,5 @@ if __name__ == "__main__":
         dep_prefix_list, 
         arr_prefix_list, 
         out_path, 
-        apply_bbox=args.apply_bbox_filter,
         resume=args.resume
     )

@@ -59,7 +59,8 @@ def main():
     if args.output:
         out_path = Path(args.output)
     else:
-        out_path = MASTER_FLIGHTS_DB_DIR / "master_flights.parquet"
+        stem = flights_path.stem
+        out_path = MASTER_FLIGHTS_DB_DIR / f"{stem}_target_AirFrames.parquet"
         
     logging.info(f"Using flights file: {flights_path}")
     if fleet_path:
