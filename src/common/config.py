@@ -5,13 +5,11 @@ from typing import Any
 from dataclasses import dataclass
 
 # Project root directory (resolved dynamically based on config.py location)
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-
-# Fallback to Google Drive G: path if running in the C: drive agent sandbox
-if BASE_DIR.drive.upper() == 'C:':
-    G_DRIVE_DIR = Path("G:/Meine Ablage/UNI/SS26/PythonPipeline - Kopie")
-    if G_DRIVE_DIR.exists():
-        BASE_DIR = G_DRIVE_DIR
+_env_base_dir = os.environ.get("FLIGHT_PIPELINE_BASE_DIR")
+if _env_base_dir:
+    BASE_DIR = Path(_env_base_dir).resolve()
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # Centralized data directory
 DATA_DIR = BASE_DIR / "data"
