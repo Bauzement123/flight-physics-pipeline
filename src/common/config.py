@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Project root directory (resolved dynamically based on config.py location)
 _env_base_dir = os.environ.get("FLIGHT_PIPELINE_BASE_DIR")
