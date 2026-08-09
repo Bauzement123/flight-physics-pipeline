@@ -11,6 +11,7 @@ It operates as **Loop 3a** of the Flight Physics Pipeline. It is decoupled from 
 ```text
 src/core/weather/
 ├── README.md                # This documentation file
+├── __init__.py              # Package initialization marker
 └── era5_manager.py          # Standalone modular weather downloader
 ```
 
@@ -28,13 +29,13 @@ Module Objectives
       │         └── Outputs: DiskCacheStore
       │
       ├── Sub-objective 2: Resiliently download CDS datasets with retry backoff
-      │    └── Solution: download_with_retry() in era5_manager.py
-      │         ├── Inputs: era5_client (ERA5), max_retries (int)
-      │         └── Role: Safely wraps client.download() in a retry loop to handle CDS API drops
+      │    └── Solution: retry_backoff() from src.common.utils (invoked in retrieve_dataset)
+      │         ├── Inputs: func (Callable), max_retries (int)
+      │         └── Role: Safely wraps era5_client.download() in a retry loop to handle CDS API drops
       │
       ├── Sub-objective 3: Retrieve reanalysis parameters & reactively self-heal cache
       │    └── Solution: retrieve_dataset() in era5_manager.py
-      │         ├── Inputs: time_bounds (tuple), variables (list), pressure_levels (list|int), cache_store (DiskCacheStore)
+      │         ├── Inputs: time_bounds (tuple), variables (list), pressure_levels (int|list[int]), cache_store (DiskCacheStore)
       │         └── Role: Manages cache checking; catches OSError from corrupt files, deletes them, and retries the check
       │
       └── Sub-objective 4: Orchestrate multi-dataset weather downloading
@@ -59,7 +60,7 @@ graph TD
     D -->|Cache Load Fails: OSError| F[Catch Error & Parse Path]
     F -->|Delete Corrupted File| G[Delete .nc File]
     G -->|Retry Check| D
-    D -->|Cache Misses Found| H[download_with_retry]
+    D -->|Cache Misses Found| H[retry_backoff]
     H -->|CDS API Request| I[(Copernicus Climate Data Store)]
     I -->|NetCDF Weather Data| H
     H -->|Write clean .nc file| J[data/weather/*.nc]
@@ -69,7 +70,7 @@ graph TD
 2. **Reactive Cache Checking**: The script queries the cache using the Pycontrails `list_timesteps_not_cached()` method.
    - **Normal execution**: Checks file availability on disk. If all files exist and are valid, it completes immediately.
    - **Self-Healing on Corruption**: If `list_timesteps_not_cached()` hits a corrupted NetCDF file, it raises an `OSError`. The script intercepts this exception, parses the file path from the error details using a regular expression, deletes the corrupted file, and retries checking the cache.
-3. **Resilient Download**: For any missing hours in the date range, the script requests the weather data from the Copernicus Climate Data Store (CDS). It executes the request through a retry loop to protect against timeouts and queue limits.
+3. **Resilient Download**: For any missing hours in the date range, the script requests the weather data from the Copernicus Climate Data Store (CDS). It executes the request using `retry_backoff()` from `src.common.utils` to protect against timeouts and queue limits.
 4. **Simulation Consumption**: The physics engine (`simulation.py`) loads the downloaded NetCDF files directly from the local cache folder, bypassing the CDS API entirely at simulation runtime.
 
 ---
@@ -104,10 +105,14 @@ python -m src.core.weather.era5_manager `
     --debug
 ```
 
-**Parameters**:
-* `--start` / `--end`: ISO timestamps (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`).
-* `--out-dir`: The target folder to store NetCDF cache files (defaults to `data/weather/`).
-* `--debug`: Enables verbose output for tracing cache checks and downloader status.
+### Parameter Reference
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--start` | `str` | Yes | N/A | Start date/time ISO string (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`). |
+| `--end` | `str` | Yes | N/A | End date/time ISO string (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`). |
+| `--out-dir` | `str` | No | `data/weather/` (`WEATHER_DIR`) | Directory path for caching downloaded NetCDF files. |
+| `--debug` | `flag` | No | `False` | Enables verbose `DEBUG` logging level for detailed diagnostic traces. |
 
 ---
 
@@ -135,6 +140,18 @@ Define the credentials as system environment variables:
 $env:CDSAPI_URL="https://cds.climate.copernicus.eu/api/v2"
 $env:CDSAPI_KEY="YOUR_CDS_API_KEY"
 ```
+
+### Configuration Constants
+
+The weather downloader imports centralized configuration settings from [`src/common/config.py`](../../common/config.py):
+
+| Constant | Type | Value / Default | Description |
+|---|---|---|---|
+| `WEATHER_DIR` | `Path` | `data/weather/` | Default local directory path for NetCDF cache storage. |
+| `ERA5_PRESSURE_LEVEL_VARIABLES` | `list[str]` | `["air_temperature", ...]` | 3D atmospheric variables required for flight physics. |
+| `ERA5_SURFACE_VARIABLES` | `list[str]` | `["top_net_solar_radiation", ...]` | 2D surface radiation variables required for contrail modeling. |
+| `ERA5_REQUIRED_PRESSURE_LEVELS` | `list[int]` | `[900, 850, ..., 150]` | Standard pressure level grid (hPa) for vertical profiling. |
+| `ERA5_GRID` | `float` | `0.5` | ECMWF reanalysis spatial grid resolution in degrees. |
 
 ### Logging
 

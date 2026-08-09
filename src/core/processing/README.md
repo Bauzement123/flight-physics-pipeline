@@ -172,8 +172,9 @@ Module Objective
        ├── Sub-objective 2 — Multi-process worker pool initialization
        │    ├── Input : thresholds dictionary, spawn context
        │    ├── Solution : postfilter_worker.py::_worker_init()
-       │    │              Pre-loads airportsdata into process-level memory, configures log handler
-       │    └── Output : process-level globals initialized across pool worker interpreters
+       │    │              Pre-loads airport coordinate cache into process-level memory via resolve_airport_coordinates([]),
+       │    │              configures log handler
+       │    └── Output : process-level globals (_AIRPORTS) initialized across pool worker interpreters
        │
        ├── Sub-objective 3 — Dataclass tracking & sanitization
        │    ├── Input : flight_id, file_path, and filter pass fields
@@ -181,12 +182,13 @@ Module Objective
        │    │              __post_init__() enforces pre-check; as_dict() enforces post-check sanitization + warnings
        │    └── Output : standardized dictionary data structure mapping outcome columns
        │
-       ├── Sub-objective 4 — Batch execution & atomic temporary parquet flush
+       ├── Sub-objective 4 — Batch execution & atomic incremental quality registry update
        │    ├── Input : FilterResult stubs, chunk size, filters_to_run
        │    ├── Solution : postfilter_orchestrator.py::run_postfilters()
        │    │              Splits stubs into batches, invokes pool, merges outcomes back to in-memory df,
-       │    │              overwrites global_clean_registry.tmp.parquet after each batch
-       │    └── Output : global_clean_registry.parquet updated on success; tmp snapshot deleted
+       │    │              flushes temporary snapshot file, evaluates thresholds vectorized,
+       │    │              and incrementally merges quality metrics into GLOBAL_CLEAN_QUALITY_REGISTRY (keep='last')
+       │    └── Output : global_clean_quality_registry.parquet updated incrementally; tmp snapshot deleted
 ```
 
 ---
@@ -263,30 +265,30 @@ flowchart TD
     F -->|No| H["Process all target flights unconditionally"]
     G --> I["Partition remaining flights into batches of size N"]
     H --> I
-    I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer loads airportsdata once per worker process"]
-    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\nextract_horiz_velocity_metric (gs kt)\nextract_vert_velocity_metric (rocd fpm)\nextract_coord_horiz_velocity_metric (Haversine kt)\nextract_coord_vert_velocity_metric (coord alt-diff fpm)\nextract_acceleration_metric (3D m/s²)\nextract_distance_metrics (airport proximity)\nReturn list of updated FilterResult stubs containing scalar metrics"]
-    K --> L["Main process: future as_completed\nMerge extracted metrics back to index of in-memory DataFrame\nEvaluate thresholds vectorized to determine boolean pass/fail\nFlush full DataFrame to global_clean_registry.tmp.parquet"]
-    L --> M["Final step: overwrite original global_clean_registry.parquet\nDelete .tmp.parquet snapshot"]
+    I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer preloads airport coordinate cache via resolve_airport_coordinates([])"]
+    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\nextract_horiz_velocity_metric (gs kt)\nextract_vert_velocity_metric (rocd fpm)\nextract_coord_horiz_velocity_metric (haversine_distance_m kt)\nextract_coord_vert_velocity_metric (coord alt-diff fpm)\nextract_acceleration_metric (3D m/s²)\nextract_distance_metrics (O(1) _AIRPORTS lookup with cache-miss fallback)\nReturn list of updated FilterResult stubs containing scalar metrics"]
+    K --> L["Main process: future as_completed\nMerge extracted metrics back to index of in-memory DataFrame\nEvaluate thresholds vectorized to determine boolean pass/fail\nFlush temporary snapshot to global_clean_quality_registry.tmp.parquet"]
+    L --> M["Final step: incremental merge into global_clean_quality_registry.parquet\n(keep='last' on flight_id) & delete .tmp.parquet snapshot"]
 ```
 
 **Step-by-step:**
 
 1. **CLI Ingestion**: `postfilter_cli.py` invokes `setup_file_logger("processing.log")` and parses parameters, including `--filters` list and corridor constraints.
-2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory and sets the index to `flight_id` for efficient in-place updates. **Legacy columns** (`velocity_pass`, `velocity_reject_reason`, `coordinate_velocity_pass`, `coordinate_velocity_reject_reason`) are automatically dropped if present, then the 8 new split-axis pass/reason columns and their respective scalar metric columns (`metric_max_horiz_vel`, etc.) are added as `pd.NA` where missing.
+2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory via `load_clean_cohort(require_metrics=True)` and sets the index to `flight_id` for efficient in-place updates. **Legacy columns** (`velocity_pass`, `velocity_reject_reason`, `coordinate_velocity_pass`, `coordinate_velocity_reject_reason`) are automatically dropped if present, then the 8 new split-axis pass/reason columns and their respective scalar metric columns (`metric_max_horiz_vel`, etc.) are added as `pd.NA` where missing.
 3. **Target Scope & Overwrite Logic**: For each target flight:
    - If `--overwrite` is specified, it is processed unconditionally.
    - If `--overwrite` is not specified, the flight is processed if any required scalar metric columns are `pd.NA`.
-4. **Child Process Initializer**: The process pool launches under the `"spawn"` context. Its initializer `_worker_init` loads the `airportsdata` database once and caches it in a process-level global, avoiding redundant I/O during distance checks.
+4. **Child Process Initializer**: The process pool launches under the `"spawn"` context. Its initializer `_worker_init` preloads the complete airport coordinate cache into process memory once via `resolve_airport_coordinates([])`, avoiding redundant JSON cache file parsing during distance checks. Per-batch lookup is an O(1) in-process dict lookup with fallback to `resolve_airport_coordinates(cache_miss)` only for true cache misses.
 5. **Parallel Batch Filtering**: Workers load each `_clean_si.parquet` file via its absolute path. The worker extracts scalar metrics from the trajectory using pure metric extractors:
    - `extract_horiz_velocity_metric()`: Computes maximum `gs` (ground speed, m/s → kt).
    - `extract_vert_velocity_metric()`: Computes maximum absolute `rocd` (m/s → fpm).
-   - `extract_coord_horiz_velocity_metric()`: Computes step-to-step Haversine horizontal speed from coordinates (m/s → kt).
+   - `extract_coord_horiz_velocity_metric()`: Computes step-to-step horizontal speed using `haversine_distance_m()` from `src.common.utils` (m/s → kt).
    - `extract_coord_vert_velocity_metric()`: Computes step-to-step vertical speed from altitude differences (m/s → fpm).
    - `extract_acceleration_metric()`: Computes 3D step-to-step acceleration from ground speed and vertical rate (m/s²).
-   - `extract_distance_metrics()`: Computes absolute horizontal and vertical deviations from origin/destination airport coordinates.
+   - `extract_distance_metrics()`: Computes absolute horizontal and vertical deviations from origin/destination airport coordinates using O(1) in-process cache lookups.
 6. **Double-Sanitization**: Dataclass attributes are sanitized during instantiation (`__post_init__`) and again upon export (`as_dict()`). Any non-numeric/non-NA metric value is replaced with `pd.NA` and logged as a warning.
-7. **Threshold Evaluation & Atomic Parquet Snapshot Flush**: As each batch future resolves, the orchestrator merges the extracted scalar metrics into the master in-memory DataFrame. The orchestrator then performs a **vectorized threshold evaluation** (`evaluate_thresholds()`) on the scalar metrics to determine the boolean `pass`/`reject_reason` columns, immediately saving a full registry copy to `global_clean_registry.tmp.parquet`.
-8. **Finalization**: On successful completion, the original registry is safely overwritten with the complete data, and the temporary snapshot is deleted. On crash, the `.tmp.parquet` remains for diagnostic recovery.
+7. **Threshold Evaluation & Parquet Snapshot Flush**: As each batch future resolves, the orchestrator merges the extracted scalar metrics into the master in-memory DataFrame. The orchestrator then performs a **vectorized threshold evaluation** (`evaluate_thresholds()`) on the scalar metrics to determine the boolean `pass`/`reject_reason` columns, saving a temporary snapshot copy to `global_clean_quality_registry.tmp.parquet`.
+8. **Incremental Registry Flush & Finalization**: On completion, `quality_cols` (excluding `file_path`) are extracted. If `GLOBAL_CLEAN_QUALITY_REGISTRY` (`global_clean_quality_registry.parquet`) exists, existing entries are merged with newly computed metrics via `pd.concat` and `drop_duplicates(subset=['flight_id'], keep='last')`. The updated DataFrame is saved to disk and the temporary snapshot file is unlinked.
 
 ---
 
@@ -486,7 +488,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `traffic` (`Flight`, `EKF`, `ProcessXYZZFilterBase`, `rts_smoother`) | EKF Jacobians (`EKF.jacobian_state_transition`, `EKF.state_transition_function`), state preprocessing / postprocessing (`ProcessXYZZFilterBase`), RTS backward smoother (`rts_smoother`) |
 | `openap.phase.FlightPhase` | Primary aerodynamic flight phase labelling (`CL`, `CR`, `DE`, …); ROCD-threshold fallback if unavailable |
 | `pycontrails` | `pycontrails.Flight` SI containers; consumed and produced by `clean_pycontrails_flight()` |
-| `airportsdata` | Airport metadata registry database, resolved in worker process memory cache for distance filter checks |
+| `src.common.utils` (`resolve_airport_coordinates`, `haversine_distance_m`) | Airport coordinate cache resolution/preloading (O(1) in-process dict lookup in workers) and vectorised Haversine distance calculations |
 
 ### Config Constants (`src.common.config`)
 
@@ -494,7 +496,8 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | :--- | :--- | :--- |
 | `BASE_DIR` | `pathlib.Path` | Workspace root; used to construct all absolute paths and compute registry-relative path strings |
 | `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Default temporal resolution of the injected uniform time grid when no CLI or programmatic override is specified |
-| `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Registry file mapping cleaned trajectory paths; contains `flight_id` and `file_path` |
+| `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Core clean flight locator: maps `flight_id` to relative clean trajectory `file_path` |
+| `GLOBAL_CLEAN_QUALITY_REGISTRY` | `Path` → `data/registries/global_clean_quality_registry.parquet` | Quality registry file mapping post-filter quality metrics, pass/fail flags, and reject reasons |
 | `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 | `POSTFILTER_BATCH_SIZE_DEFAULT` | `200` (int) | Default batch size of stubs evaluated per worker process during post-filtering |
@@ -521,7 +524,8 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 
 | File | Access | Description |
 | :--- | :--- | :--- |
-| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight mapping: contains `flight_id`, `file_path`, the 8 scalar metric columns (`metric_*`), and the 12 boolean/reason post-filter columns (4 velocity axes + acceleration + distance). Legacy 3-D combined velocity columns are automatically dropped on first post-filter run. |
+| `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight index: maps `flight_id` to relative clean trajectory `file_path`. |
+| `data/registries/global_clean_quality_registry.parquet` (`GLOBAL_CLEAN_QUALITY_REGISTRY`) | **Written / Read** | Post-filter quality manifest: stores scalar feature metrics (`metric_*`), 4-axis velocity pass/reason flags, acceleration pass/reason, and distance pass/reason indexed by `flight_id`. Updated incrementally with duplicate resolution (`keep='last'`). |
 | `data/registries/global_ekf_diag_registry.parquet` (`GLOBAL_EKF_DIAG_REGISTRY`) | **Written** | EKF diagnostics index: maps `flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, and `ekf_max_trace_p`. |
 | `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
 | `data/logs/processing.log` | **Written** | All `logging` output from EKF smoothing (`kalman_filter.py`) and post-filtering (`postfilter_cli.py`) runs. |

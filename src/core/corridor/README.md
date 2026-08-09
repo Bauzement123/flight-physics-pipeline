@@ -30,13 +30,13 @@ Module Objectives
  │    │
  │    ├── Sub-objective 1.1: CLI Scoping & Configuration Parsing
  │    │    └── Solution: corridor_clustering_cli.py
- │    │         ├── Inputs: CLI flags (--ranks, --rank-range, --routes, --require-pass, --threads-per-worker, --max-workers, --overwrite, --batch-size)
+ │    │         ├── Inputs: CLI flags (--ranks, --rank-range, --routes, --require-pass, --threads-per-worker, --max-workers, --overwrite, --batch-size, --metric)
  │    │         └── Outputs: Configures logging and invokes the corridor clustering orchestrator
  │    │
  │    ├── Sub-objective 1.2: Route Resolution & Batch Registration (Orchestration)
  │    │    └── Solution: corridor_clustering_orchestrator.py
  │    │         ├── Inputs: Target corridors, clean trajectory registry (global_clean_registry.parquet)
- │    │         └── Outputs: Batch updates to global_model_registry.parquet and global_flight_cluster_map.parquet
+ │    │         └── Outputs: Batch updates to global_corridor_model_registry.parquet and global_flight_cluster_map.parquet
  │    │
  │    ├── Sub-objective 1.3: Worker Task Coordination & Template Generation (Worker)
  │    │    └── Solution: corridor_clustering_worker.py
@@ -80,7 +80,7 @@ Module Objectives
 ```mermaid
 graph TD
     A[data/databases/master_flights/master_flights_route_summary.parquet] -->|1. Resolve target route ranks| B(corridor_clustering_orchestrator.py)
-    C[data/registries/global_model_registry.parquet] -->|2. Check existing routes unless overwrite| B
+    C[data/registries/global_corridor_model_registry.parquet] -->|2. Check existing routes unless overwrite| B
     D[data/registries/global_clean_registry.parquet] -->|3. Load clean trajectory registry| B
     
     B -->|4. Filter cohort rows by require_pass| E[Cohort Pre-filtering]
@@ -102,12 +102,12 @@ graph TD
     
     G -->|14. Return worker result dict| P[Main Thread Registry Flush]
     O -->|15. Register corridor files| P
-    P -->|16. Save model metadata & flight mapping| Q[global_model_registry.parquet & global_flight_cluster_map.parquet]
+    P -->|16. Save model metadata & flight mapping| Q[global_corridor_model_registry.parquet & global_flight_cluster_map.parquet]
 ```
 
 #### Step-by-Step Description:
 1. **Target Route Resolution**: The orchestrator receives target corridor specifications from the CLI (specific ranks, rank ranges, or explicit `DEP-ARR` route strings) and resolves them to route pairs using traffic volume ranks in `master_flights_route_summary.parquet`.
-2. **Model Registry Check**: If `--overwrite` is `False`, the orchestrator loads `global_model_registry.parquet` and excludes any routes that have already been processed.
+2. **Model Registry Check**: If `--overwrite` is `False`, the orchestrator loads `global_corridor_model_registry.parquet` and excludes any routes that have already been processed.
 3. **Clean Registry Load**: The orchestrator loads the central trajectory tracking file `global_clean_registry.parquet` once into memory.
 4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`horiz_velocity_pass`, `vert_velocity_pass`, `coord_horiz_velocity_pass`, `coord_vert_velocity_pass`, `acceleration_pass`, `distance_pass`).
 5. **Minimum Cohort Threshold Verification**: The orchestrator counts qualifying flights per cohort. If a route has fewer than `MIN_FLIGHTS_FOR_CLUSTERING` valid flights (threshold value configured in [`src/common/config.py`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py#L144)), it is skipped with a warning.
@@ -121,7 +121,7 @@ graph TD
 13. **Time-Shifting and Interpolation**: Valid medoid DataFrames are converted to PyContrails `Flight` structures, resampled to a uniform 60s temporal grid (`CORRIDOR_TIME_GRID_SECONDS`), and shifted to start precisely at baseline timestamp `2025-01-01 00:00:00 UTC`.
 14. **Corridor Template Output**: Synthesized corridor template parquets are saved to `data/corridor_paths/{DEP}-{ARR}_corridor_c{cluster_id}.parquet`.
 15. **Main Thread Result Collection**: Completed worker result dictionaries (containing corridor file paths, cluster sizes, silhouette scores, and flight cluster mappings) are returned to the main process.
-16. **Batch Registry Update**: When `batch_size` (default 50) completed routes accumulate (or upon final campaign completion), the main thread flushes records to `global_model_registry.parquet` and `global_flight_cluster_map.parquet`.
+16. **Batch Registry Update**: When `batch_size` (default 50) completed routes accumulate (or upon final campaign completion), the main thread flushes records to `global_corridor_model_registry.parquet` and `global_flight_cluster_map.parquet`.
 
 ---
 
@@ -281,7 +281,7 @@ python -m src.core.corridor.stability_orchestrator `
 ### Python Libraries
 * `pandas` & `pyarrow` (Parquet table storage and fast registry I/O)
 * `numpy` & `scipy` (Numerical array operations, interpolation, and matrix linear algebra)
-* `scikit-learn` & `scikit-learn-extra` (`PCA`, `KMedoids`, `silhouette_score` metric evaluation)
+* `scikit-learn` & `pyclustering` (`PCA`, `KMedoids` via `pyclustering.cluster.kmedoids`, `silhouette_score` metric evaluation)
 * `pycontrails` (`Flight` data structures, spatial resampling, and time-grid interpolation)
 * `traffic` (`TrafficFlight` trajectory handling and airborne phase filtering)
 
@@ -292,7 +292,7 @@ python -m src.core.corridor.stability_orchestrator `
 | `BASE_DIR` | `Path` | Root directory of the repository workspace. |
 | `GLOBAL_CLEAN_REGISTRY` | `Path` | Parquet registry tracking cleaned flight trajectories (`global_clean_registry.parquet`). |
 | `GLOBAL_TRAJECTORY_REGISTRY` | `Path` | Central trajectory registry (`global_trajectory_registry.parquet`). |
-| `GLOBAL_MODEL_REGISTRY` | `Path` | Registry recording corridor clustering model metrics (`global_model_registry.parquet`). |
+| `GLOBAL_CORRIDOR_MODEL_REGISTRY` | `Path` | Registry recording corridor clustering model metrics (`global_corridor_model_registry.parquet`). |
 | `GLOBAL_FLIGHT_CLUSTER_MAP` | `Path` | Registry mapping historical flights to assigned cluster IDs (`global_flight_cluster_map.parquet`). |
 | `GLOBAL_STABILITY_REGISTRY` | `Path` | Registry storing Stage 2 stability metric results (`global_stability_registry.parquet`). |
 | `CORRIDOR_PATHS_DIR` | `Path` | Directory where synthesized 4D medoid parquet files are saved (`data/corridor_paths/`). |
@@ -318,7 +318,7 @@ python -m src.core.corridor.stability_orchestrator `
 
 ### Output Files
 * `data/corridor_paths/{DEP}-{ARR}_corridor_c{cluster_id}.parquet` (Synthesized corridor templates)
-* `data/registries/global_model_registry.parquet` (Corridor model metadata)
+* `data/registries/global_corridor_model_registry.parquet` (Corridor model metadata)
 * `data/registries/global_flight_cluster_map.parquet` (Flight-to-cluster mappings)
 * `data/registries/global_stability_registry.parquet` (Stability metrics database)
 

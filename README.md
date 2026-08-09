@@ -72,7 +72,7 @@ flowchart TD
         
         F3 --> F4["Synthesized Centroids / Medoids"]
         F3 --> F5[(GLOBAL_FLIGHT_CLUSTER_MAP)]
-        F4 -->|Update| F6[(GLOBAL_MODEL_REGISTRY)]
+        F4 -->|Update| F6[(GLOBAL_CORRIDOR_MODEL_REGISTRY)]
     end
 
     subgraph Physics_Simulation ["5. Clone Simulation"]

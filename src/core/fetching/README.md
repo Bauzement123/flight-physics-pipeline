@@ -37,10 +37,10 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │         └── Safety behavior: Default field initialization and structured summary serialization
  │
   ├── Sub-objective: Prepare and filter flight cohorts in memory
- │    └── Solution: helpers.py::load_master_flights_for_route(), apply_flight_filters(), _apply_metadata_prefilters()
+ │    └── Solution: helpers.py::load_master_flights_for_route(), apply_flight_filters(), _apply_metadata_prefilters(), _get_route_summary_cache()
  │         ├── Inputs: dep, arr, flight_source (default: MASTER_FLIGHTS_FILE), start_date, end_date, typecode
  │         ├── Outputs: Filtered pd.DataFrame of candidate flight records
- │         ├── Config constants: MASTER_FLIGHTS_FILE, DEFAULT_PREFILTER_THRESHOLDS, ROUTE_SUMMARY_PARQUET
+ │         ├── Config constants & helpers: MASTER_FLIGHTS_FILE, DEFAULT_PREFILTER_THRESHOLDS, ROUTE_SUMMARY_PARQUET, src.common.utils::load_route_summary()
  │         ├── Metadata prefilters: airport candidate distances/counts and route-duration deviation thresholds
  │         └── Safety behavior: Returns empty DataFrame if source is missing or no flights match criteria; logs skipped unsupported typecodes to skipped_aircraft.log
 
@@ -88,31 +88,32 @@ Module Objective: Acquire raw OpenSky trajectory waypoints for selected flight c
  │              └── Step 3 (Trino Query): Lazily initializes pyopensky Trino client only on cache miss;
  │                  restores firstseen and lastseen schedule metadata columns onto fetched DataFrames
  │
- ├── Sub-objective: Incrementally update route-level consolidated backups (FUSE-safe)
- │    └── Solution: opensky_fetcher.py::update_raw_concat()
- │         ├── Inputs: Concat file path, list of newly fetched/recovered DataFrames
- │         ├── Outputs: Updated <route>_all_raw.parquet file written via write_parquet_atomic()
- │         ├── Config constants: RAW_CONCAT_SUFFIX
- │         └── Safety behavior: Deduplicates against existing flight_ids before appending and writing atomically
- │
- ├── Sub-objective: Extract target routes and calculate sample quotas
- │    └── Solution: src.common.utils::extract_target_routes() & fetcher_orchestrator.py::compute_fetch_targets()
- │         ├── Inputs: RouteSummary parquet, rank bounds/list, strategy, value, date/typecode filters
- │         ├── Outputs: Execution plan list containing per-corridor sample targets and flight_source paths
- │         ├── Config constants: ROUTE_SUMMARY_PARQUET, MIN_DISTANCE_KM, MASTER_FLIGHTS_FILE
- │         └── Safety behavior: Evaluates filters in-memory; skips corridors with zero post-filter capacity
- │
- └── Sub-objective: Orchestrate batch fetching across ranked corridors
-      └── Solution: fetcher_orchestrator.py::run_batch()
-           ├── Inputs: Execution plan, run_id, seed, filtering arguments, resume flag
-           ├── Outputs: Route-level trajectory datasets, run manifests, and orchestrator summary manifest
-           ├── Config constants: TRAJECTORIES_DIR, FETCH_RUNS_DIRNAME, GLOBAL_TRAJECTORY_REGISTRY
-           └── Safety behavior:
-                ├── Passes pre-computed flight records directly to worker to avoid re-reading master_flights.parquet
-                ├── Worker handles atomic route-level concat updates internally per corridor
-                ├── Explicit gc.collect() prevents memory leaks over thousands of batch iterations
-                ├── Resume mode: Only skips corridors whose manifest explicitly records success=True
-                └── Catches corridor-level exceptions without aborting the batch pipeline
+  ├── Sub-objective: Incrementally update route-level consolidated backups (FUSE-safe)
+  │    └── Solution: opensky_fetcher.py::update_raw_concat()
+  │         ├── Inputs: Concat file path, list of newly fetched/recovered DataFrames
+  │         ├── Outputs: Updated <route>_all_raw.parquet file written via write_parquet_atomic()
+  │         ├── Config constants: RAW_CONCAT_SUFFIX
+  │         └── Safety behavior: Deduplicates against existing flight_ids before appending and writing atomically
+  │
+  ├── Sub-objective: Extract target routes and calculate sample quotas
+  │    └── Solution: src.common.utils::extract_target_routes() (via split_route_string()) & fetcher_orchestrator.py::compute_fetch_targets(), _plan_route()
+  │         ├── Inputs: RouteSummary parquet, rank bounds/list, strategy, value, date/typecode filters
+  │         ├── Outputs: Execution plan list containing per-corridor sample targets, records, and route output paths (`TRAJECTORIES_DIR / route_dir_name`)
+  │         ├── Config constants: ROUTE_SUMMARY_PARQUET, MIN_DISTANCE_KM, MASTER_FLIGHTS_FILE
+  │         └── Safety behavior: Evaluates filters in-memory; skips corridors with zero post-filter capacity; formats output directory using `route_dir_name = f"{dep}-{arr}"` (omitting legacy `rank_NNN_` prefix)
+  │
+  └── Sub-objective: Orchestrate batch fetching across ranked corridors
+       └── Solution: fetcher_orchestrator.py::run_batch()
+            ├── Inputs: Execution plan, run_id, seed, filtering arguments, resume flag
+            ├── Outputs: Route-level trajectory datasets (in `TRAJECTORIES_DIR / {dep}-{arr}`), run manifests, and orchestrator summary manifest
+            ├── Config constants: TRAJECTORIES_DIR, FETCH_RUNS_DIRNAME, GLOBAL_TRAJECTORY_REGISTRY
+            └── Safety behavior:
+                 ├── Passes pre-computed flight records directly to worker to avoid re-reading master_flights.parquet
+                 ├── Sets per-corridor output directory `route_dir_name = f"{dep}-{arr}"` (`TRAJECTORIES_DIR / {dep}-{arr}`)
+                 ├── Worker handles atomic route-level concat updates internally per corridor
+                 ├── Explicit gc.collect() prevents memory leaks over thousands of batch iterations
+                 ├── Resume mode: Only skips corridors whose manifest explicitly records success=True
+                 └── Catches corridor-level exceptions without aborting the batch pipeline
 ```
 
 ---
@@ -253,13 +254,13 @@ flowchart TD
     Init --> Validate["Validate mutually exclusive rank args & seed range"]
     Validate --> RunID["generate_dataset_name(): Create dynamic run_id"]
 
-    RunID --> LoadSummary["src.common.utils::extract_target_routes(): Load ROUTE_SUMMARY_PARQUET"]
+    RunID --> LoadSummary["src.common.utils::extract_target_routes(): Load ROUTE_SUMMARY_PARQUET via load_route_summary()"]
     LoadSummary --> RankFilter["Filter by explicit --ranks or --lower-rank/--upper-rank"]
     RankFilter --> DistFilter["Filter by --min-distance (default: MIN_DISTANCE_KM = 0 km)"]
     DistFilter --> FormatCheck{"--format roundtrip?"}
 
     FormatCheck -->|Yes| ResolveReturn["_resolve_roundtrip_routes(): Append inverse ARR->DEP routes"]
-    FormatCheck -->|No| SplitRoutes["Split route strings into dep and arr"]
+    FormatCheck -->|No| SplitRoutes["Split route strings via split_route_string() into dep and arr"]
     ResolveReturn --> SplitRoutes
 
     SplitRoutes --> RoutesExist{"Target routes found?"}
@@ -303,12 +304,12 @@ flowchart TD
 **Step-by-step Walkthrough:**
 1. **Entrypoint & Initialization**: Calls `init_runtime()` then `setup_file_logger("fetching.log")`. Validates mutually exclusive CLI options (`--ranks` vs `--lower-rank`/`--upper-rank`) and seed bounds.
 2. **Dynamic Namespace Generation**: Generates a standardized dataset identifier using `generate_dataset_name()`, which serves as the aggregate `run_id` for checkpoints and directory structures.
-3. **Route Extraction**: `src.common.utils::extract_target_routes()` reads `ROUTE_SUMMARY_PARQUET`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 0 km).
+3. **Route Extraction**: `src.common.utils::extract_target_routes()` loads `ROUTE_SUMMARY_PARQUET` via `load_route_summary()`, parses departure and arrival airport codes using `split_route_string()`, filters corridors by rank bounds or explicit rank indices, and enforces `--min-distance` (defaulting to `MIN_DISTANCE_KM` = 0 km).
 4. **Roundtrip Resolution**: If `--format roundtrip` is requested, `_resolve_roundtrip_routes()` (in `src.common.utils`) identifies all inverse return paths (`ARR -> DEP`) in the master summary and appends them to the target corridor list without duplication.
-5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` loads flights directly from `--flight-source` into memory and applies date, aircraft typecode, and `DEFAULT_PREFILTER_THRESHOLDS` metadata filters. This in-memory evaluation ensures that sample quotas are calculated against actual post-filter capacity rather than raw pre-filter totals.
+5. **In-Memory Quota Calculation**: For each candidate route, `compute_fetch_targets()` calls `_plan_route()` to load flights directly from `--flight-source` into memory and apply date, aircraft typecode, and `DEFAULT_PREFILTER_THRESHOLDS` metadata filters. Target trajectory directories are assigned using `route_dir_name = f"{dep}-{arr}"` (`TRAJECTORIES_DIR / route_dir_name`, e.g. `data/trajectories/EDDF-EGLL/`), omitting the legacy `rank_NNN_` folder prefix format.
 6. **Strategy Application**: `_calculate_target_quota()` computes the sample target based on `--strategy`: `fixed` → `min(int(value), capacity)`, `percent` → `min(ceil(capacity * value / 100.0), capacity)`, `all` → `capacity`.
 7. **Plan Display**: `print_batch_plan()` outputs a clean table to the console detailing every planned corridor, its rank, requested sample size, and total available capacity.
-8. **Sequential Batch Execution**: `run_batch()` iterates through the execution plan sequentially, calling `fetch_trajectories(..., update_concat=True)` for each corridor and passing the pre-computed `records` array. The worker handles its own route-level concatenation and FUSE-safe atomic file swapping internally. After each corridor completes, explicit memory cleanup is performed via `gc.collect()`.
+8. **Sequential Batch Execution**: `run_batch()` iterates through the execution plan sequentially, assigning `route_dir_name = f"{item['dep']}-{item['arr']}"` (`item_out_dir = TRAJECTORIES_DIR / route_dir_name`), and calling `fetch_trajectories(..., update_concat=True)` for each corridor with pre-computed `records`. The worker handles its own route-level concatenation and FUSE-safe atomic file swapping internally. After each corridor completes, explicit memory cleanup is performed via `gc.collect()`.
    - **Resume Evaluation**: If `--resume` is enabled and `<out_dir>/runs/<run_id>.json` exists, the manifest is parsed and the corridor is skipped only if `result.success == True`.
 9. **Summary Reporting**: `print_batch_summary()` outputs a terminal summary table showing total corridors processed, success counts, and per-route retrieval statistics.
 10. **Orchestrator Manifest Serialization**: `write_orchestrator_manifest()` saves a `BatchFetchSummary` JSON manifest to `data/trajectories/runs/<run_id>_orchestrator.json`.
@@ -335,7 +336,7 @@ flowchart TD
 python -m src.core.fetching.worker_cli \
     --dep EDDF \
     --arr EGLL \
-    --out-dir data/trajectories/rank_001_EDDF-EGLL \
+    --out-dir data/trajectories/EDDF-EGLL \
     --flight-source data/databases/master_flights/master_flights.parquet \
     --sample-size 50 \
     --seed 42 \
@@ -351,7 +352,7 @@ python -m src.core.fetching.worker_cli \
 python -m src.core.fetching.worker_cli `
     --dep EDDF `
     --arr EGLL `
-    --out-dir data/trajectories/rank_001_EDDF-EGLL `
+    --out-dir data/trajectories/EDDF-EGLL `
     --flight-source data/databases/master_flights/master_flights.parquet `
     --sample-size 50 `
     --seed 42 `

@@ -1,6 +1,6 @@
 # Phase Schema Enrichment & Calibration Suite (`schema_enrichment/`)
 
-This package calibrates the database query cost and acceptance rate required to obtain structurally valid trajectories whose flight phase labels adhere to canonical aeronautical sequence rules.
+This package calibrates the database query cost, acceptance rate, cluster structure, and geometric error required to obtain structurally valid trajectories whose flight phase labels adhere to canonical aeronautical sequence rules (`ONGROUND -> CLIMB -> CRUISE -> DESCENT -> ONGROUND`).
 
 ---
 
@@ -9,8 +9,8 @@ This package calibrates the database query cost and acceptance rate required to 
 ```text
 src/analysis/campaigns/schema_enrichment/
 ├── __init__.py                   # Package initialization
-├── README.md                     # This technical documentation file
-└── phase_schema_orchestrator.py  # Phase C: Phase schema query cost & acceptance rate calibration
+├── README.md                     # Technical documentation source of truth
+└── phase_schema_orchestrator.py  # Orchestration script for phase schema query cost & acceptance rate calibration
 ```
 
 ---
@@ -22,22 +22,22 @@ Phase Schema Calibration Objectives
  └── Calibrate query cost and acceptance rates for structurally valid flight phase sequences
       │
       ├── Sub-objective 1: Audit Trajectory Phase Sequence Validity
-      │    └── Solution: _is_valid_phase_sequence() in phase_schema_orchestrator.py
-      │         ├── Inputs: Sequence of phase labels (Series/array)
+      │    └── Solution: _load_route_flights_full_phase() in stability_worker.py (invoked by phase_schema_orchestrator.py)
+      │         ├── Inputs: Route ID, trajectory registry DataFrame, level_as_cruise, min_phase_run_points
       │         ├── Canonical Pattern: ONGROUND -> CLIMB -> CRUISE -> DESCENT -> ONGROUND
-      │         ├── Safety 1 (--level-as-cruise): Treats intermediate LEVEL flight as valid CRUISE
-      │         └── Safety 2 (--min-phase-run-points): Filters out short noise spikes in labels
+      │         ├── Safety 1 (--level-as-cruise): Treats intermediate LEVEL flight segments as valid CRUISE
+      │         └── Safety 2 (--min-phase-run-points): Smooths high-frequency phase label flickering (default: 3)
       │
       ├── Sub-objective 2: Orchestrate Query Cost Grid Sweep
-      │    └── Solution: main() in phase_schema_orchestrator.py
-      │         ├── Inputs: Oracle baseline data, parameter grids (N0, Kmax), replicates
-      │         ├── Concurrency: Multi-worker ProcessPoolExecutor with OOM recovery
-      │         └── Outputs: Acceptance rate tables, cost multipliers, and summary CSVs
+      │    └── Solution: main() / run_route_phase_schema_sweep() in phase_schema_orchestrator.py
+      │         ├── Inputs: Oracle baseline cohorts, sample size grid N0 ([16, 24, 32, 48, 64]), cluster grid Kmax ([1, 2, 3, 4]), replicates (30)
+      │         ├── Concurrency: Multi-worker ProcessPoolExecutor with spawn context, numeric thread limiting (1), and dynamic OOM worker scale-down
+      │         └── Outputs: Raw CSVs (<route>_phase_schema_raw.csv), summary CSVs (<route>_phase_schema_summary.csv), and atomic cluster parquet map (CALIBRATION_FLIGHT_CLUSTER_MAP)
       │
       └── Sub-objective 3: Compile Visual Report Dashboard
-           └── Solution: generate_phase_schema_pdf_report() in phase_schema_orchestrator.py
-                ├── Inputs: Route summary DataFrame, oracle parameters, out_dir
-                └── Outputs: 3-page PDF report with Pareto table, acceptance curves, and cluster maps
+           └── Solution: _save_route_results() / generate_phase_schema_pdf_report() in phase_schema_orchestrator.py
+                ├── Inputs: Route summary DataFrame, oracle parameters, Pareto frontier DataFrame, out_dir
+                └── Outputs: Multi-page PDF report (<route>_phase_schema_report.pdf) with metrics table, 2x2 dashboard, and Pareto cluster maps
 ```
 
 ---
@@ -48,42 +48,49 @@ Phase Schema Calibration Objectives
 
 ```mermaid
 flowchart TD
-    A[Start Phase Schema Calibration] --> B[Load Oracle Medoid Baselines]
-    B --> C[Dispatch Grid Tasks via ProcessPoolExecutor]
-    C --> D[Worker: Sample N0 Raw Trajectories]
-    D --> E[Worker: Audit Phase Sequence Validity]
-    E --> F{Valid Sequence?}
-    F -->|Yes| G[Retain Trajectory in Candidate Pool]
-    F -->|No| H[Reject Trajectory & Increment Cost Counter]
-    G --> I[Cluster Valid Pool up to Kmax Medoids]
-    I --> J[Compute Chamfer Distance vs Oracle]
-    H --> K[Calculate Effective Query Cost Multiplier]
-    J --> L[Aggregate Results across Replicates]
-    K --> L
-    L --> M[Compile 3-Page PDF Audit Report]
+    A[Start Phase Schema Calibration] --> B[Load Trajectory Registry & Prepare Oracle Baselines]
+    B --> C[Scan Database & Validate Phase Progression per Route]
+    C --> D[Pre-vectorize & Normalize Valid Airborne Cohort]
+    D --> E[Dispatch Route Sweeps via ProcessPoolExecutor]
+    E --> F[Simulate Random Trajectory Query Sampling for Seed/N0]
+    F --> G{Target N0 Valid Flights Reached?}
+    G -->|Yes| H[Compute Query Count Q & Acceptance Rate N0/Q]
+    G -->|No / Exhausted| I[Mark Cohort Exhausted & Record Available Valid Count]
+    H --> J[PCA Dimensionality Reduction & Medoid Silhouette Clustering]
+    I --> J
+    J --> K[Compute 3D Geometric Error vs Oracle Baseline]
+    K --> L[Aggregate Summary Metrics across Bootstrap Replicates]
+    L --> M[Atomically Update CALIBRATION_FLIGHT_CLUSTER_MAP]
+    M --> N[Batch Generate Pareto Cluster Map PNG Plots]
+    N --> O[Compile Multi-Page PDF Audit Report]
 ```
 
 **Step-by-step:**
-1. Load cached Ground Truth oracle medoid baselines from disk.
-2. Generate an evaluation grid across initial query sample sizes ($N_0$) and maximum cluster counts ($K_{max}$).
-3. Dispatch evaluation tasks across parallel worker processes using `ProcessPoolExecutor`.
-4. Each worker loads $N_0$ raw trajectories and audits their flight phase labels against canonical progression rules.
-5. Apply safety filters: `--level-as-cruise` maps intermediate level flight segments to cruise, and `--min-phase-run-points` removes high-frequency labeling noise.
-6. Calculate the acceptance rate and the effective query cost multiplier required to obtain $N_0$ valid flights.
-7. Perform hierarchical clustering on the retained valid trajectories and compute bidirectional Chamfer distance against oracle baselines.
-8. Export summary CSV tables and compile a 3-page visual PDF report.
+1. **Prepare Oracle Baselines**: Load candidate trajectories from `load_trajectory_registry()` and generate ground truth oracle medoid baselines (`_prepare_oracle()`).
+2. **Phase Sequence Auditing**: Scan database records via `_load_route_flights_full_phase()`, filtering flights against the canonical sequence `ONGROUND -> CLIMB -> CRUISE -> DESCENT -> ONGROUND`.
+3. **Safety Denoising**: Apply intermediate level mapping (`--level-as-cruise`, default `True`) and minimum run-length filtering (`--min-phase-run-points`, default `3`) to prevent over-rejection due to label flickering.
+4. **Cohort Normalization**: Extract airborne segments, vectorize ($D_{PCA}$ dimensions), and z-score normalize the valid flight cohort via `classify_and_normalize_cohort()` and `vectorize_cohort()`.
+5. **Database Query Simulation**: For each bootstrap replicate, shuffle candidate flight IDs and simulate random query extraction until $N_0$ valid trajectories are collected or candidate flights are exhausted.
+6. **Clustering & Medoid Selection**: Perform PCA dimensionality reduction, select optimal cluster count $k \le K_{max}$ using silhouette scores (`_evaluate_custom_k()`), and extract exemplar medoids (`_select_medoid()`).
+7. **Geometric Error Computation**: Compute bidirectional 3D Chamfer distance geometric error between sample medoids and ground truth oracle medoids (`_compute_geometric_error()`).
+8. **Atomic Registry Update**: Atomically append flight-to-cluster assignments to `CALIBRATION_FLIGHT_CLUSTER_MAP` (`data/results/calibration_flight_cluster_map.parquet`) using a `.tmp.parquet` temporary file replacement pattern (`_tmp`).
+9. **Visual Report Generation**: Identify Pareto frontier configurations (minimizing database queries while minimizing geometric error), batch render PNG cluster maps (`batch_generate_plots()`), and compile a multi-page executive PDF report (`<route>_phase_schema_report.pdf`).
 
 ---
 
 ### 3.2 Optimization & Memory Modes
-- **Noise Denoising**: High-frequency label flickering is smoothed out in-memory before sequence regex matching, preventing over-rejection of otherwise valid trajectories.
-- **Agg Backend Enforcement**: Enforces non-interactive matplotlib backend for stable multiprocessing.
+- **Atomic Write Pattern**: Flight-to-cluster mappings are saved to `CALIBRATION_FLIGHT_CLUSTER_MAP` using a safe temporary file swap pattern (`_tmp = CALIBRATION_FLIGHT_CLUSTER_MAP.with_suffix(".tmp.parquet")`) to guarantee data integrity on all filesystems.
+- **OOM-Resilient Multiprocessing**: Auto-calculates worker pool size based on available system RAM (`psutil.virtual_memory()`) and CPU cores, catching OOM exceptions (`_is_oom_error()`) to dynamically scale down concurrency without aborting the campaign.
+- **Thread Control**: `_worker_init()` enforces single-threaded BLAS/LAPACK execution (`limit_numeric_threads(1)`) across all spawned child processes to avoid CPU over-subscription.
+- **Label Denoising**: High-frequency phase flickering is smoothed out in-memory before sequence evaluation (`min_phase_run_points=3`), preventing over-rejection of valid flights.
 
 ### 3.3 Metric & Progress Logging Formats
-All logging is routed through `setup_file_logger()` to `data/logs/calibration.log`:
+All logging is centralized via `setup_file_logger()` writing to `data/logs/calibration.log`:
 ```text
-2026-07-07 19:20:00,000 - [INFO] - [phase_schema_orchestrator] Starting Phase Schema calibration across 6 routes...
-2026-07-07 19:20:10,123 - [INFO] - [phase_schema_orchestrator] LOWW-EHAM: Acceptance rate 84.2% (Effective multiplier: 1.19x).
+2026-08-10 01:00:00,000 - [INFO] - [phase_schema_orchestrator] Starting phase schema sweep with max_workers=4.
+2026-08-10 01:00:10,123 - [INFO] - [phase_schema_orchestrator] [LOWW-EHAM] Sweeping 20 phase schema parameter cells across 30 replicates...
+2026-08-10 01:00:15,456 - [INFO] - [phase_schema_orchestrator] Saved 6000 flight mappings to calibration cluster map.
+2026-08-10 01:00:20,789 - [INFO] - [phase_schema_orchestrator] [LOWW-EHAM] Compiling PDF report to data/calibration/phase_schema/LOWW-EHAM_phase_schema_report.pdf...
 ```
 
 ---
@@ -95,51 +102,51 @@ All logging is routed through `setup_file_logger()` to `data/logs/calibration.lo
 #### Bash Syntax
 ```bash
 python -m src.analysis.campaigns.schema_enrichment.phase_schema_orchestrator \
-    --routes LOWW-EHAM EDDF-LIRF \
-    --n0-grid 50 100 150 200 \
-    --kmax-grid 3 4 5 \
-    --replicates 5 \
-    --workers 4 \
-    --level-as-cruise \
-    --min-phase-run-points 5
+    --replicates 30 \
+    --max-workers 4 \
+    --level-as-cruise True \
+    --min-phase-run-points 3 \
+    --out-dir data/calibration/phase_schema
 ```
 
 #### PowerShell Syntax
 ```powershell
 python -m src.analysis.campaigns.schema_enrichment.phase_schema_orchestrator `
-    --routes LOWW-EHAM EDDF-LIRF `
-    --n0-grid 50 100 150 200 `
-    --kmax-grid 3 4 5 `
-    --replicates 5 `
-    --workers 4 `
-    --level-as-cruise `
-    --min-phase-run-points 5
+    --replicates 30 `
+    --max-workers 4 `
+    --level-as-cruise True `
+    --min-phase-run-points 3 `
+    --out-dir data/calibration/phase_schema
 ```
 
 #### Parameter Reference (`phase_schema_orchestrator.py`)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `--routes` | String List | `CALIBRATION_ROUTES` | Routes to evaluate for phase schema validity. |
-| `--n0-grid` | Integer List | `[50, 100, 150, 200]` | Initial sample sizes ($N_0$) to test. |
-| `--kmax-grid` | Integer List | `[3, 4, 5]` | Maximum cluster counts ($K_{max}$). |
-| `--replicates` | Integer | `5` | Bootstrap replicates per grid point. |
-| `--workers` | Integer | `4` | Number of parallel worker processes. |
-| `--level-as-cruise` | Flag | `False` | Treat intermediate `LEVEL` flight phase labels as valid `CRUISE`. |
-| `--min-phase-run-points` | Integer | `0` | Minimum consecutive points required to form a valid phase run. |
-| `--out-dir` | Path | `data/calibration/phase_schema` | Output folder for CSV tables and PDF reports. |
+| `--replicates` | Integer | `30` | Bootstrap replicates per parameter cell. |
+| `--dry-run` | Flag | `False` | Run 1 route and 2 replicates with reduced grid sizes for quick sanity testing. |
+| `--max-workers` | Integer | `None` | Override the starting number of parallel worker processes (defaults to RAM/CPU auto-tuning). |
+| `--out-dir` | Path | `data/calibration/phase_schema` | Output directory for CSV tables and PDF reports. |
+| `--level-as-cruise` | Boolean | `True` | Map intermediate `LEVEL` flight phase segments to `CRUISE`. |
+| `--min-phase-run-points` | Integer | `3` | Minimum contiguous points required in a phase run to prevent noise flickering. |
+| `--crop-airports` | Flag | `False` | Crop generated cluster plot maps to airport bounding box. |
+| `--crop-padding` | Float | `1.5` | Padding in degrees around airport bounding box when cropping maps. |
 
 ---
 
 ## 5. Prerequisites & Dependencies
 
 ### 5.1 Library Dependencies
-- `scikit-learn` (medoid clustering)
-- `numpy` / `scipy` (3D Chamfer distance)
-- `pandas` / `pyarrow` (parquet registry and schema auditing)
-- `matplotlib` (PDF report compilation)
+- `scikit-learn` (PCA dimensionality reduction and silhouette score evaluation)
+- `numpy` / `scipy` (3D Chamfer distance and geometric error calculations)
+- `pandas` / `pyarrow` (Parquet registry management and tabular reporting)
+- `matplotlib` (Multi-page PDF report compilation via `PdfPages` and cluster plots)
+- `psutil` (System memory monitoring for OOM-resilient worker pool sizing)
 
 ### 5.2 Referenced Registry & Config Files
-- `src.common.config.CALIBRATION_ROUTES`: Canonical European target corridors.
-- `src.common.config.ORACLE_COHORT_CACHE_DIR`: Directory storing cached Ground Truth medoid tensors.
-- For global project naming conventions, see [conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/conventions.md).
+- `src.common.config.BASE_DIR`: Base project directory path.
+- `src.common.config.CALIBRATION_ROUTES`: List of standard European evaluation flight corridors.
+- `src.common.config.CALIBRATION_FLIGHT_CLUSTER_MAP`: Parquet file (`data/results/calibration_flight_cluster_map.parquet`) storing flight-to-cluster assignments.
+- `src.common.config.CALIBRATION_PLOTS_DIR`: Output directory (`data/results/calibration_plots`) for rendered cluster maps.
+- `src.common.config.D_PCA`: Dimensionality setting for trajectory vectorization.
+- For global project conventions, see [conventions.md](file:///c:/Users/Joshu/Projects/flight-physics-pipeline/conventions.md).

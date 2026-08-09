@@ -9,11 +9,14 @@ The `common` module provides shared configurations, database and object adapters
 ```text
 src/common/
 ├── README.md                     # This documentation file
-├── config.py                     # Centralized settings, path definitions, and weather parameters
+├── config.py                     # Centralized settings, path definitions, weather parameters, and runtime initialization
 ├── concurrency.py                # CPU-level and C-library thread-limiting utilities
+├── exceptions.py                 # Centralized pipeline exception hierarchy (PipelineError, FetchingError, etc.)
 ├── adapters.py                   # Data serialization and conversion between Pandas, PyContrails, and Traffic
+├── map_cache.py                  # In-memory European topological shapefile and airport coordinate cache
 ├── build_global_manifest.py      # Rebuilds and updates registries for raw, clean, and simulated flight files
-└── utils.py                      # Centralized helper utilities (file loggers, dataset name generators)
+├── registry_utils.py             # Global registry lookup, persistence, mapping, and joining utilities
+└── utils.py                      # Centralized helper utilities (file loggers, distance math, route parsing, airport resolution)
 ```
 
 ---
@@ -24,34 +27,55 @@ src/common/
 Module Objectives
  └── Standardize configuration, data models, logging, and registries across the pipeline
       │
-            ├── Sub-objective 1: Centralize path resolution, environmental constants, and filtering/concurrency limits
+      ├── Sub-objective 1: Centralize path resolution, environmental constants, runtime initialization, and filtering/concurrency limits
       │    ├── Solution A: config.py
       │    │    ├── Inputs: Environmental variables, relative directory lookups, calibrated defaults
       │    │    ├── Outputs: Base directories, weather variables, grid definitions, metadata filter thresholds, and concurrency limits
+      │    │    ├── init_runtime(): Creates required runtime directories (data/, logs/, temp/) and redirects TEMP/TMP/TMPDIR env variables to DATA_DIR/temp
+      │    │    ├── is_supported_typecode(typecode): Central validation function verifying typecodes strictly belong to ALL_TARGET_FAMILIES
       │    │    └── Shared thresholds: DEFAULT_PREFILTER_THRESHOLDS and DEFAULT_POSTFILTER_THRESHOLDS centralize pre/post trajectory quality gates
       │    └── Solution B: concurrency.py
       │         ├── limit_numeric_threads(): Sets CPU/C-library thread bounds via environment variables and threadpoolctl
       │         └── set_numeric_thread_env(): Directly restricts BLAS/OpenMP/NumExpr C-library thread counts
       │
-      ├── Sub-objective 2: Convert trajectories between third-party library objects and handle Parquet I/O
+      ├── Sub-objective 2: Centralize exception hierarchy and geographical map caching
+      │    ├── Solution A: exceptions.py
+      │    │    └── PipelineError hierarchy: Base PipelineError with FetchingError, CheckpointError, RetryError, and DiagnosticsIOError
+      │    └── Solution B: map_cache.py
+      │         └── EuropeanMapCache: Singleton pre-loading NaturalEarth shapefiles and AIRPORTS_CACHE_PATH into Cartopy features (add_features_to_axes)
+      │
+      ├── Sub-objective 3: Convert trajectories between third-party library objects and handle Parquet I/O
       │    └── Solution: adapters.py
-      │         ├── dataframe_to_pycontrails(): Maps DataFrame columns to pycontrails.Flight schema
-      │         ├── write_flights_to_parquet(): Serializes pycontrails.Flight list to flat Parquet
+      │         ├── dataframe_to_pycontrails(): Maps DataFrame columns to pycontrails.Flight schema, validating typecodes via is_supported_typecode()
+      │         ├── write_flights_to_parquet(): Serializes pycontrails.Flight list to flat Parquet, clearing attributes to prevent PyArrow JSON crashes
       │         ├── parquet_to_pycontrails(): Reads Parquet, normalizes raw OpenSky columns, and constructs pycontrails.Flight instances grouped by flight_id
       │         ├── pycontrails_to_traffic(): Translates pycontrails.Flight to traffic.core.Flight (converting SI units → aviation units: m→ft, m/s→kt, m/s→ft/min)
       │         └── traffic_to_pycontrails(): Translates traffic.core.Flight or DataFrame back to pycontrails.Flight (converting aviation units → SI units), with optional drop_kinematics flag to strip kinematic columns for corridor templates
       │
-      └── Sub-objective 3: Index trajectory files and compile global manifests
-           └── Solution: build_global_manifest.py & utils.py
-                ├── rebuild_raw_registry(force: bool): Rebuilds raw trajectory manifest (`GLOBAL_TRAJECTORY_REGISTRY`)
-                ├── rebuild_clean_registry(force: bool): Rebuilds clean SI trajectory manifest (`GLOBAL_CLEAN_REGISTRY`)
-                ├── rebuild_simulation_registry(force: bool): Rebuilds simulated flight manifest (`GLOBAL_SIMULATION_REGISTRY`)
-                ├── rebuild_corridor_sim_registry(force: bool): Rebuilds corridor simulation manifest (`GLOBAL_CORRIDOR_SIM_REGISTRY`)
-                ├── rebuild_model_registry(force: bool): Rebuilds synthesized flight manifest (`GLOBAL_MODEL_REGISTRY`), supporting incremental runs when force=False
-                ├── rebuild_ekf_diag_registry(force: bool, recompute_metrics: bool): Compiles the EKF diagnostic registry (`GLOBAL_EKF_DIAG_REGISTRY`), recomputing metrics from NPZ files if specified
-                ├── update_global_registry(): Atomically inserts new trajectory records into Parquet registries
-                └── extract_target_routes(): Queries `ROUTE_SUMMARY_PARQUET` to resolve RouteSummary ranks into target `(dep, arr)` airport codes
-```
+      ├── Sub-objective 4: Index trajectory files and compile global manifests
+      │    └── Solution: build_global_manifest.py & utils.py
+      │         ├── rebuild_raw_registry(force: bool): Rebuilds raw trajectory manifest (`GLOBAL_TRAJECTORY_REGISTRY`)
+      │         ├── rebuild_clean_registry(force: bool): Rebuilds clean SI trajectory manifest (`GLOBAL_CLEAN_REGISTRY`)
+      │         ├── rebuild_simulation_registry(force: bool): Rebuilds simulated flight manifest (`GLOBAL_SIMULATION_REGISTRY`)
+      │         ├── rebuild_corridor_sim_registry(force: bool): Rebuilds corridor simulation manifest (`GLOBAL_CORRIDOR_SIM_REGISTRY`)
+      │         ├── rebuild_model_registry(force: bool): Rebuilds synthesized corridor model manifest (`GLOBAL_CORRIDOR_MODEL_REGISTRY`), supporting incremental runs when force=False
+      │         ├── rebuild_ekf_diag_registry(force: bool, recompute_metrics: bool): Compiles the EKF diagnostic registry (`GLOBAL_EKF_DIAG_REGISTRY`), recomputing metrics from NPZ files if specified
+      │         ├── update_global_registry(): Atomically inserts new trajectory records into Parquet registries
+      │         └── extract_target_routes(): Queries `ROUTE_SUMMARY_PARQUET` to resolve RouteSummary ranks into target `(dep, arr)` airport codes
+      │
+      └── Sub-objective 5: Shared spatial, route-parsing, airport coordinate resolution, and registry mapping utilities
+           ├── Solution A: utils.py
+           │    ├── haversine_distance_m(lat1, lon1, lat2, lon2): Vectorized Haversine distance computation returning distance in metres
+           │    ├── resolve_airport_coordinates(unique_icaos: list): Resolves airport metadata via a 5-tier cascade (local cache → OurAirports CSV [75k+ airfields, auto-downloaded] → traffic → airportsdata → openap), standardizing entries to {lat, lon, name, country, elevation}
+           │    ├── split_route_string(route_str: str): Splits route string into (departure, arrival) tuple supporting both 'DEP -> ARR' and 'DEP-ARR' formats via regex
+           │    ├── extract_route_id_from_path(path): Extracts route ID ('DEP-ARR') from path string or object, supporting modern 'DEP-ARR' and legacy 'rank_NNN_DEP-ARR' folder names
+           │    ├── to_registry_path(path) / to_project_relative(path): Computes POSIX relative path from BASE_DIR safe against symlinked filesystems
+           │    └── retry_backoff(fn): Calls function with exponential back-off up to max_retries, raising RetryError on exhaustion
+           └── Solution B: registry_utils.py
+                ├── load_model_registry(): Reads `GLOBAL_CORRIDOR_MODEL_REGISTRY` mapping corridor clusters to medoids and template paths
+                ├── save_model_registry(df): Writes DataFrame to `GLOBAL_CORRIDOR_MODEL_REGISTRY`
+                ├── load_corridor_paths_map(): Constructs dictionary mapping (route_id, cluster_id) to absolute corridor Parquet file paths (renamed from `load_synthesized_paths_map`)
+                └── join_flight_registries(registries, how): Generic helper to join multiple registry Parquets on 'flight_id'
 
 ---
 
@@ -59,16 +83,16 @@ Module Objectives
 
 ### 3.1 Standard Registry Generation (`build_global_manifest.py`)
 
-This workflow indexes the standard flight trajectories and simulation output files across the workspace.
+This workflow indexes standard flight trajectories, corridor templates, and simulation output files across the workspace.
 
 ```mermaid
 flowchart TD
-    RawDir["data/trajectories/.../raw/"] -->|Scan *.parquet| BGM["build_global_manifest.py"]
-    CleanDir["data/trajectories/.../clean/"] -->|Scan *__clean_si.parquet| BGM
+    RawDir["data/trajectories/.../raw/"] -->|Scan *_raw.parquet| BGM["build_global_manifest.py"]
+    CleanDir["data/trajectories/.../clean/"] -->|Scan *_clean_si.parquet| BGM
     
-    SimDir["data/results/corridor_simulations/"] -->|Scan *__sim.parquet| BGM
-    CorridorSimDir["data/results/corridor_simulations/"] -->|Scan *__corridor_sim.parquet| BGM
-    ModelDir["data/results/flight_models/"] -->|Scan *__model.parquet| BGM
+    SimDir["data/results/ & data/trajectories/"] -->|Scan *_simulated.parquet| BGM
+    CorridorSimDir["data/results/corridor_simulations/"] -->|Scan *_simulated.parquet| BGM
+    ModelDir["data/corridor_paths/"] -->|Scan *_corridor_c*.parquet| BGM
     
     BGM -->|Write raw_registry| GTR["global_trajectory_registry.parquet"]
     BGM -->|Write clean_registry| GCR["global_clean_registry.parquet"]
@@ -78,8 +102,8 @@ flowchart TD
 ```
 
 **Step-by-step:**
-1. **Directories Scan**: The manifest builder scans designated data directories for files matching specific wildcard patterns (e.g. `*_raw.parquet`, `*_clean_si.parquet`, `*_sim.parquet`, `*_model.parquet`, etc.).
-2. **File Reading & Extraction**: For each found file, it reads only the `flight_id` column to identify all unique flight trajectories contained within.
+1. **Directories Scan**: The manifest builder scans designated data directories for files matching specific wildcard patterns (`*_raw.parquet`, `*_clean_si.parquet`, `*_simulated.parquet`, `*_corridor_c*.parquet`, etc.).
+2. **File Reading & Extraction**: For each found file, it reads only the `flight_id` (or corridor metadata) column to identify all unique flight trajectories contained within.
 3. **Registry Update & Write**: It reads the existing registry file to skip already-indexed paths (unless `--force` is used). New rows mapping `flight_id` to its relative `file_path` are appended, deduplicated by keeping the latest entry, and written atomically.
 4. **Pruning & Cleanup**: If `force=False`, it prunes entries pointing to files that have been deleted from the filesystem before saving.
 
@@ -91,7 +115,7 @@ This workflow indexes EKF diagnostic NPZ files and compiles EKF quality scores a
 
 ```mermaid
 flowchart TD
-    DiagFiles["data/trajectories/.../diagnostics/*.npz"] -->|Scan *__ekf_diag.npz| BGM["build_global_manifest.py"]
+    DiagFiles["data/trajectories/.../diagnostics/*.npz"] -->|Scan *_ekf_diag.npz| BGM["build_global_manifest.py"]
     ExistingDiag["global_ekf_diag_registry.parquet"] -->|Read existing| BGM
     
     BGM -->|_load_existing_diag_registry| ParseExisting["Load & prune missing files"]
@@ -169,14 +193,19 @@ python -m src.common.build_global_manifest --diag-only --recompute-ekf-metrics -
 - `GLOBAL_CLEAN_REGISTRY` (`data/registries/global_clean_registry.parquet`)
 - `GLOBAL_SIMULATION_REGISTRY` (`data/registries/global_simulation_registry.parquet`)
 - `GLOBAL_CORRIDOR_SIM_REGISTRY` (`data/registries/global_corridor_simulation_registry.parquet`)
-- `GLOBAL_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
+- `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
 - `GLOBAL_EKF_DIAG_REGISTRY` (`data/registries/global_ekf_diag_registry.parquet`)
+- `AIRPORTS_CACHE_PATH` (`data/registries/airport_coordinates.json`)
 
 ### Python Libraries
 * `pandas` & `pyarrow` (for Parquet reading, writing, and DataFrame manipulation)
 * `numpy` (for vectorized mathematical equations)
 * `pycontrails` (for Flight data models)
 * `traffic` (for airport coordinate lookups and traffic Flight models)
+* `cartopy` & `shapely` (for map shapefile rendering and topological caching)
+* `matplotlib` (for figure generation and headless rendering backend configuration)
+* `airportsdata` & `openap` (for multi-tier airport coordinate resolution)
+* `threadpoolctl` (for BLAS/OpenMP C-library thread limit enforcement)
 
 For global coordinate standards and directory standards, refer to the project's centralized **[conventions.md](../conventions.md)**.
 

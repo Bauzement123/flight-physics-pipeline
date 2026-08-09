@@ -17,8 +17,7 @@ src/analysis/campaigns/phase_quality/
 ├── build_audit_candidate_pool.py  # Script 1: Candidate pool extraction (6x400 flights) & cohort map
 ├── phase_quality_filters.py       # Script 2 Part B: Pre-filtering & post-filtering rules engine
 ├── run_phase_quality_campaign.py  # Script 2 Part C: Campaign orchestrator & evaluation table export
-├── phase_quality_plots.py         # Script 2 Part A: PDF plotting engine (Cartopy basemaps + profiles)
-└── test_phase_quality_plots.py    # Script 2 Test runner & multi-worker report compilation
+└── phase_quality_plots.py         # Script 2 Part A: PDF plotting engine (Cartopy basemaps + profiles)
 ```
 
 ---
@@ -32,6 +31,7 @@ Phase Quality Campaign Objectives
       ├── Sub-objective 1: Extract Representative Candidate Pool (6 routes x 400 flights)
       │    └── Solution: main() in build_audit_candidate_pool.py
       │         ├── Inputs: master_flights parquet, trajectory registry
+      │         ├── Route Parsing: split_route_string() from src.common.utils decomposes target routes
       │         ├── Stratification: 10 temporal cohorts per route (40 flights per cohort)
       │         └── Outputs: audit_candidate_pool.parquet, audit_cohort_map.parquet
       │
@@ -45,10 +45,10 @@ Phase Quality Campaign Objectives
       │    └── Solution: apply_trajectory_postfilters() in phase_quality_filters.py (delegates to src.core.processing.trajectory_filters)
       │         ├── extract_horiz_velocity_metric(df_clean): extract maximum horizontal speed gs (kt)
       │         ├── extract_vert_velocity_metric(df_clean): extract maximum vertical speed rocd (fpm)
-      │         ├── extract_coord_horiz_velocity_metric(df_clean): extract coordinate-derived horiz speed (kt)
+      │         ├── extract_coord_horiz_velocity_metric(df_clean): extract coordinate-derived horiz speed (kt) via haversine_distance_m()
       │         ├── extract_coord_vert_velocity_metric(df_clean): extract coordinate-derived vert speed (fpm)
       │         ├── extract_acceleration_metric(df_clean): extract 3D acceleration (m/s²)
-      │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport
+      │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport via haversine_distance_m() and resolve_airport_coordinates()
       │         └── Outputs: (rejected: bool, reason: str, metrics: dict) per flight; aggregated POSTFILTER status written to filter_evaluation.csv
       │
       ├── Sub-objective 4: Orchestrate Multi-Route Campaign Runs (Script 2 Part C)
@@ -59,12 +59,14 @@ Phase Quality Campaign Objectives
       ├── Sub-objective 5: Compile Multi-Page Visual Audit PDF Reports (Script 2 Part A)
       │    └── Solution: compile_route_audit_pdf() in phase_quality_plots.py
       │         ├── Inputs: Route trajectories, evaluation status records, output format (PNG/SVG)
+      │         ├── Route Parsing: split_route_string() from src.common.utils parses departure/arrival ICAO codes for map cache extent
       │         ├── Safety: Rasterized PNG mode (--format PNG) prevents laptop PDF rendering lag
       │         └── Outputs: 10-page audit PDF report per route (40 flights rendered per page)
       │
       └── Sub-objective 6: Perform Offline Deep EKF Tensor Diagnostic Autopsy (Script 3)
            └── Solution: main() in analyze_ekf_diagnostics.py (delegating to diagnostics.py, io.py, orchestration.py)
                 ├── Inputs: GLOBAL_EKF_DIAG_REGISTRY, 3D tensor NPZ files (e_k, S_k, P_k)
+                ├── Route Resolution: resolve_route_id() delegates to extract_route_id_from_path() from src.common.utils
                 ├── Math Phases: Phase 1 (NIS vs Chi2_6), Phase 2 (Residuals ACF), Phase 3 (Condition & Drift)
                 └── Outputs: Flight metrics parquet, route summary CSV, compressed route tensors npz, 4-page corridor PDF reports
 ```
@@ -87,7 +89,7 @@ flowchart TD
 
 **Step-by-step:**
 1. Load the centralized master flights dataset (`master_flights.parquet`).
-2. Filter records for the six canonical European corridors (`EDDF-LIRF`, `ESSA-EHAM`, `EGLL-BIKF`, `LGSA-LGAV`, `LFRS-LFMN`, `ESSA-LEMD`).
+2. Filter records for the six canonical European corridors (`EDDF-LIRF`, `ESSA-EHAM`, `EGLL-BIKF`, `LGSA-LGAV`, `LFRS-LFMN`, `ESSA-LEMD`), decomposing origin and destination via `split_route_string()` from `src.common.utils`.
 3. Partition each route's flights into 10 chronological cohorts based on departure timestamps.
 4. Select up to 40 candidate flights per cohort (totaling 400 flights per route, 2,400 flights overall).
 5. Save the candidate pool metadata to `data/calibration/phase_quality/audit_candidate_pool.parquet`.
@@ -127,17 +129,17 @@ flowchart TD
 5. Annotate each flight with `status` (`PASSED` vs `REJECTED`), `fail_stage`, and `reject_reason`; export the initial summary table to `filter_evaluation.csv`.
 6. Dispatch multi-page PDF compilation tasks across parallel worker processes using `ProcessPoolExecutor`.
 7. Each worker loads raw parquet trajectory files for its assigned route. If `--use-clean` is active (default: `True`), it resolves clean EKF trajectory files using `GLOBAL_CLEAN_REGISTRY` keyed by `flight_id`.
-8. For each flight that passed pre-filtering and has a clean trajectory, the worker optionally calls `recompute_airport_distances()` (when `RECOMPUTE_AIRPORT_DISTANCES = True`) to augment the clean DataFrame with freshly computed `dist_hor_nm`, `dist_vert_ft`, and `dist_total_nm` columns using the `airportsdata` library.
+8. For each flight that passed pre-filtering and has a clean trajectory, the worker optionally calls `recompute_airport_distances()` (when `RECOMPUTE_AIRPORT_DISTANCES = True`) to augment the clean DataFrame with freshly computed `dist_hor_nm`, `dist_vert_ft`, and `dist_total_nm` columns using `resolve_airport_coordinates()` and `haversine_distance_m()` from `src.common.utils`.
 9. `apply_trajectory_postfilters()` delegates directly to `src.core.processing.trajectory_filters` with short-circuit evaluation:
    - **Step 1 — Horizontal Velocity**: `extract_horiz_velocity_metric()` computes reported max `gs` and compares it to $\le$ `max_horiz_velocity_kt` (650.0 kt).
    - **Step 2 — Vertical Velocity**: `extract_vert_velocity_metric()` computes max absolute `rocd` and compares it to $\le$ `max_vert_velocity_fpm` (8000.0 fpm).
-   - **Step 3 — Coordinate-Derived Horizontal Velocity**: `extract_coord_horiz_velocity_metric()` calculates step-by-step 2D Haversine displacement and compares it to $\le$ `max_coord_horiz_velocity_kt` (650.0 kt).
+   - **Step 3 — Coordinate-Derived Horizontal Velocity**: `extract_coord_horiz_velocity_metric()` calculates step-by-step 2D Haversine displacement via `haversine_distance_m()` from `src.common.utils` and compares it to $\le$ `max_coord_horiz_velocity_kt` (650.0 kt).
    - **Step 4 — Coordinate-Derived Vertical Velocity**: `extract_coord_vert_velocity_metric()` calculates step-by-step altitude change and compares it to $\le$ `max_coord_vert_velocity_fpm` (8000.0 fpm).
    - **Step 5 — 3D Acceleration**: `extract_acceleration_metric()` calculates step-by-step acceleration magnitude and compares it to $\le$ `max_acceleration_mps2` (10.0 m/s$^2$).
-   - **Step 6 — Distance Prefilters**: `passes_distance_prefilters()` verifies waypoint-to-airport distance cutoffs.
+   - **Step 6 — Distance Prefilters**: `passes_distance_prefilters()` verifies waypoint-to-airport distance cutoffs using `resolve_airport_coordinates()` and `haversine_distance_m()`.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
 11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**:
-    - **Row 1 (Raw + Prefilter)** and **Row 2 (Those But Clean)** show only pre-filter rejections (rendered as light-red/pink dashed lines via `REJECTED_PREFILTER_COLOR = "#ff7f7f"`).
+    - **Row 1 (Raw + Prefilter)** and **Row 2 (Those But Clean)** show only pre-filter rejections (rendered as light purple/magenta dashed lines via `REJECTED_PREFILTER_COLOR = "#cc00ff"`).
     - **Row 3 (Clean + Postfilter)** shows both pre-filter rejections (light red) and post-filter rejections (deep red via `REJECTED_POSTFILTER_COLOR = "#ff0000"`).
     When `show_rejected=True` (the default), two local merged dicts (`trajectories_for_row2`, `trajectories_for_row3`) are built by copying `trajectories_clean` and back-filling any missing flight IDs from the raw `trajectories` dict. Both Row 2 and Row 3 receive these merged dicts, ensuring all 40 cohort flights are renderable. Legend entries are appended automatically. The original `trajectories_clean` dict is never mutated.
 12. Each worker returns a `flight_updates` dict mapping `flight_id → {status, fail_stage, reject_reason}` for all POSTFILTER rejections back to the main process.
@@ -165,7 +167,7 @@ flowchart TD
 
 **Step-by-step:**
 1. Load `GLOBAL_EKF_DIAG_REGISTRY` to find EKF diagnostic NPZ file paths.
-2. Filter registry rows for flights whose `diag_file_path` actually exists in the workspace.
+2. Filter registry rows for flights whose `diag_file_path` actually exists in the workspace, extracting route IDs via `resolve_route_id()` which delegates to `extract_route_id_from_path()` from `src.common.utils`.
 3. Spawn subprocesses using `ProcessPoolExecutor` with max workers.
 4. Each worker loads a flight's EKF arrays (`timestamps`, `e_k`, `S_k`, `P_k`) into memory.
 5. If Phase 1 NIS is enabled, solve $S_k x = e_k$ to compute $\epsilon_k = e_k^T S_k^{-1} e_k$ and check against Chi-Square confidence bounds $[1.237, 14.449]$.
@@ -244,7 +246,7 @@ python -m src.analysis.campaigns.phase_quality.run_phase_quality_campaign `
 |---|---|---|---|
 | `--route` | String | *Optional* | Specific route ID to process (e.g., `EDDF-LIRF`). |
 | `--all` | Flag | `False` | Run campaign across all 6 target European routes. |
-| `--workers` | Integer | `4` | Number of parallel worker processes for PDF compilation. |
+| `--workers` | Integer | `1` | Number of parallel worker processes for PDF compilation. |
 | `--format` | String | `SVG` | Plot rendering format (`SVG` vector vs `PNG` rasterized). |
 | `--out-dir` | String | *Optional* | Custom output directory for evaluation results and PDFs. |
 | `--show-rejected` | `bool` | `True` | When `True`, prefilter- and postfilter-rejected trajectories are overlaid as red dashed lines (`REJECTED_COLOR`) on all audit pages and a legend entry is added. Pass `False` to hide them. |
@@ -293,13 +295,20 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 
 ## 5. Prerequisites & Dependencies
 
-### 5.1 Library Dependencies
+### 5.1 Shared Utility Dependencies (`src.common.utils`)
+- `extract_route_id_from_path()`: Used by `io.py` (`resolve_route_id()`) to extract canonical route identifiers from diagnostic file paths.
+- `haversine_distance_m()`: Centralized spherical distance calculation used in `phase_quality_filters.py` for 3D coordinate velocity, distance pre-filters, and airport distance calculations.
+- `resolve_airport_coordinates()`: Used in `phase_quality_filters.py` (`get_airport_coords()`) to query origin and destination airport positions and elevations.
+- `split_route_string()`: Used in `build_audit_candidate_pool.py` and `phase_quality_plots.py` (`_format_pair_axes()`) to safely decompose route string identifiers into departure and arrival ICAO codes.
+- `setup_file_logger()`: Centralized logging setup routing outputs to `data/logs/calibration.log`.
+
+### 5.2 Library Dependencies
 - `pandas` / `pyarrow` (parquet registry and evaluation table IO)
 - `matplotlib` (geospatial plotting and corridor autopsy PDF compilation)
 - `numpy` (multidimensional telemetry array representations and matrix products)
 - `scipy` (solving linear systems via `scipy.linalg` and computing Chi-Square probability distributions via `scipy.stats`)
 
-### 5.2 Referenced Registry & Config Files
+### 5.3 Referenced Registry & Config Files
 - `src.common.config.AUDIT_CANDIDATE_POOL_REGISTRY`: Parquet file containing candidate flight metadata.
 - `src.common.config.AUDIT_COHORT_MAP_REGISTRY`: Parquet file mapping flights to temporal cohorts.
 - `src.common.config.GLOBAL_CLEAN_REGISTRY`: Parquet file indexing cleaned EKF trajectories across all routes.
@@ -329,7 +338,7 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 > **Registry-Centric Clean Loading (2026-07-12)**: Clean trajectories are resolved and loaded directly via `GLOBAL_CLEAN_REGISTRY` mapping instead of fragile directory path-guessing.
 
 > [!NOTE]
-> **Two-Shade Red Rejections (2026-07-12)**: Rejections are color-coded based on the failure stage: pre-filter rejections use `REJECTED_PREFILTER_COLOR = "#ff7f7f"` (lighter red) and post-filter rejections use `REJECTED_POSTFILTER_COLOR = "#ff0000"` (deep red) with distinct legend handles.
+> **Two-Shade Red Rejections (2026-07-12)**: Rejections are color-coded based on the failure stage: pre-filter rejections use `REJECTED_PREFILTER_COLOR = "#cc00ff"` (lighter purple/magenta) and post-filter rejections use `REJECTED_POSTFILTER_COLOR = "#ff0000"` (deep red) with distinct legend handles.
 
 > [!NOTE]
 > **Cohort-Level Detailed Logging (2026-07-12)**: Audit page generation now logs a detailed row-wise drawability statistics breakdown and page summary per cohort page.

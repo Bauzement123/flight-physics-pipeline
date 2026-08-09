@@ -39,7 +39,7 @@ Module Objectives
       ├── Sub-objective 2: Batch clone corridor flight simulation
       │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
       │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance, clusters_per_flight
-      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_corridor_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, simulation.log
+      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_corridor_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, clone_simulation.log
       │
       ├── Sub-objective 3: Spatial weather downselection
       │    └── Solution: crop_met_dataset() in engine.py
@@ -112,7 +112,7 @@ graph TD
 ```mermaid
 graph TD
     A[data/flight_registry/master_flights.parquet] -->|1. Ingest flight schedules| B(clone_simulation.py)
-    C[data/flight_registry/registries/global_model_registry.parquet] -->|2. Resolve synthesized base path| B
+    C[data/flight_registry/registries/global_corridor_model_registry.parquet] -->|2. Resolve corridor base path| B
     D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_and_crop_weather]
     E -->|4. Crop to EUR_BBOX + WEATHER_PADDING & load to RAM| F[Cached daily MetDatasets]
     F -->|5. Concatenate days| G[In-memory 3-day weather window]
@@ -136,10 +136,10 @@ graph TD
 
 #### Step-by-Step Description: Batch Clone Simulation
 1. **Schedule Database Ingestion**: The batch clone simulation (`clone_simulation.py`) loads the master schedules database (`master_flights.parquet`) and the route summary indices.
-2. **Synthesized Base Path Mapping**: The script resolves the file paths of baseline synthesized corridor medoid trajectories by querying the model registry (`global_model_registry.parquet`).
-3. **Cohort Filtering**: Filters flights by requested ranks, date ranges, minimum route distance (default: 800.0 km), and bypasses airport loops and already-simulated flights.
+2. **Corridor Base Path Mapping**: The script resolves the file paths of baseline corridor medoid trajectories by querying the corridor model registry (`global_corridor_model_registry.parquet`) via `load_corridor_paths_map()` (populating `valid_corridor_files`).
+3. **Cohort Filtering**: Filters flights by requested ranks, date ranges, minimum route distance (default: 0 km), and bypasses airport loops and already-simulated flights.
 4. **Rolling Weather Management**: Iterates day-by-day over the cohort. For each day, it maintains a rolling 3-day weather window (Day N, Day N+1, Day N+2) in memory to cover potential advection time, evicting expired days and loading new ones.
-5. **Base Path Cloning & Time-shifting**: For each scheduled flight, the base synthesized path is cloned, and its datetime index is offset to align with the flight's scheduled departure time (`firstseen`).
+5. **Base Path Cloning & Time-shifting**: For each scheduled flight, the base corridor path (`corridor_path` loaded from `valid_corridor_files`) is cloned, and its datetime index is offset to align with the flight's scheduled departure time (`firstseen`).
 6. **Synthetic Track Sampling**: Samples random synthesized tracks according to the requested number of `--clusters-per-flight` to represent corridor alternatives.
 7. **Parallel Engine Simulation**: The time-shifted cloned flights are passed to `engine.py:simulate_flights_parallel` along with a main-thread serialization callback.
 8. **Streaming Serialization & Memory Eviction**: Inside the engine's batch loop, completed batches are immediately passed to the main-thread callback. The callback serializes simulated trajectories to individual Parquet files under corridor-specific folders (e.g., `<origin>-<destination>_cloned_simulated/`) inside the output directory, updates the registry list, and logs any skipped flights. The engine then immediately deletes the batch from memory and forces garbage collection (`gc.collect()`).
@@ -311,7 +311,7 @@ python -m src.core.physics.clone_simulation --ranks 1,76,177 --test-mode --weath
 | `--overwrite` | `flag` | *False* | Forces re-simulation of already simulated flights. |
 | `--test-mode` | `flag` | *False* | Enables test mode: slices the cohort to 1 flight total, sets the start/end date to `2025-01-02` / `2025-01-03`, and disables day-by-day temporal windowing. |
 | `--no-day-by-day` | `flag` | *False* (default is false) | Disables day-by-day temporal weather windowing and runs the entire cohort as a single batch. (By default, day-by-day windowing is active) |
-| `--min-distance` | `float` | `800.0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
+| `--min-distance` | `float` | `0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
 | `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
 
 ### Logging
@@ -336,6 +336,6 @@ All entrypoint scripts initialize logging via `setup_file_logger()` from `src.co
 * **Weather Cache**: Populated weather NetCDF files covering the flight timelines plus advection padding.
 * **Flight Lists**: Standard corridor lists Parquet files matching schedules.
 * **Master Flight Schedules & Routes**: `master_flights.parquet` and `master_flights_route_summary.pkl` located in the `data/flight_registry/` directory.
-* **Synthesized Baseline**: Synthesized trajectories registered in `global_model_registry.parquet`.
+* **Corridor Baseline**: Corridor trajectories registered in `global_corridor_model_registry.parquet`.
 
-For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/conventions.md)** standards.
+For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](../../conventions.md)** standards.
