@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from src.common.utils import setup_file_logger, extract_target_routes
+from src.common.utils import setup_file_logger, extract_target_routes, split_route_string
 from src.common.config import BASE_DIR, DEFAULT_PREFILTER_THRESHOLDS
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,9 @@ def main():
     
     # 4. Map to Canonical Route
     def get_canon(r_str):
-        parts = r_str.split(' -> ')
-        if len(parts) == 2:
-            return "-".join(sorted([parts[0][:2], parts[1][:2]]))
+        dep, arr = split_route_string(r_str)
+        if dep != "UNK" and arr != "UNK":
+            return "-".join(sorted([dep[:2], arr[:2]]))
         return None
         
     df_filtered['Canonical_Route'] = df_filtered['route'].apply(get_canon)
@@ -100,7 +100,7 @@ def main():
 
     final_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/PostFilter_callibration/stage5")
+    out_dir = Path("data/calibration/postfilter_calibration/stage5")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage5_master_sensitivity.parquet"
     

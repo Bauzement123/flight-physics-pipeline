@@ -24,7 +24,7 @@ import cartopy.crs as ccrs
 
 from src.common.config import M_TO_FT, BASE_DIR
 from src.common.map_cache import EuropeanMapCache
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +165,9 @@ def _render_trajectory_pair_on_axes(
 
 def _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lon, max_lon, min_lat, max_lat, min_alt, max_alt, label_prefix):
     """Formats gridlines, extent, labels, and limits for a subplot pair."""
-    parts = route_id.split("-")
-    if len(parts) >= 2 and not map_cache.airports_df.empty:
-        dep_arr_df = map_cache.airports_df[map_cache.airports_df["icao"].str.upper().isin([parts[0].strip().upper(), parts[-1].strip().upper()])]
+    dep, arr = split_route_string(route_id)
+    if dep != "UNK" and arr != "UNK" and not map_cache.airports_df.empty:
+        dep_arr_df = map_cache.airports_df[map_cache.airports_df["icao"].str.upper().isin([dep.upper(), arr.upper()])]
         if not dep_arr_df.empty:
             min_lon, max_lon = min(min_lon, dep_arr_df["lon"].min()), max(max_lon, dep_arr_df["lon"].max())
             min_lat, max_lat = min(min_lat, dep_arr_df["lat"].min()), max(max_lat, dep_arr_df["lat"].max())

@@ -290,4 +290,79 @@ To preserve data integrity, aerodynamic validity, and simulation correctness acr
 * Before committing changes to any core processing, ingestion, corridor, or simulation script, agents must verify that no fallback defaults exist (`grep -n "or 'B738'" src/...` must return nothing).
 * Run the developer verification suite `python -m src.devtools.verify_typecode_validation` to confirm that all modules correctly reject `NaN`/unsupported typecodes without assigning defaults and verify that `skipped_aircraft.log` receives exact `ERROR_FLAG:` entries.
 
+---
+
+## 12. Loop Engineering Protocol (Parallel Subagent Refactoring)
+
+When the Primary Architect conducts a structured multi-track refactoring session ("loop engineering"), the following protocol **must** be followed. This section exists so the user can point to it rather than re-explain the framework each session.
+
+### 12.1 Definition
+
+A **loop engineering session** is a structured refactoring workflow where:
+1. An audit subagent identifies all misalignment instances across the codebase.
+2. The Primary Architect groups fixes into **tracks** (logically independent units of work).
+3. **Implementer subagents** execute one track each and return a diff + test block.
+4. The Primary Architect (or a **reviewer subagent**) reviews the output before the next round begins.
+
+### 12.2 Mandatory Pre-Dispatch: File Conflict Check
+
+> [!CAUTION]
+> Before dispatching any batch of parallel implementer subagents, the Primary Architect **must** build a file-to-track map and verify that no file appears in more than one concurrently dispatched track.
+
+**Rule**: If two tracks modify the same file, they **must not** be dispatched in parallel. One of two resolutions applies:
+
+| Resolution | When to use |
+|---|---|
+| **Merge into one track** | The two changes to the shared file are logically related and can be implemented by a single subagent. |
+| **Sequential dispatch** | The two changes are logically independent. Dispatch Track A, wait for approval, then dispatch Track B. |
+
+Violating this rule risks silent overwrites where the second subagent to write a file clobbers the first's changes without either subagent detecting the conflict.
+
+### 12.3 Permission Tiers
+
+The user must explicitly grant one of two permission tiers at the start of each loop engineering session. The Primary Architect **must ask** if not already stated:
+
+| Tier | What subagents may do | When to use |
+|---|---|---|
+| **Sequential** | Read + write files; one subagent at a time; user reviews each diff before next dispatch | Default. Use when user wants manual review control between every track. |
+| **Parallel** | Read + write files; multiple subagents dispatched simultaneously; Primary Architect reviews diffs, not user | Use when tracks are confirmed file-conflict-free and user trusts the review loop. |
+
+If the user does not specify, the Primary Architect defaults to **Sequential** and presents one diff at a time.
+
+### 12.4 Required Subagent Output Format
+
+Every implementer subagent **must** return exactly three sections:
+
+```
+1. DIFF     — Full `git diff` for every file changed
+2. TEST BLOCK — pytest-style assertions covering the changed behaviour
+3. ISSUES   — Anything unexpected found during implementation
+             (conflicting logic, missing dependencies, pre-existing bugs, etc.)
+```
+
+Subagents that do not return all three sections are considered incomplete and their changes should not be approved until the missing sections are provided.
+
+### 12.5 Review Responsibility Matrix
+
+| Track complexity | Who reviews the diff | When a second reviewer subagent is warranted |
+|---|---|---|
+| **Trivial** (1–3 line mechanical swap, single file) | Primary Architect — direct scan | Never |
+| **Moderate** (multi-file, same pattern repeated) | Primary Architect — spot-check 2–3 files | Only if logic is ambiguous |
+| **Complex** (new functions, schema changes, bug fixes, new files) | **Flash reviewer subagent** dispatched immediately after implementer returns | Always |
+
+### 12.6 Round Structure & Walkthrough Milestones
+
+Loop engineering sessions are divided into **Rounds** based on dependency order (foundation changes before consumers). After each Round:
+
+1. The Primary Architect writes (or delegates) a **Round Walkthrough** artifact summarising every track: what changed, what callers are now aligned, any surprises.
+2. Test blocks from all tracks in the Round are **accumulated into `test_plan.md`** in the artifact directory.
+3. The `test_plan.md` is executed in a single pass after the final Round.
+
+No Round may begin until the previous Round's walkthrough is written and all tracks in that Round are approved.
+
+### 12.7 Dependency Ordering Rule
+
+Tracks that add or modify utility functions in `src/common/utils.py`, `src/common/config.py`, or `src/common/registry_utils.py` **must always be placed in Round 1** (the foundation round). Consumer tracks that import from these files must never be dispatched in the same round as the utility changes they depend on.
+
+
 

@@ -15,27 +15,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.config import REPORTS_DIR, ROUTE_SUMMARY_PARQUET
-from src.common.utils import setup_file_logger
+from src.common.utils import load_route_summary, setup_file_logger
 
 logger = logging.getLogger(__name__)
-
-
-def load_dataset(input_file: Path) -> pd.DataFrame:
-    """Loads route summary dataset from Parquet, Pickle, or CSV."""
-    logger.info(f"Loading route summary dataset from: {input_file}")
-    if not input_file.exists():
-        raise FileNotFoundError(f"Route summary file not found at: {input_file}")
-
-    suffix = input_file.suffix.lower()
-    if suffix == ".parquet":
-        df = pd.read_parquet(input_file)
-    elif suffix in (".pkl", ".pickle"):
-        df = pd.read_pickle(input_file)
-    else:
-        df = pd.read_csv(input_file)
-
-    logger.info(f"Loaded {len(df):,} route summary records.")
-    return df
 
 
 def print_pareto_statistics(df: pd.DataFrame) -> None:
@@ -102,7 +84,7 @@ def export_rankings_txt(summary_df: pd.DataFrame, output_dir: Path, name: str) -
 
 def process_population(input_file: Path, output_dir: Path, name: str) -> None:
     """Inspects route summary dataset, logs Pareto metrics, and writes rank text file."""
-    df = load_dataset(input_file)
+    df = load_route_summary(input_file)
     print_pareto_statistics(df)
     export_rankings_txt(df, output_dir, name)
 

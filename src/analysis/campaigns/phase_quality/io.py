@@ -10,6 +10,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from src.common.config import GLOBAL_EKF_DIAG_REGISTRY
 from src.common.exceptions import DiagnosticsIOError
+from src.common.utils import extract_route_id_from_path
 from src.analysis.campaigns.phase_quality.diagnostics import (
     CHI2_LOWER, CHI2_UPPER, CHI2_DF, STATE_COLS
 )
@@ -52,13 +53,7 @@ def write_route_summary(df_summary: pd.DataFrame, out_path: Path) -> None:
 
 
 def resolve_route_id(diag_path: str) -> str:
-    parts = Path(diag_path).parts
-    for pt in parts:
-        if pt.startswith("rank_"):
-            subparts = pt.split("_")
-            if len(subparts) >= 3:
-                return subparts[2]
-    return "UNKNOWN"
+    return extract_route_id_from_path(diag_path)
 
 
 def filter_by_route(df: pd.DataFrame, route_id: str) -> pd.DataFrame:

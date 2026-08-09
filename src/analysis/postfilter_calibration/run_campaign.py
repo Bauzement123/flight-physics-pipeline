@@ -35,17 +35,18 @@ def main():
     logger.info("Starting Post-Filter Calibration Campaign")
     logger.info("=========================================")
     
-    merged_registry_path = BASE_DIR / "data" / "calibration" / "PostFilter_callibration" / "data" / "merged_registry.parquet"
+    merged_registry_path = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "data" / "merged_registry.parquet"
     
     # Define the stages
     stages = [
-        ("src.analysis.PostFilter_callibration.stage0_merger", []),
-        ("src.analysis.PostFilter_callibration.stage1_directional_impact", ["--input-registry", str(merged_registry_path)]),
-        ("src.analysis.PostFilter_callibration.stage2_subspace_validation", []),  # Reads stage1 output
-        ("src.analysis.PostFilter_callibration.stage3_undirected_correlation", ["--input-registry", str(merged_registry_path)]),
-        ("src.analysis.PostFilter_callibration.stage4_sensitivity_sweep", ["--input-registry", str(merged_registry_path)]),
-        ("src.analysis.PostFilter_callibration.stage5_master_sensitivity", []),  # Reads raw master DB
-        ("src.analysis.PostFilter_callibration.stage6_prefilter_verification", ["--input-registry", str(merged_registry_path)])
+        ("src.analysis.postfilter_calibration.stage0_merger", []),
+        ("src.analysis.postfilter_calibration.stage1_directional_impact", ["--input-registry", str(merged_registry_path)]),
+        ("src.analysis.postfilter_calibration.stage2_subspace_validation", []),  # Reads stage1 output
+        ("src.analysis.postfilter_calibration.stage3_undirected_correlation", ["--input-registry", str(merged_registry_path)]),
+        ("src.analysis.postfilter_calibration.stage4_sensitivity_sweep", ["--input-registry", str(merged_registry_path)]),
+        ("src.analysis.postfilter_calibration.stage5_master_sensitivity", []),  # Reads raw master DB
+        ("src.analysis.postfilter_calibration.stage6_prefilter_verification", ["--input-registry", str(merged_registry_path)]),
+        ("src.analysis.postfilter_calibration.stage7_config_exclusion_check", [])
     ]
     
     try:
@@ -56,7 +57,7 @@ def main():
         logger.info("=========================================")
         logger.info("Calibration Campaign Completed Successfully")
         logger.info("=========================================")
-        print("Campaign completed successfully. All outputs are in data/calibration/PostFilter_callibration/")
+        print("Campaign completed successfully. All outputs are in data/calibration/postfilter_calibration/")
         
     except Exception as e:
         logger.error("Campaign failed. See logs for details.")

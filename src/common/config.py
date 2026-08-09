@@ -29,7 +29,7 @@ GLOBAL_TRAJECTORY_REGISTRY = REGISTRIES_DIR / "global_trajectory_registry.parque
 GLOBAL_CLEAN_REGISTRY = REGISTRIES_DIR / "global_clean_registry.parquet"
 GLOBAL_CLEAN_QUALITY_REGISTRY = REGISTRIES_DIR / "global_clean_quality_registry.parquet"
 GLOBAL_SIMULATION_REGISTRY = REGISTRIES_DIR / "global_simulation_registry.parquet"
-GLOBAL_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
+GLOBAL_CORRIDOR_MODEL_REGISTRY = REGISTRIES_DIR / "global_model_registry.parquet"
 GLOBAL_CORRIDOR_SIM_REGISTRY = REGISTRIES_DIR / "global_corridor_simulation_registry.parquet"
 GLOBAL_STABILITY_REGISTRY = REGISTRIES_DIR / "global_stability_registry.parquet"
 GLOBAL_FLIGHT_CLUSTER_MAP = REGISTRIES_DIR / "global_flight_cluster_map.parquet"
@@ -38,7 +38,7 @@ CALIBRATION_FLIGHT_CLUSTER_MAP = DATA_DIR / "calibration" / "calibration_flight_
 CALIBRATION_PLOT_REGISTRY = REGISTRIES_DIR / "calibration_plot_registry.parquet"
 CALIBRATION_PLOTS_DIR = DATA_DIR / "calibration" / "plots"
 ORACLE_COHORT_CACHE_DIR = DATA_DIR / "calibration" / "cache" / "oracle_cohorts"
-# Note: Medoid flight_id is also stored per-cluster directly in GLOBAL_MODEL_REGISTRY (medoid_historical_flight_id column).
+# Note: Medoid flight_id is also stored per-cluster directly in GLOBAL_CORRIDOR_MODEL_REGISTRY (medoid_historical_flight_id column).
 
 # --- Phase Quality Filter Campaign Paths ---
 PHASE_QUALITY_DIR = DATA_DIR / "calibration" / "phase_quality"

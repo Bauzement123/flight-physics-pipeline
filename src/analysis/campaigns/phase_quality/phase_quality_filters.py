@@ -14,6 +14,8 @@ import logging
 import pandas as pd
 from typing import Any, Dict, Tuple
 
+from src.common.utils import haversine_distance_m
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,20 +161,13 @@ def calculate_coordinate_velocity_3d(df_clean: pd.DataFrame) -> pd.Series:
     
     df_clean = df_clean.sort_values(by=time_col)            # Ensure sorted by time
     df_clean = df_clean.drop_duplicates(subset=[time_col])  # Remove duplicates to avoid zero devision errors
-    # Convert to radians
-    lat_rad = np.radians(df_clean[lat_col])
-    lon_rad = np.radians(df_clean[lon_col])
-    
     # Calculate horizontal distances using Haversine formula
-    R = 6371000.0  # Earth radius in meters
-    dlat = lat_rad.diff().fillna(0.0)
-    dlon = lon_rad.diff().fillna(0.0)
-    
-    # Haversine formula
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat_rad.shift(1).fillna(lat_rad)) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-    
-    horiz_dist_m = R * c
+    horiz_dist_m = haversine_distance_m(
+        lat1=df_clean[lat_col].shift(1).fillna(df_clean[lat_col]),
+        lon1=df_clean[lon_col].shift(1).fillna(df_clean[lon_col]),
+        lat2=df_clean[lat_col],
+        lon2=df_clean[lon_col],
+    )
     
     # Vertical distances
     vert_dist_m = df_clean[alt_col].diff().fillna(0.0)
@@ -229,22 +224,27 @@ def calculate_acceleration(df_clean: pd.DataFrame) -> pd.Series:
 
 def get_airport_coords(origin_icao: str, dest_icao: str) -> dict:
     """
-    Look up airport coordinates and elevation (ft) from airportsdata database.
+    Look up airport coordinates and elevation (ft) using resolve_airport_coordinates.
     
     Returns:
         dict: {'origin': (lat, lon, elev_ft), 'dest': (lat, lon, elev_ft)}
     """
-    import airportsdata
-    
-    data = airportsdata.load()
+    from src.common.utils import resolve_airport_coordinates
+
+    icaos = [ic for ic in (origin_icao, dest_icao) if ic]
+    resolved = resolve_airport_coordinates(icaos) if icaos else {}
     coords = {}
     
     for key, icao in [("origin", origin_icao), ("dest", dest_icao)]:
-        if icao in data:
-            info = data[icao]
-            coords[key] = (info["lat"], info["lon"], info["elevation"])
+        entry = resolved.get(icao, {}) if icao else {}
+        if entry and "lat" in entry and "lon" in entry:
+            coords[key] = (
+                entry.get("lat", 0.0),
+                entry.get("lon", 0.0),
+                entry.get("elevation", 0.0),
+            )
         else:
-            logger.warning(f"Airport {icao} not found in airportsdata database! Using fallback (0,0,0).")
+            logger.warning(f"Airport {icao} not found! Using fallback (0,0,0).")
             coords[key] = (0.0, 0.0, 0.0)
             
     return coords

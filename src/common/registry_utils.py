@@ -11,7 +11,7 @@ from src.common.config import (
     BASE_DIR,
     GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_STABILITY_REGISTRY,
-    GLOBAL_MODEL_REGISTRY,
+    GLOBAL_CORRIDOR_MODEL_REGISTRY,
     GLOBAL_FLIGHT_CLUSTER_MAP,
     GLOBAL_CLEAN_REGISTRY,
     GLOBAL_CLEAN_QUALITY_REGISTRY
@@ -211,7 +211,7 @@ def get_stability_record(route_id: str) -> dict:
 
 def load_model_registry() -> pd.DataFrame:
     """
-    Reads GLOBAL_MODEL_REGISTRY.
+    Reads GLOBAL_CORRIDOR_MODEL_REGISTRY.
 
     Schema (one row per corridor = unique route_id + cluster_id):
         route_id                  : str   e.g. 'EGLL-EDDF'
@@ -229,11 +229,11 @@ def load_model_registry() -> pd.DataFrame:
         "cluster_size", "medoid_historical_flight_id", "corridor_flight_id",
         "file_path", "route_class",
     ]
-    if not GLOBAL_MODEL_REGISTRY.exists():
-        logger.info(f"Model registry does not exist at {GLOBAL_MODEL_REGISTRY}. Returning empty registry.")
+    if not GLOBAL_CORRIDOR_MODEL_REGISTRY.exists():
+        logger.info(f"Model registry does not exist at {GLOBAL_CORRIDOR_MODEL_REGISTRY}. Returning empty registry.")
         return pd.DataFrame(columns=cols)
     try:
-        df = pd.read_parquet(GLOBAL_MODEL_REGISTRY)
+        df = pd.read_parquet(GLOBAL_CORRIDOR_MODEL_REGISTRY)
         # Back-compat: old records may have 'route' but not 'route_id'
         if "route" in df.columns and "route_id" not in df.columns:
             df = df.rename(columns={"route": "route_id"})
@@ -244,10 +244,10 @@ def load_model_registry() -> pd.DataFrame:
 
 
 def save_model_registry(df: pd.DataFrame):
-    """Writes to GLOBAL_MODEL_REGISTRY."""
+    """Writes to GLOBAL_CORRIDOR_MODEL_REGISTRY."""
     try:
-        GLOBAL_MODEL_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(GLOBAL_MODEL_REGISTRY, index=False)
+        GLOBAL_CORRIDOR_MODEL_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(GLOBAL_CORRIDOR_MODEL_REGISTRY, index=False)
     except Exception as e:
         logger.error(f"Failed to save model registry: {e}")
         raise
@@ -402,12 +402,12 @@ def batch_register_flight_cluster_map(route_results: list) -> None:
     logger.info(f"Batch-updated flight cluster map with {len(all_mappings)} entries.")
 
 
-def load_synthesized_paths_map() -> dict[tuple[str, int], Path]:
+def load_corridor_paths_map() -> dict[tuple[str, int], Path]:
     """Maps (route_id, cluster_id) -> absolute Path of corridor file."""
     df = load_model_registry()
-    paths_map = {}
+    corridor_paths_map = {}
     if df.empty:
-        return paths_map
+        return corridor_paths_map
 
     for _, row in df.iterrows():
         route_id = row.get("route_id") if pd.notna(row.get("route_id")) else row.get("route")
@@ -427,9 +427,9 @@ def load_synthesized_paths_map() -> dict[tuple[str, int], Path]:
         if not path.is_absolute():
             path = BASE_DIR / path
 
-        paths_map[(route_id, cluster_id)] = path
+        corridor_paths_map[(route_id, cluster_id)] = path
 
-    return paths_map
+    return corridor_paths_map
 def join_flight_registries(registries: list[Path], how: str = "left") -> pd.DataFrame:
     """
     Generic helper to join multiple registry parquets on 'flight_id'.

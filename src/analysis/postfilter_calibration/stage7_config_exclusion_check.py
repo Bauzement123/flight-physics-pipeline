@@ -24,16 +24,20 @@ from src.common.config import (
     METRIC_COL_DEP_VERT_DIST,
     METRIC_COL_ARR_VERT_DIST
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 
 
 def main():
-    setup_file_logger("calibration_stage7.log")
+    setup_file_logger("calibration.log")
     logging.info("Starting Stage 7 Config Exclusion Verification")
 
-    data_dir = BASE_DIR / "data" / "calibration" / "PostFilter_callibration"
+    data_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration"
     pc_file = data_dir / "global_clean_quality_registry_PC.parquet"
+    if not pc_file.exists():
+        pc_file = data_dir / "data" / "sources" / "global_clean_quality_registry_PC.parquet"
     vm_file = data_dir / "global_clean_quality_registry_VM.parquet"
+    if not vm_file.exists():
+        vm_file = data_dir / "data" / "sources" / "global_clean_quality_registry_VM.parquet"
 
     # 1. Load Data
     logging.info(f"Loading {pc_file.name}...")
@@ -48,7 +52,11 @@ def main():
     df["route"] = df["flight_id"].apply(lambda fid: str(fid).split("_")[0])
 
     # Ensure canonical route exists
-    df["canonical_route"] = df["route"].apply(lambda r: "-".join(sorted(r.split("-"))) if "-" in r else r)
+    def _to_canonical(r):
+        dep, arr = split_route_string(r)
+        return "-".join(sorted([dep, arr])) if dep != 'UNK' and arr != 'UNK' else r
+
+    df["canonical_route"] = df["route"].apply(_to_canonical)
 
     # 2. Fetch Active Config Limits
     max_coord_kt = DEFAULT_POSTFILTER_THRESHOLDS["max_coord_horiz_velocity_kt"]

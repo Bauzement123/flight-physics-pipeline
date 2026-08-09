@@ -2,7 +2,7 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 from src.common.registry_utils import load_clean_cohort
 
 import argparse
@@ -32,8 +32,8 @@ def main():
         parts = fid.split('_')
         if len(parts) > 2:
             route_part = parts[2]
-            if '-' in route_part:
-                dep, arr = route_part.split('-', 1)
+            dep, arr = split_route_string(route_part)
+            if dep != "UNK" and arr != "UNK":
                 return f"{dep[:2]}-{arr[:2]}"
         return "UNK"
         
@@ -89,7 +89,7 @@ def main():
 
     res_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/PostFilter_callibration")
+    out_dir = Path("data/calibration/postfilter_calibration")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage1_directional.csv"
     

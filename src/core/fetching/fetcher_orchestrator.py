@@ -23,7 +23,6 @@ from src.common.config import (
 )
 from src.common.utils import (
     extract_target_routes,
-    generate_dataset_name,
     load_route_summary,
     setup_file_logger,
     split_route_string,
@@ -82,8 +81,8 @@ def _plan_route(
 
     target = _calculate_target_quota(capacity, strategy, value)
     df_sampled = sample_flights(df_filtered, sample_size=target, seed=42)
-    rank_dir_name = f"rank_{rank:03d}_{dep}-{arr}"
-    out_path = TRAJECTORIES_DIR / rank_dir_name
+    route_dir_name = f"{dep}-{arr}"
+    out_path = TRAJECTORIES_DIR / route_dir_name
     records = prepare_flight_records(df_sampled, out_path)
 
     return {
@@ -168,8 +167,8 @@ def run_batch(
 
     for i, item in enumerate(execution_plan, 1):
         logger.info(f"Processing [{i}/{total}] - Rank {item['rank']} | {item['dep']} -> {item['arr']}")
-        rank_dir_name = f"rank_{item['rank']:03d}_{item['dep']}-{item['arr']}"
-        item_out_dir = TRAJECTORIES_DIR / rank_dir_name
+        route_dir_name = f"{item['dep']}-{item['arr']}"
+        item_out_dir = TRAJECTORIES_DIR / route_dir_name
         checkpoint_path = item_out_dir / FETCH_RUNS_DIRNAME / f"{run_id}.json"
 
         if resume and checkpoint_path.exists():

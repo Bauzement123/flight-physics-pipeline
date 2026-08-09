@@ -88,6 +88,8 @@ import sys
 import time
 from pathlib import Path
 
+from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY
+
 
 # ---------------------------------------------------------------------------
 # Low-level file helpers
@@ -243,7 +245,7 @@ def apply_registry_dump(gdrive_root: Path) -> None:
     import pandas as pd
 
     dump_path     = gdrive_root / "data" / "registries" / _DUMP_FILENAME
-    registry_path = gdrive_root / "data" / "registries" / "global_trajectory_registry.parquet"
+    registry_path = gdrive_root / GLOBAL_TRAJECTORY_REGISTRY.relative_to(BASE_DIR)
 
     print("\n" + "=" * 70)
     print("  Apply Registry Dump")
@@ -328,8 +330,8 @@ def run_sync(
     print("─" * 70)
     print("  [registries are read into memory only — never copied to G: Drive]")
 
-    local_traj_reg  = local_reg_dir  / "global_trajectory_registry.parquet"
-    gdrive_traj_reg = gdrive_reg_dir / "global_trajectory_registry.parquet"
+    local_traj_reg  = local_root  / GLOBAL_TRAJECTORY_REGISTRY.relative_to(BASE_DIR)
+    gdrive_traj_reg = gdrive_root / GLOBAL_TRAJECTORY_REGISTRY.relative_to(BASE_DIR)
 
     local_only_ids, gdrive_only_ids, common_ids = _compare_trajectory_registries(
         local_traj_reg, gdrive_traj_reg

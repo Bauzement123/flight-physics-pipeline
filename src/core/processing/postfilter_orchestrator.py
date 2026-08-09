@@ -319,7 +319,13 @@ def run_postfilters(
     # 4. Save to disk (Quality metrics only!)
     # We drop file_path since it belongs in the core index, not the quality registry
     quality_cols = [c for c in df.columns if c != "file_path"]
-    df[quality_cols].reset_index(drop=True).to_parquet(GLOBAL_CLEAN_QUALITY_REGISTRY, index=False)
+    quality_df = df[quality_cols].reset_index(drop=True)
+    if GLOBAL_CLEAN_QUALITY_REGISTRY.exists():
+        existing = pd.read_parquet(GLOBAL_CLEAN_QUALITY_REGISTRY)
+        merged = pd.concat([existing, quality_df]).drop_duplicates(subset=['flight_id'], keep='last')
+    else:
+        merged = quality_df
+    merged.to_parquet(GLOBAL_CLEAN_QUALITY_REGISTRY, index=False)
     tmp_path.unlink(missing_ok=True)
 
     _log_summary(df, filters_to_run, target_flight_ids)

@@ -286,8 +286,11 @@ def _save_route_results(
             df_updated = df_new
 
         CALIBRATION_FLIGHT_CLUSTER_MAP.parent.mkdir(parents=True, exist_ok=True)
-        df_updated.to_parquet(CALIBRATION_FLIGHT_CLUSTER_MAP, index=False)
+        _tmp = CALIBRATION_FLIGHT_CLUSTER_MAP.with_suffix(".tmp.parquet")
+        df_updated.to_parquet(_tmp, index=False)
+        _tmp.replace(CALIBRATION_FLIGHT_CLUSTER_MAP)
         logger.info(f"Saved {len(df_new)} flight mappings to calibration cluster map.")
+
 
     # 2. Identify Pareto frontier points and batch generate plots post-simulation
     if not dry_run:

@@ -16,7 +16,7 @@ import os
 
 from src.common.config import BASE_DIR
 from src.common.map_cache import EuropeanMapCache
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def plot_wiped_out_trajectories(csv_path: Path, output_dir: Path, trajectories_d
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-gather all rank folders
-    all_rank_folders = [d for d in trajectories_dir.iterdir() if d.is_dir() and d.name.startswith("rank_")]
+    all_route_folders = [d for d in trajectories_dir.iterdir() if d.is_dir()]
 
     for idx, row in top_20.iterrows():
         macro_route = row['Canonical_Route']
@@ -52,23 +52,20 @@ def plot_wiped_out_trajectories(csv_path: Path, output_dir: Path, trajectories_d
         surviving = row['Surviving_Count']
         
         logger.info(f"Processing macro {macro_route}...")
-        try:
-            dep_prefix, arr_prefix = macro_route.split('-')
-        except ValueError:
+        dep_prefix, arr_prefix = split_route_string(macro_route)
+        if dep_prefix == "UNK" or arr_prefix == "UNK":
             logger.warning(f"Invalid route format: {macro_route}")
             continue
 
         # Find matching rank folders
         matching_folders = []
-        for folder in all_rank_folders:
-            # name format: rank_001_EBBR-LEMD
-            parts = folder.name.split('_')
-            if len(parts) >= 3:
-                route = parts[-1]
-                if '-' in route:
-                    r_dep, r_arr = route.split('-')
-                    if r_dep.startswith(dep_prefix) and r_arr.startswith(arr_prefix):
-                        matching_folders.append(folder)
+        for folder in all_route_folders:
+            # name format: rank_001_EBBR-LEMD or EBBR-LEMD
+            route = folder.name.split('_')[-1]
+            r_dep, r_arr = split_route_string(route)
+            if r_dep != "UNK" and r_arr != "UNK":
+                if r_dep.startswith(dep_prefix) and r_arr.startswith(arr_prefix):
+                    matching_folders.append(folder)
 
         if not matching_folders:
             logger.warning(f"No downloaded trajectory folders found for macro {macro_route}")

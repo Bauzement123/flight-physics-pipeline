@@ -25,14 +25,14 @@ from src.common.config import (
     D_PCA,
     SILHOUETTE_THRESHOLD,
     CALIBRATION_ROUTES,
-    GLOBAL_MODEL_REGISTRY,
+    GLOBAL_CORRIDOR_MODEL_REGISTRY,
     GLOBAL_FLIGHT_CLUSTER_MAP,
     ORACLE_COHORT_CACHE_DIR,
     CLUSTERING_MAX_K,
     CHAOS_VARIANCE_THRESHOLD,
 )
 from src.common.registry_utils import load_trajectory_registry
-from src.common.utils import setup_file_logger, to_registry_path
+from src.common.utils import setup_file_logger, to_registry_path, split_route_string
 from src.core.corridor.pca_compressor import (
     normalize_vectors,
     vectorize_cohort,
@@ -261,12 +261,12 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
         except Exception as e:
             logger.warning(f"  [{route_id}] Failed to load .npz cache ({e}). Proceeding to tier 2 lookup...")
 
-    # 2. Tier 2: Check GLOBAL_MODEL_REGISTRY and parquet corridor files
+    # 2. Tier 2: Check GLOBAL_CORRIDOR_MODEL_REGISTRY and parquet corridor files
     oracle_route_id = f"ORACLE_{route_id}"
     from src.common.registry_utils import load_model_registry
     
     cached_model = None
-    if GLOBAL_MODEL_REGISTRY.exists():
+    if GLOBAL_CORRIDOR_MODEL_REGISTRY.exists():
         try:
             df_model = load_model_registry()
             df_route = df_model[df_model["route_id"] == oracle_route_id]
@@ -357,7 +357,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
     logger.info(f"  [{route_id}] Oracle established: N={n_avail}, k={k_oracle}, class={r_class}")
 
     # Save Oracle corridors and build corridors data for registration
-    dep, arr = route_id.split("-", 1)
+    dep, arr = split_route_string(route_id)
     corridor_records = []
     for c_id in range(k_oracle):
         m_idx = oracle_medoid_indices[c_id]
@@ -376,7 +376,7 @@ def _prepare_oracle(route_id: str, registry_df: pd.DataFrame) -> dict:
             "file_path": rel_path
         })
 
-    # Register in GLOBAL_MODEL_REGISTRY using batch_register_corridors
+    # Register in GLOBAL_CORRIDOR_MODEL_REGISTRY using batch_register_corridors
     from src.common.registry_utils import batch_register_corridors
     oracle_res = {
         "route_id": f"ORACLE_{route_id}",

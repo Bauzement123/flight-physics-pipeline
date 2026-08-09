@@ -4,20 +4,11 @@ import pandas as pd
 from typing import Any
 
 from src.common.config import MPS_TO_KT, MPS_TO_FPM
+from src.common.utils import haversine_distance_m
 
 def _calc_horiz_dist_m(lat1: Any, lon1: Any, lat2: Any, lon2: Any) -> Any:
     """Calculate horizontal distance in meters using Haversine formula."""
-    R = 6371000.0  # Earth radius in meters
-    phi1 = np.radians(lat1)
-    phi2 = np.radians(lat2)
-    delta_phi = np.radians(lat2 - lat1)
-    delta_lambda = np.radians(lon2 - lon1)
-    a = (
-        np.sin(delta_phi / 2.0) ** 2
-        + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lambda / 2.0) ** 2
-    )
-    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-    return R * c
+    return haversine_distance_m(lat1=lat1, lon1=lon1, lat2=lat2, lon2=lon2)
 
 def _calc_vert_dist_m(alt_m: float, elev_m: float) -> float:
     """Calculate absolute vertical distance in meters."""
@@ -32,16 +23,12 @@ def _calc_coord_velocity_mps(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
     df_sorted = df.sort_values(by="time").drop_duplicates(subset=["time"])
 
-    lat_rad = np.radians(df_sorted["latitude"])
-    lon_rad = np.radians(df_sorted["longitude"])
-
-    R = 6371000.0
-    dlat = lat_rad.diff().fillna(0.0)
-    dlon = lon_rad.diff().fillna(0.0)
-
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat_rad.shift(1).fillna(lat_rad)) * np.cos(lat_rad) * np.sin(dlon / 2.0) ** 2
-    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-    horiz_dist_m = R * c
+    horiz_dist_m = haversine_distance_m(
+        lat1=df_sorted["latitude"].shift(1).fillna(df_sorted["latitude"]),
+        lon1=df_sorted["longitude"].shift(1).fillna(df_sorted["longitude"]),
+        lat2=df_sorted["latitude"],
+        lon2=df_sorted["longitude"],
+    )
 
     vert_dist_m = df_sorted["altitude"].diff().fillna(0.0)
 

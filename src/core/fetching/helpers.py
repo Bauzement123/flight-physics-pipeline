@@ -21,7 +21,7 @@ from src.common.config import (
     DEFAULT_PREFILTER_THRESHOLDS,
     ROUTE_SUMMARY_PARQUET,
 )
-from src.common.utils import to_project_relative, write_json_dataclass, log_skipped_aircraft
+from src.common.utils import load_route_summary, to_project_relative, write_json_dataclass, log_skipped_aircraft
 from src.core.fetching.models import FetchRunParams, RouteFetchResult
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def _get_route_summary_cache() -> pd.DataFrame:
     global _ROUTE_SUMMARY_CACHE
     if _ROUTE_SUMMARY_CACHE is None:
         try:
-            _ROUTE_SUMMARY_CACHE = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
+            _ROUTE_SUMMARY_CACHE = load_route_summary(ROUTE_SUMMARY_PARQUET)
         except Exception as e:
             logger.warning(f"Could not load route summary for duration pre-filter: {e}")
             _ROUTE_SUMMARY_CACHE = pd.DataFrame()

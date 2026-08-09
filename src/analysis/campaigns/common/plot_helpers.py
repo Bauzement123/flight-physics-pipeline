@@ -23,7 +23,7 @@ from src.common.config import (
 from src.core.corridor.stability_worker import _load_route_flights
 from src.core.corridor.pca_compressor import classify_and_normalize_cohort, vectorize_flight
 
-from src.common.utils import setup_file_logger, to_registry_path
+from src.common.utils import setup_file_logger, to_registry_path, split_route_string
 from src.common.concurrency import limit_numeric_threads
 
 logger = logging.getLogger(__name__)
@@ -223,9 +223,9 @@ def assemble_and_save_plot(payload: dict, out_path: Path) -> None:
 
     if crop_airports:
         clean_route = route_id.replace("ORACLE_", "").split("_")[0]
-        parts = clean_route.split("-")
-        if len(parts) >= 2 and not map_cache.airports_df.empty:
-            dep_icao, arr_icao = parts[0].strip().upper(), parts[-1].strip().upper()
+        dep, arr = split_route_string(clean_route)
+        if dep != "UNK" and arr != "UNK" and not map_cache.airports_df.empty:
+            dep_icao, arr_icao = dep.upper(), arr.upper()
             dep_arr_df = map_cache.airports_df[map_cache.airports_df["icao"].str.upper().isin([dep_icao, arr_icao])]
             if not dep_arr_df.empty and len(dep_arr_df) >= 1:
                 min_lon = dep_arr_df["lon"].min()
@@ -386,6 +386,8 @@ def _register_plots(results: list[dict]) -> None:
         try:
             df_existing = pd.read_parquet(CALIBRATION_PLOT_REGISTRY)
             keys = ["route_id", "config_type", "N_0", "tau", "K_max", "replicate"]
+            if "crop_airports" in df_existing.columns and "crop_airports" in df_new.columns:
+                keys.append("crop_airports")
             df_updated = pd.concat([df_existing, df_new]).drop_duplicates(subset=keys, keep="last")
         except Exception as e:
             logger.warning(f"Could not update existing calibration plot registry, overwriting: {e}")

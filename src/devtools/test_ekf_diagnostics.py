@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 (PROJECT_ROOT / "data" / "temp").mkdir(parents=True, exist_ok=True)
 
 from src.common.config import init_runtime
+from src.common.utils import to_project_relative
 from src.core.processing.kalman_filter import (
     load_ekf_diag_arrays,
     compute_ekf_quality_metrics_from_diag,
@@ -142,7 +143,7 @@ def t4():
             # Verify content
             row = df[df["flight_id"] == "MOCK123"]
             assert len(row) == 1
-            assert row["diag_file_path"].iloc[0] == diag_file.resolve().relative_to(PROJECT_ROOT).as_posix()
+            assert row["diag_file_path"].iloc[0] == to_project_relative(diag_file)
             assert np.isclose(row["ekf_quality_score"].iloc[0], 0.9)
             assert np.isclose(row["ekf_max_trace_p"].iloc[0], 50.0)
             assert np.isclose(row["ekf_mean_nis"].iloc[0], 4.0)
@@ -204,10 +205,10 @@ def t6():
             assert df.empty
 
 
-@test("T7: index_synthesized_files supports force=False incremental updates")
+@test("T7: index_corridor_models supports force=False incremental updates")
 def t7():
-    from src.common.build_global_manifest import index_synthesized_files
-    from src.common.config import GLOBAL_MODEL_REGISTRY
+    from src.common.build_global_manifest import index_corridor_models
+    from src.common.config import GLOBAL_CORRIDOR_MODEL_REGISTRY
     
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "data" / "temp") as td:
         temp_dir = Path(td)
@@ -216,25 +217,25 @@ def t7():
         mock_corridor_paths_dir.mkdir(parents=True, exist_ok=True)
         
         # Create a mock synthesized file
-        sf = mock_corridor_paths_dir / "EDDF-LIRF_synthesized_c1.parquet"
+        sf = mock_corridor_paths_dir / "EDDF-LIRF_corridor_c1.parquet"
         pd.DataFrame({"route_class": [1]}).to_parquet(sf)
         
-        with patch("src.common.build_global_manifest.GLOBAL_MODEL_REGISTRY", mock_registry), \
+        with patch("src.common.build_global_manifest.GLOBAL_CORRIDOR_MODEL_REGISTRY", mock_registry), \
              patch("src.common.build_global_manifest.save_model_registry", lambda df: df.to_parquet(mock_registry, index=False)):
             
             # Rebuild first time
-            index_synthesized_files(mock_registry, mock_corridor_paths_dir, force=True)
+            index_corridor_models(mock_registry, mock_corridor_paths_dir, force=True)
             assert mock_registry.exists()
             df1 = pd.read_parquet(mock_registry)
             assert len(df1) == 1
             assert df1["route"].iloc[0] == "EDDF-LIRF"
             
             # Add a second mock synthesized file
-            sf2 = mock_corridor_paths_dir / "EGLL-BIKF_synthesized_c2.parquet"
+            sf2 = mock_corridor_paths_dir / "EGLL-BIKF_corridor_c2.parquet"
             pd.DataFrame({"route_class": [2]}).to_parquet(sf2)
             
             # Rebuild second time with force=False (should load existing and skip first file)
-            index_synthesized_files(mock_registry, mock_corridor_paths_dir, force=False)
+            index_corridor_models(mock_registry, mock_corridor_paths_dir, force=False)
             df2 = pd.read_parquet(mock_registry)
             assert len(df2) == 2
             assert "EDDF-LIRF" in df2["route"].values

@@ -7,7 +7,7 @@ import numpy as np
 from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
-    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_MODEL_REGISTRY, RAW_CONCAT_SUFFIX,
+    GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_CORRIDOR_MODEL_REGISTRY, RAW_CONCAT_SUFFIX,
     CLEAN_CONCAT_SUFFIX, GLOBAL_EKF_DIAG_REGISTRY
 )
 from src.common.registry_utils import save_model_registry
@@ -307,7 +307,7 @@ def rebuild_corridor_sim_registry(force: bool = False) -> None:
 
 def rebuild_model_registry(force: bool = False) -> None:
     index_corridor_models(
-        registry_file=GLOBAL_MODEL_REGISTRY,
+        registry_file=GLOBAL_CORRIDOR_MODEL_REGISTRY,
         search_dir=CORRIDOR_PATHS_DIR,
         force=force
     )

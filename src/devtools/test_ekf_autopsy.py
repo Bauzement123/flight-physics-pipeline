@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.common.config import init_runtime, PhaseControl
 from src.common.exceptions import DiagnosticsIOError
+from src.common.utils import to_project_relative
 from src.analysis.campaigns.phase_quality import diagnostics, io, orchestration
 
 PASS = "\033[92m PASS\033[0m"
@@ -133,7 +134,7 @@ def test_orchestration_run():
         registry_df = pd.DataFrame([{
             "flight_id": "flight_123",
             "route_id": "EDDF-LIRF",
-            "diag_file_path": str(diag_path.relative_to(PROJECT_ROOT).as_posix()),
+            "diag_file_path": to_project_relative(diag_path),
             "ekf_quality_score": 0.95,
             "ekf_mean_nis": 6.0,
             "ekf_max_trace_p": 12.0

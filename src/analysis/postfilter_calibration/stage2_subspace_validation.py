@@ -1,15 +1,23 @@
 import pandas as pd
 from pathlib import Path
 import logging
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 
 logger = logging.getLogger(__name__)
+
+
+def _split_canonical(canon: str) -> tuple[str, str]:
+    """Splits a 2-letter country-prefix canonical route like 'ED-EG' -> ('ED', 'EG').
+    These are PostFilter calibration internal format, not 4-letter ICAOs."""
+    parts = canon.split('-', 1)
+    return (parts[0], parts[1]) if len(parts) == 2 else ('UNK', 'UNK')
+
 
 def main():
     setup_file_logger(log_filename="calibration.log")
     logger.info("Starting Stage 2: Subspace Failure Comparison (Cross-mapped)")
 
-    in_file = Path("data/calibration/PostFilter_callibration/stage1_directional.csv")
+    in_file = Path("data/calibration/postfilter_calibration/stage1_directional.csv")
     if not in_file.exists():
         logger.error(f"Input file not found: {in_file}")
         return
@@ -18,7 +26,7 @@ def main():
     df = df[df['Total_Flights'] >= 10].copy()
 
     def get_canonical(directed_route):
-        dep, arr = directed_route.split('-')
+        dep, arr = split_route_string(directed_route)
         return "-".join(sorted([dep, arr]))
         
     df['Canonical_Route'] = df['Directed_Route'].apply(get_canonical)
@@ -55,7 +63,7 @@ def main():
             
             for canon in valid_canonicals:
                 # Dir A is always the alphabetical first string, Dir B is the second
-                dir_a_name, dir_b_name = canon.split('-')
+                dir_a_name, dir_b_name = _split_canonical(canon)
                 dir_a_route = f"{dir_a_name}-{dir_b_name}"
                 dir_b_route = f"{dir_b_name}-{dir_a_name}"
                 
@@ -85,7 +93,7 @@ def main():
             
     res_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/PostFilter_callibration")
+    out_dir = Path("data/calibration/postfilter_calibration")
     out_file = out_dir / "stage2_subspace_validation.csv"
     
     res_df.to_csv(out_file, index=False)

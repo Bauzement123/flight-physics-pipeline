@@ -1,5 +1,4 @@
 import argparse
-import json
 import logging
 from pathlib import Path
 import numpy as np
@@ -13,7 +12,7 @@ from src.common.config import (
     EUR_LON_MIN,
     EUR_LON_MAX,
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, resolve_airport_coordinates
 
 def find_latest_file(directory: Path, pattern: str) -> Path:
     """Finds the latest file matching pattern in directory recursively (based on modification time)."""
@@ -114,19 +113,6 @@ def main():
     else:
         out_path = MASTER_FLIGHTS_DB_DIR / "master_flights.parquet"
 
-    # 3. Resolve Airport Coordinates Cache
-    cache_path = Path(args.airports_cache) if args.airports_cache else AIRPORTS_CACHE_PATH
-    airports_db = {}
-    if cache_path.exists():
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                airports_db = json.load(f)
-            logging.info(f"Loaded airport coordinate cache from {cache_path} ({len(airports_db)} entries).")
-        except Exception as e:
-            logging.error(f"Error loading airport coordinate cache from {cache_path}: {e}")
-    else:
-        logging.warning(f"Airport cache file not found at {cache_path}.")
-
     logging.info(f"Loading input flight dataset from {input_path}...")
     if input_path.suffix.lower() == ".parquet":
         df_flights = pd.read_parquet(input_path)
@@ -134,6 +120,14 @@ def main():
         df_flights = pd.read_csv(input_path, dtype=str)
 
     logging.info(f"Initial flight count: {len(df_flights):,} rows.")
+
+    # 3. Resolve Airport Coordinates
+    deps = set(df_flights["estdepartureairport"].dropna().astype(str).str.strip().unique()) if "estdepartureairport" in df_flights.columns else set()
+    arrs = set(df_flights["estarrivalairport"].dropna().astype(str).str.strip().unique()) if "estarrivalairport" in df_flights.columns else set()
+    unique_icaos = [ic for ic in deps.union(arrs) if ic and ic != "None" and ic != "nan"]
+
+    airports_db = resolve_airport_coordinates(unique_icaos)
+    logging.info(f"Resolved airport coordinates ({len(airports_db)} entries).")
 
     # 4. Apply Filters
     df_filtered = apply_all_filters(

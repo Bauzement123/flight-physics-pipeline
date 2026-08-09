@@ -85,7 +85,7 @@ def find_all_fids(
       - Single-file entries appended SECOND (→ higher deduplication priority)
 
     Args:
-        cohort_dir: Path to the cohort directory (e.g. data/trajectories/rank_143_EDDF-LIRF)
+        cohort_dir: Path to the cohort directory (e.g. data/trajectories/EDDF-LIRF or legacy rank_143_EDDF-LIRF)
         type_: "raw" or "clean"
 
     Returns:

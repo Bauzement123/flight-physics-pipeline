@@ -14,7 +14,7 @@ import cartopy.crs as ccrs
 
 from src.common.config import BASE_DIR
 from src.common.map_cache import EuropeanMapCache
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,8 @@ def plot_top_wiped_out_routes(csv_path: Path, output_dir: Path):
         
         logger.info(f"Plotting route {route} ({initial} -> {surviving} flights)")
         
-        try:
-            dep_prefix, arr_prefix = route.split('-')
-        except ValueError:
+        dep_prefix, arr_prefix = split_route_string(route)
+        if dep_prefix == "UNK" or arr_prefix == "UNK":
             logger.warning(f"Invalid route format: {route}")
             continue
 

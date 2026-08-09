@@ -3,9 +3,7 @@ import logging
 import pandas as pd
 from typing import Any
 
-import airportsdata
-
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, resolve_airport_coordinates
 from .filter_result import FilterResult
 from .trajectory_filters import (
     extract_horiz_velocity_metric,
@@ -18,22 +16,22 @@ from .trajectory_filters import (
 
 logger = logging.getLogger(__name__)
 
-# Module-level globals for worker processes
-_airports: dict[str, dict[str, Any]] = {}
+# Module-level airport cache preloaded once per worker process at init.
+# Avoids re-reading the JSON cache file on every batch (O(1) per-batch lookup).
+_AIRPORTS: dict[str, dict] = {}
+
 
 def _worker_init() -> None:
     """Initialize process-level state for process pool workers."""
+    global _AIRPORTS
     # Initialize the log handler for the worker process (idempotent/spawn-safe)
     setup_file_logger(log_filename="processing.log")
-    
-    global _airports
-    try:
-        _airports = airportsdata.load()
-    except Exception as e:
-        logger.error(f"Failed to load airportsdata in worker process: {e}")
-        _airports = {}
-        
-    logger.debug("Worker process initialized successfully.")
+    # Preload the full airport coordinate cache into process memory once.
+    # resolve_airport_coordinates([]) returns the full cache dict without
+    # triggering any network/library fallbacks (all ICAOs already present).
+    _AIRPORTS = resolve_airport_coordinates([])
+    logger.debug(f"Worker initialized with {len(_AIRPORTS)} airports preloaded.")
+
 
 def process_batch(
     batch: list[FilterResult],
@@ -67,7 +65,15 @@ def process_batch(
                 fr.metric_max_acceleration_mps2 = extract_acceleration_metric(df)
 
             if "distance" in filters_to_run:
-                dist_metrics = extract_distance_metrics(df, _airports)
+                dep_icao = str(df["estdepartureairport"].iloc[0]).strip().upper() if "estdepartureairport" in df.columns and pd.notna(df["estdepartureairport"].iloc[0]) else None
+                arr_icao = str(df["estarrivalairport"].iloc[0]).strip().upper() if "estarrivalairport" in df.columns and pd.notna(df["estarrivalairport"].iloc[0]) else None
+                icaos = [ic for ic in (dep_icao, arr_icao) if ic]
+                # Use preloaded in-process cache; only call resolver for true cache misses.
+                cache_miss = [ic for ic in icaos if ic not in _AIRPORTS]
+                if cache_miss:
+                    _AIRPORTS.update(resolve_airport_coordinates(cache_miss))
+                airports = {ic: _AIRPORTS[ic] for ic in icaos if ic in _AIRPORTS}
+                dist_metrics = extract_distance_metrics(df, airports)
                 fr.metric_dep_horiz_dist_m = dist_metrics.get("dep_horiz_dist_m")
                 fr.metric_dep_vert_dist_m = dist_metrics.get("dep_vert_dist_m")
                 fr.metric_arr_horiz_dist_m = dist_metrics.get("arr_horiz_dist_m")
@@ -78,3 +84,4 @@ def process_batch(
             # Missing metrics will be caught by FilterResult.__post_init__ or as_dict and safely mapped to pd.NA
 
     return batch
+

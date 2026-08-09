@@ -1,4 +1,3 @@
-import json
 import sys
 from pathlib import Path
 
@@ -6,21 +5,15 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parents[2]
 sys.path.append(str(project_root))
 
-from src.common.config import AIRPORTS_CACHE_PATH
+from src.common.utils import resolve_airport_coordinates
 
 def find_bounding_airports():
     """
-    Reads the airport coordinates JSON file and extracts the four airports
-    that define the bounding box (extremes of latitude and longitude)
-    containing all other airports.
+    Extracts the four airports that define the bounding box (extremes of latitude
+    and longitude) containing all other airports using resolve_airport_coordinates.
     """
-    if not AIRPORTS_CACHE_PATH.exists():
-        print(f"Error: Airport coordinates cache JSON not found at: {AIRPORTS_CACHE_PATH}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Loading airport coordinates from: {AIRPORTS_CACHE_PATH}")
-    with open(AIRPORTS_CACHE_PATH, "r", encoding="utf-8") as f:
-        airports_db = json.load(f)
+    print("Loading airport coordinates via resolve_airport_coordinates...")
+    airports_db = resolve_airport_coordinates([])
 
     if not airports_db:
         print("Error: The airport coordinates database is empty.", file=sys.stderr)

@@ -19,26 +19,8 @@ from src.common.config import (
     MASTER_FLIGHTS_DB_DIR, 
     DEFAULT_AIRPORT_PREFIXES
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, retry_backoff, write_json_dataclass
 
-def fetch_daily_flights_with_backoff(trino_client, query, day_str, max_retries=10):
-    """
-    Executes the Trino daily flights query with exponential backoff on failure.
-    """
-    import time
-    for attempt in range(max_retries):
-        try:
-            logging.info(f"Querying Trino partition day={day_str} (Attempt {attempt + 1}/{max_retries})...")
-            df_daily = trino_client.query(query)
-            logging.info(f"Retrieved {len(df_daily)} records for {day_str}.")
-            return df_daily
-        except Exception as e:
-            wait_time = 2 ** attempt
-            logging.warning(f"Trino query failed for partition {day_str} on attempt {attempt + 1}: {e}. Retrying in {wait_time}s...")
-            time.sleep(wait_time)
-            
-    logging.error(f"Max retries ({max_retries}) reached. Trino query failed permanently for partition {day_str}.")
-    return None
 
 def fetch_daily_flights(trino_client, day_str, dep_prefixes, arr_prefixes):
     """
@@ -75,7 +57,7 @@ def fetch_daily_flights(trino_client, day_str, dep_prefixes, arr_prefixes):
     if arr_prefixes:
         query = query.where(or_(*(FlightsData4.estarrivalairport.startswith(p) for p in arr_prefixes)))
 
-    return fetch_daily_flights_with_backoff(trino_client, query, day_str)
+    return retry_backoff(trino_client.query, query, max_retries=10)
 
 def build_master_population(
     start_date: datetime,
@@ -162,15 +144,16 @@ def build_master_population(
     # 3. Handle errors and gate saving
     if failed_days:
         # Save failure info to JSON for external tools/checkers
-        import json
         failed_log_path = MASTER_FLIGHTS_DB_DIR / "failed_dates.json"
         try:
-            with open(failed_log_path, 'w', encoding='utf-8') as f:
-                json.dump({
+            write_json_dataclass(
+                failed_log_path,
+                {
                     "failed_dates": failed_days,
                     "parameters": {"dep_prefixes": dep_prefixes, "arr_prefixes": arr_prefixes},
                     "timestamp": datetime.now().isoformat()
-                }, f, indent=4)
+                }
+            )
             logging.info(f"Failed dates logged to {failed_log_path}")
         except Exception as e:
             logging.error(f"Failed to write failed dates JSON: {e}")

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 from src.common.registry_utils import load_clean_cohort
 from src.core.fetching.helpers import build_flight_id
 from src.common.config import BASE_DIR
@@ -36,8 +36,8 @@ def main():
         parts = str(fid).split('_')
         if len(parts) > 2:
             route_part = parts[2]
-            if '-' in route_part:
-                dep, arr = route_part.split('-', 1)
+            dep, arr = split_route_string(route_part)
+            if dep != "UNK" and arr != "UNK":
                 return "-".join(sorted([dep[:2], arr[:2]]))
         return None
         
@@ -118,7 +118,7 @@ def main():
         
     final_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/PostFilter_callibration/stage6")
+    out_dir = Path("data/calibration/postfilter_calibration/stage6")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage6_prefilter_verification.csv"
     final_df.to_csv(out_file, index=False)

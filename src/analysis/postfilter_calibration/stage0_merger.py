@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 import logging
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 from src.common.config import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -11,7 +11,7 @@ def main():
     logger.info("Starting Stage 0: Data Merger & Preparation")
     
     # 1. Dynamic Loading
-    sources_dir = BASE_DIR / "data" / "calibration" / "PostFilter_callibration" / "data" / "sources"
+    sources_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "data" / "sources"
     if not sources_dir.exists():
         logger.error(f"Sources directory not found: {sources_dir}")
         return
@@ -47,8 +47,8 @@ def main():
         parts = str(fid).split('_')
         if len(parts) > 2:
             route_part = parts[2]
-            if '-' in route_part:
-                dep, arr = route_part.split('-', 1)
+            dep, arr = split_route_string(route_part)
+            if dep != "UNK" and arr != "UNK":
                 dep_c, arr_c = dep[:2], arr[:2]
                 canon = "-".join(sorted([dep_c, arr_c]))
                 return canon
@@ -57,7 +57,7 @@ def main():
     df_merged['macro_route'] = df_merged['flight_id'].apply(get_macro_route)
     
     # 4. Save Output
-    out_dir = BASE_DIR / "data" / "calibration" / "PostFilter_callibration" / "data"
+    out_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "data"
     out_file = out_dir / "merged_registry.parquet"
     
     df_merged.to_parquet(out_file, index=False)

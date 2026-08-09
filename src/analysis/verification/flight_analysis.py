@@ -14,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Import central configurations and utilities
-from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET, GLOBAL_MODEL_REGISTRY
+from src.common.config import BASE_DIR, GLOBAL_TRAJECTORY_REGISTRY, ROUTE_SUMMARY_PARQUET, GLOBAL_CORRIDOR_MODEL_REGISTRY
 from src.common.utils import load_route_summary, split_route_string, setup_file_logger
 from src.common.registry_utils import (
     load_trajectory_registry,
@@ -142,8 +142,8 @@ def process_raw_trajectories(
     logger.info(f"Extracted {len(df_out)} flights with valid baroaltitude ({top_k_percent}% threshold) and airport distance within bounds.")
     return df_out
 
-def process_synthesized_trajectories(
-    synthesized_registry_path: Path,
+def process_corridor_trajectories(
+    corridor_registry_path: Path,
     summary_path: Path,
     min_height: float = 0.0,
     min_distance: float = None,
@@ -154,9 +154,9 @@ def process_synthesized_trajectories(
     Loads synthesized trajectories from the synthesized registry, extracts altitude threshold at top K%,
     and matches with route summary distances. Filters results based on provided bounds.
     """
-    logger.info(f"Loading synthesized registry: {synthesized_registry_path}")
-    if not synthesized_registry_path.exists():
-        logger.warning(f"Synthesized registry not found at: {synthesized_registry_path}. Skipping synthetic trajectories.")
+    logger.info(f"Loading synthesized registry: {corridor_registry_path}")
+    if not corridor_registry_path.exists():
+        logger.warning(f"Synthesized registry not found at: {corridor_registry_path}. Skipping synthetic trajectories.")
         return pd.DataFrame()
 
     try:
@@ -194,12 +194,10 @@ def process_synthesized_trajectories(
         distance = route_distance_map.get(route_key, None)
         if distance is None:
             # Try reverse mapping
-            try:
-                parts = route_key.split(" -> ")
-                reverse_key = f"{parts[1]} -> {parts[0]}"
+            dep, arr = split_route_string(route_key)
+            if dep != "UNK" and arr != "UNK":
+                reverse_key = f"{arr} -> {dep}"
                 distance = route_distance_map.get(reverse_key, None)
-            except Exception:
-                distance = None
 
         # Check distance bounds before loading the file to optimize performance
         if distance is not None:
@@ -397,8 +395,8 @@ def main():
         help="Path to global raw trajectory registry parquet file"
     )
     parser.add_argument(
-        "--synthesized-registry", 
-        default=str(GLOBAL_MODEL_REGISTRY), 
+        "--corridor-registry", 
+        default=str(GLOBAL_CORRIDOR_MODEL_REGISTRY), 
         help="Path to global synthesized trajectory registry parquet file"
     )
     parser.add_argument(
@@ -430,7 +428,7 @@ def main():
         help="Maximum airport geodesic distance (kilometers) to filter flights"
     )
     parser.add_argument(
-        "--no-synthesized", 
+        "--no-corridor", 
         action="store_false", 
         dest="show_synthesized", 
         help="Disable loading and plotting synthesized route baselines (red dots)"
@@ -451,7 +449,7 @@ def main():
     args = parser.parse_args()
 
     registry_path = Path(args.registry)
-    synth_registry_path = Path(args.synthesized_registry)
+    corridor_registry_path = Path(args.corridor_registry)
     summary_path = Path(args.summary)
     output_dir = Path(args.output_dir)
     
@@ -486,8 +484,8 @@ def main():
     # Process synthesized files if toggled on
     df_synth = pd.DataFrame()
     if args.show_synthesized:
-        df_synth = process_synthesized_trajectories(
-            synthesized_registry_path=synth_registry_path,
+        df_synth = process_corridor_trajectories(
+            corridor_registry_path=corridor_registry_path,
             summary_path=summary_path,
             min_height=args.min_height,
             min_distance=min_dist_m,

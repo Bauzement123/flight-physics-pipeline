@@ -435,10 +435,10 @@ def run_batch_clone_simulation(
         return
         
     # Saving relevant File Paths for synthesized clusters
-    from src.common.registry_utils import load_synthesized_paths_map
-    valid_synthesized_files = {k: p for k, p in load_synthesized_paths_map().items() if p.exists()}
+    from src.common.registry_utils import load_corridor_paths_map
+    valid_corridor_files = {k: p for k, p in load_corridor_paths_map().items() if p.exists()}
                 
-    valid_routes_set = {route for (route, cluster_id) in valid_synthesized_files.keys()}
+    valid_routes_set = {route for (route, cluster_id) in valid_corridor_files.keys()}
     
     def get_route_key(r_str):
         dep, arr = split_route_string(r_str)
@@ -609,7 +609,7 @@ def run_batch_clone_simulation(
             corridor_out_dir = out_dir_path / f"{dep}-{arr}_cloned_simulated"
             corridor_out_dir.mkdir(parents=True, exist_ok=True)
             
-            available_clusters = [cid for (r, cid) in valid_synthesized_files.keys() if r == route_key]
+            available_clusters = [cid for (r, cid) in valid_corridor_files.keys() if r == route_key]
             if not available_clusters:
                 logger.error(f"No synthesized base paths available for route {route_key}. Skipping flight.")
                 continue
@@ -637,12 +637,12 @@ def run_batch_clone_simulation(
                     
                 base_flight = cached_base_flights.get((route_key, cluster_id))
                 if base_flight is None:
-                    synth_path = valid_synthesized_files.get((route_key, cluster_id))
-                    if not synth_path:
+                    corridor_path = valid_corridor_files.get((route_key, cluster_id))
+                    if not corridor_path:
                         logger.error(f"Synthesized base path missing for route {route_key} cluster {cluster_id}. Skipping.")
                         continue
                         
-                    synth_flights = read_flights_from_parquet(str(synth_path))
+                    synth_flights = read_flights_from_parquet(str(corridor_path))
                     if not synth_flights:
                         logger.error(f"Empty synthesized file for route {route_key} cluster {cluster_id}. Skipping.")
                         continue

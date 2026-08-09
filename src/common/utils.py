@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import uuid
 import time
@@ -11,13 +12,15 @@ from pathlib import Path
 import logging
 
 from src.common.config import (
-    ROUTE_SUMMARY_PARQUET, TRAJECTORIES_DIR, BASE_DIR, LOGS_DIR,
+    ROUTE_SUMMARY_PARQUET, LOGS_DIR,
     BACKOFF_MAX_RETRIES, BACKOFF_INITIAL_DELAY, BACKOFF_FACTOR, BACKOFF_MAX_DELAY,
     UNSUPPORTED_TYPECODE_FLAG, AIRPORTS_CACHE_PATH,
 )
 from src.common.exceptions import RetryError
 
 logger = logging.getLogger(__name__)
+
+_ROUTE_ID_RE = re.compile(r'^([A-Z]{4})-([A-Z]{4})$')
 
 
 def to_registry_path(path: "Path | str", base: "Path" = None) -> str:
@@ -118,79 +121,207 @@ def haversine_distance_m(
 
 def resolve_airport_coordinates(unique_icaos: list) -> dict:
     """
-    Cache-backed resolver: ICAO code -> {"lat": float, "lon": float}.
-    Checks AIRPORTS_CACHE_PATH first; resolves missing entries via airportsdata
-    (primary) or traffic.data.airports (fallback); writes updates back to cache.
+    Cache-backed resolver: ICAO code -> {lat, lon, name, country, elevation}.
+
+    Resolution cascade (stops at first hit per airport):
+      1. Local cache  (AIRPORTS_CACHE_PATH)
+      2. OurAirports CSV  (data/registries/ourairports.csv, 75 k+ airfields;
+         auto-downloaded from GitHub if missing)
+      3. traffic.data.airports
+      4. airportsdata.load('ICAO')
+      5. openap.extra.airports()
+
+    Every entry is standardised to:
+        {"lat": float, "lon": float,
+         "name": str, "country": str, "elevation": float}
+
+    Existing extra keys in the cache (is_icao_schema, has_target_airframe,
+    survived_bbox, …) are preserved as-is.
     """
-    airports_db = {}
-    cache_updated = False
+    from src.common.config import AIRPORTS_CACHE_PATH, REGISTRIES_DIR
 
-    # 1. Try to load from local JSON cache first
+    # ------------------------------------------------------------------ #
+    # 1. Load cache
+    # ------------------------------------------------------------------ #
+    airports_db: dict = {}
     if AIRPORTS_CACHE_PATH.exists():
-        logger.info(f"Loading airport coordinates from local cache: {AIRPORTS_CACHE_PATH}")
         try:
-            with open(AIRPORTS_CACHE_PATH, 'r', encoding='utf-8') as f:
-                airports_db = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to read airport coordinates cache: {e}")
+            with open(AIRPORTS_CACHE_PATH, "r", encoding="utf-8") as fh:
+                airports_db = json.load(fh)
+        except Exception as exc:
+            logger.warning(f"Could not read airport cache: {exc}")
 
-    # 2. Check if there are any missing ICAOs
-    missing_icaos = [icao for icao in unique_icaos if icao not in airports_db]
+    missing = [ic for ic in unique_icaos
+               if ic not in airports_db
+               or "lat" not in airports_db[ic]
+               or "lon" not in airports_db[ic]
+               or "elevation" not in airports_db[ic]]
 
-    if missing_icaos:
-        logger.info(f"Found {len(missing_icaos)} airports missing from local coordinates cache. Resolving them...")
-        
-        resolved_new = {}
+    if not missing:
+        return airports_db
+
+    resolved: dict[str, dict] = {}
+
+    # ------------------------------------------------------------------ #
+    # 2. OurAirports CSV
+    # ------------------------------------------------------------------ #
+    ourairports_csv = REGISTRIES_DIR / "ourairports.csv"
+    if not ourairports_csv.exists():
+        try:
+            import urllib.request
+            url = ("https://raw.githubusercontent.com/davidmegginson/"
+                   "ourairports-data/main/airports.csv")
+            logger.info("Downloading OurAirports CSV …")
+            urllib.request.urlretrieve(url, ourairports_csv)
+        except Exception as exc:
+            logger.warning(f"OurAirports CSV download failed: {exc}")
+
+    if ourairports_csv.exists():
+        try:
+            import csv
+            with open(ourairports_csv, newline="", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    icao = (row.get("ident") or "").strip().upper()
+                    if icao not in missing:
+                        continue
+                    try:
+                        resolved[icao] = {
+                            "lat": float(row["latitude_deg"]),
+                            "lon": float(row["longitude_deg"]),
+                            "name": row.get("name", ""),
+                            "country": row.get("iso_country", ""),
+                            "elevation": float(row["elevation_ft"] or 0),
+                        }
+                    except (ValueError, KeyError):
+                        continue
+        except Exception as exc:
+            logger.warning(f"OurAirports CSV parse error: {exc}")
+
+    still_missing = [ic for ic in missing if ic not in resolved]
+
+    # ------------------------------------------------------------------ #
+    # 3. traffic
+    # ------------------------------------------------------------------ #
+    if still_missing:
+        try:
+            from traffic.data import airports as _traffic_airports
+            for icao in list(still_missing):
+                try:
+                    ap = _traffic_airports[icao]
+                    if ap is not None:
+                        resolved[icao] = {
+                            "lat": float(ap.latitude),
+                            "lon": float(ap.longitude),
+                            "name": getattr(ap, "name", "") or "",
+                            "country": getattr(ap, "country", "") or "",
+                            "elevation": float(getattr(ap, "altitude", 0) or 0),
+                        }
+                        still_missing.remove(icao)
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+
+    # ------------------------------------------------------------------ #
+    # 4. airportsdata
+    # ------------------------------------------------------------------ #
+    if still_missing:
         try:
             import airportsdata
-            logger.info("Resolving missing airport coordinates using airportsdata library...")
-            data = airportsdata.load()
-            for icao in missing_icaos:
-                if icao in data:
-                    resolved_new[icao] = {"lat": data[icao]["lat"], "lon": data[icao]["lon"]}
+            _ad = airportsdata.load("ICAO")
+            for icao in list(still_missing):
+                info = _ad.get(icao)
+                if info:
+                    resolved[icao] = {
+                        "lat": float(info["lat"]),
+                        "lon": float(info["lon"]),
+                        "name": info.get("name", "") or "",
+                        "country": info.get("country", "") or "",
+                        "elevation": float(info.get("elevation", 0) or 0),
+                    }
+                    still_missing.remove(icao)
         except ImportError:
-            logger.warning("airportsdata not installed. Falling back to traffic library airports database...")
-            try:
-                from traffic.data import airports
-                traffic_db = {
-                    row.icao: {"lat": row.latitude, "lon": row.longitude}
-                    for row in airports.data.dropna(subset=['icao']).itertuples()
-                }
-                for icao in missing_icaos:
-                    if icao in traffic_db:
-                        resolved_new[icao] = traffic_db[icao]
-            except ImportError:
-                logger.error("Could not import airportsdata or traffic. Airport coordinates cannot be resolved.")
+            pass
 
-        if resolved_new:
-            airports_db.update(resolved_new)
-            cache_updated = True
-            logger.info(f"Successfully resolved {len(resolved_new)} new airport coordinate entries.")
+    # ------------------------------------------------------------------ #
+    # 5. openap
+    # ------------------------------------------------------------------ #
+    if still_missing:
+        try:
+            import openap
+            _oa = openap.extra.airports()
+            for icao in list(still_missing):
+                info = _oa.get(icao)
+                if info:
+                    resolved[icao] = {
+                        "lat": float(info.get("lat", 0)),
+                        "lon": float(info.get("lon", 0)),
+                        "name": info.get("name", "") or "",
+                        "country": info.get("country", "") or "",
+                        "elevation": float(info.get("elevation", 0) or 0),
+                    }
+                    still_missing.remove(icao)
+        except (ImportError, AttributeError):
+            pass
 
-    if cache_updated:
+    if still_missing:
+        logger.warning(f"Could not resolve {len(still_missing)} ICAO(s): {still_missing[:10]}")
+
+    # ------------------------------------------------------------------ #
+    # Merge and persist
+    # ------------------------------------------------------------------ #
+    for icao, entry in resolved.items():
+        existing = airports_db.get(icao, {})
+        # Preserve any extra boolean flags already in the cache
+        airports_db[icao] = {**existing, **entry}
+
+    if resolved:
         try:
             AIRPORTS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(AIRPORTS_CACHE_PATH, 'w', encoding='utf-8') as f:
-                json.dump(airports_db, f, indent=4)
-            logger.info(f"Saved updated airport coordinates cache to: {AIRPORTS_CACHE_PATH}")
-        except Exception as e:
-            logger.error(f"Failed to write airport coordinates cache: {e}")
+            write_json_dataclass(AIRPORTS_CACHE_PATH, airports_db)
+        except Exception as exc:
+            logger.error(f"Failed to persist airport cache: {exc}")
 
     return airports_db
 
 
 def split_route_string(route_str: str) -> tuple[str, str]:
     """
-    Splits a route string of format 'DEP -> ARR' into (departure, arrival).
+    Splits a route string into (departure, arrival).
+    Supports both 'DEP -> ARR' and 'DEP-ARR' formats.
     Returns ('UNK', 'UNK') on failure.
     """
-    if not isinstance(route_str, str) or ' -> ' not in route_str:
+    if not isinstance(route_str, str):
         return 'UNK', 'UNK'
-    try:
-        dep, arr = route_str.split(' -> ', 1)
-        return dep.strip(), arr.strip()
-    except Exception:
-        return 'UNK', 'UNK'
+    s = route_str.strip()
+    if ' -> ' in s:
+        parts = s.split(' -> ', 1)
+        return parts[0].strip(), parts[1].strip()
+    m = _ROUTE_ID_RE.match(s)
+    if m:
+        return m.group(1), m.group(2)
+    return 'UNK', 'UNK'
+
+
+def extract_route_id_from_path(path) -> str:
+    """
+    Extracts route_id ('DEP-ARR') from a path string or Path object.
+    Supports both modern 'DEP-ARR' folder names and legacy 'rank_NNN_DEP-ARR' folders.
+    Returns 'UNKNOWN' if no valid route segment is found.
+    """
+    from pathlib import Path as _Path
+    parts = _Path(path).parts
+    for pt in parts:
+        dep, arr = split_route_string(pt)
+        if dep != 'UNK' and arr != 'UNK':
+            return f"{dep}-{arr}"
+        if pt.startswith('rank_'):
+            subparts = pt.split('_')
+            if len(subparts) >= 3 and '-' in subparts[-1]:
+                return subparts[-1]
+    return 'UNKNOWN'
+
 
 
 def _filter_ranks(

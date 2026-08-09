@@ -20,7 +20,7 @@ from src.common.config import (
     AUDIT_COHORT_MAP_REGISTRY,
     PHASE_QUALITY_REGISTRIES_DIR,
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 from src.core.fetching.helpers import build_flight_id, write_parquet_atomic
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def build_candidate_pool() -> tuple[pd.DataFrame, pd.DataFrame]:
     all_cohort_maps = []
 
     for route in TARGET_ROUTES:
-        dep, arr = route.split("-")
+        dep, arr = split_route_string(route)
         logger.info(f"Processing candidate pool for route {route} ({dep} -> {arr})...")
 
         df_route = df_master[

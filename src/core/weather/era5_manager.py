@@ -12,7 +12,6 @@ import logging
 import sys
 import os
 import re
-import time
 from pathlib import Path
 from pycontrails import DiskCacheStore
 from pycontrails.datalib.ecmwf import ERA5
@@ -26,7 +25,7 @@ from src.common.config import (
     ERA5_GRID,
     WEATHER_DIR
 )
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, retry_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -40,28 +39,6 @@ def init_cache_store(cache_dir: str) -> DiskCacheStore:
     
     logger.debug(f"Initializing custom pycontrails DiskCacheStore at: {cache_path.resolve()}")
     return DiskCacheStore(cache_dir=str(cache_path))
-
-def download_with_retry(era5_client: ERA5, max_retries: int = 3) -> None:
-    """
-    Safely executes the pycontrails ERA5 download call, wrapping it
-    in a retry loop with linear backoff to mitigate transient CDS API dropouts.
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"Initiating download pipeline (attempt {attempt}/{max_retries})...")
-            era5_client.download()
-            logger.info("Download query completed successfully.")
-            return
-        except Exception as e:
-            if attempt == max_retries:
-                logger.error(f"Failed download after {max_retries} attempts.")
-                raise e
-            wait_seconds = attempt * 10
-            logger.warning(
-                f"CDS API download attempt {attempt} failed: {e}. "
-                f"Retrying in {wait_seconds} seconds..."
-            )
-            time.sleep(wait_seconds)
 
 def retrieve_dataset(
     time_bounds: tuple[str, str],
@@ -128,7 +105,7 @@ def retrieve_dataset(
             f"Missing {len(missing_times)} hourly files for {dataset_desc} variables. "
             f"Triggering asynchronous CDS download pipeline..."
         )
-        download_with_retry(era5_client)
+        retry_backoff(era5_client.download, max_retries=3)
 
 def fetch_era5_data(start: str, end: str, cache_dir: str = None) -> None:
     """

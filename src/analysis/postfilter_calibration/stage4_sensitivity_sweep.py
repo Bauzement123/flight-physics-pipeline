@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from src.common.utils import setup_file_logger
+from src.common.utils import setup_file_logger, split_route_string
 from src.common.registry_utils import load_clean_cohort
 
 import argparse
@@ -30,8 +30,8 @@ def main():
         parts = fid.split('_')
         if len(parts) > 2:
             route_part = parts[2]
-            if '-' in route_part:
-                dep, arr = route_part.split('-', 1)
+            dep, arr = split_route_string(route_part)
+            if dep != "UNK" and arr != "UNK":
                 dep_c, arr_c = dep[:2], arr[:2]
                 canon = "-".join(sorted([dep_c, arr_c]))
                 return canon
@@ -99,7 +99,7 @@ def main():
 
     final_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/PostFilter_callibration/stage4")
+    out_dir = Path("data/calibration/postfilter_calibration/stage4")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage4_sensitivity_sweep.parquet"
     

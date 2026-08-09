@@ -14,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Import Central Configurations
-from src.common.config import BASE_DIR, GLOBAL_MODEL_REGISTRY
+from src.common.config import BASE_DIR, GLOBAL_CORRIDOR_MODEL_REGISTRY
 from src.common.registry_utils import load_model_registry
 from src.common.utils import setup_file_logger
 
@@ -161,8 +161,8 @@ def print_report_table(df_dist: pd.DataFrame, total_routes: int, total_paths: in
 def main():
     parser = argparse.ArgumentParser(description="Analyze route class distribution in synthesized registry.")
     parser.add_argument(
-        "--registry", 
-        default=str(GLOBAL_MODEL_REGISTRY), 
+        "--corridor-registry", 
+        default=str(GLOBAL_CORRIDOR_MODEL_REGISTRY), 
         help="Path to synthesized trajectory registry parquet file"
     )
     parser.add_argument(
@@ -172,7 +172,7 @@ def main():
     )
     args = parser.parse_args()
 
-    registry_path = Path(args.registry)
+    registry_path = Path(args.corridor_registry)
     output_plot_path = Path(args.output_plot)
 
     logger.info("Initializing Route Class Distribution Analysis workflow...")
