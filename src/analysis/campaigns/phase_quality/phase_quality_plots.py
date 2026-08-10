@@ -64,7 +64,7 @@ def _get_phase_color(val: Any) -> str:
     return DEFAULT_COLOR
 
 
-def _extract_valid_coords_and_time(df_fl: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+def _extract_valid_coords_and_time(df_fl: pd.DataFrame, median_s: float | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Extracts cleaned coordinates (lons, lats, alts, t_norm, phases) from a trajectory DataFrame."""
     lon_col = "lon" if "lon" in df_fl.columns else "longitude"
     lat_col = "lat" if "lat" in df_fl.columns else "latitude"
@@ -91,7 +91,10 @@ def _extract_valid_coords_and_time(df_fl: pd.DataFrame) -> tuple[np.ndarray, np.
     if time_col in df_fl.columns:
         ts_series = pd.to_datetime(df_fl[time_col])
         ts = (ts_series - ts_series.iloc[0]).dt.total_seconds().values.astype(float)[valid_mask]
-        t_norm = (ts / ts[-1]) if (len(ts) > 1 and ts[-1] > 0) else np.linspace(0.0, 1.0, len(ts))
+        if median_s is not None and median_s > 0:
+            t_norm = ts / median_s
+        else:
+            t_norm = (ts / ts[-1]) if (len(ts) > 1 and ts[-1] > 0) else np.linspace(0.0, 1.0, len(ts))
     else:
         t_norm = np.linspace(0.0, 1.0, len(lons))
 
@@ -108,7 +111,8 @@ def _render_trajectory_pair_on_axes(
     show_rejected: bool,
     map_cache: EuropeanMapCache,
     route_id: str,
-    crop_padding: float,
+    median_s: float | None = None,
+    crop_padding: float = 1.5,
     label_prefix: str = "Raw",
 ) -> dict[str, Any]:
     """Helper to render ground track and vertical profile onto given axes."""
@@ -130,7 +134,7 @@ def _render_trajectory_pair_on_axes(
         df_fl = trajectories.get(fid)
         if df_fl is None or df_fl.empty:
             continue
-        coords = _extract_valid_coords_and_time(df_fl)
+        coords = _extract_valid_coords_and_time(df_fl, median_s=median_s)
         if not coords:
             continue
         lons, lats, alts, t_norm, phases = coords
@@ -186,7 +190,7 @@ def _format_pair_axes(ax_map, ax_prof, map_cache, route_id, crop_padding, min_lo
 
     ax_map.set_title(f"{label_prefix} Ground Track", fontsize=10)
     ax_prof.set_title(f"{label_prefix} Vertical Profile", fontsize=10)
-    ax_prof.set_xlabel("Normalized Time Point [0, 1]", fontsize=9)
+    ax_prof.set_xlabel("Normalized Time [1.0 = Route Median Duration]", fontsize=9)
     ax_prof.set_ylabel("Altitude (ft)", fontsize=9)
     ax_prof.grid(True, linestyle="--", alpha=0.5)
     ax_prof.set_xlim(-0.02, 1.02)
@@ -198,6 +202,7 @@ def _audit_drawability(
     trajectories: dict[str, pd.DataFrame],
     eval_records: dict[str, dict] | None,
     show_rejected: bool,
+    median_s: float | None = None,
 ) -> dict[str, int]:
     """
     Computes drawability stats for a list of candidate flight IDs under a given
@@ -227,7 +232,7 @@ def _audit_drawability(
         if df_fl is None or df_fl.empty:
             stats["missing_geom"] += 1
             continue
-        coords = _extract_valid_coords_and_time(df_fl)
+        coords = _extract_valid_coords_and_time(df_fl, median_s=median_s)
         if not coords:
             stats["invalid_coords"] += 1
             continue
@@ -247,6 +252,7 @@ def plot_cohort_audit_page(
     crop_padding: float = 1.5,
     plot_format: str = "SVG",
     trajectories_clean: dict[str, pd.DataFrame] | None = None,
+    median_s: float | None = None,
 ) -> tuple[plt.Figure, dict[str, int]]:
     """
     Renders a cohort audit page. If trajectories_clean is provided, renders 6 subplots
@@ -289,7 +295,7 @@ def plot_cohort_audit_page(
 
     stats = _render_trajectory_pair_on_axes(
         ax1, ax2, candidate_flight_ids, trajectories, eval_records_pre,
-        show_rejected, map_cache, route_id, crop_padding,
+        show_rejected, map_cache, route_id, median_s=median_s, crop_padding=crop_padding,
         label_prefix="Raw + Prefilter" if is_three_row else ""
     )
 
@@ -328,7 +334,7 @@ def plot_cohort_audit_page(
         # registry) are still drawable as red dashed lines when show_rejected=True.
         _render_trajectory_pair_on_axes(
             ax3, ax4, candidate_flight_ids, trajectories_for_row2, eval_records_pre,
-            show_rejected, map_cache, route_id, crop_padding, label_prefix="Those But Clean"
+            show_rejected, map_cache, route_id, median_s=median_s, crop_padding=crop_padding, label_prefix="Those But Clean"
         )
 
         # Row 3: Clean + Postfilter (uses full eval_records)
@@ -345,7 +351,7 @@ def plot_cohort_audit_page(
         # as red dashed lines alongside the clean+postfilter evaluation colours.
         row3_render_stats = _render_trajectory_pair_on_axes(
             ax5, ax6, candidate_flight_ids, trajectories_for_row3, eval_records,
-            show_rejected, map_cache, route_id, crop_padding, label_prefix="Clean + Postfilter"
+            show_rejected, map_cache, route_id, median_s=median_s, crop_padding=crop_padding, label_prefix="Clean + Postfilter"
         )
         stats["plotted"] = row3_render_stats["plotted"]
         stats["rejected"] = row3_render_stats["rejected"]
@@ -388,13 +394,13 @@ def plot_cohort_audit_page(
         )
         legend_handles.extend([pre_handle, post_handle])
 
-    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records, show_rejected)
+    row1_stats = _audit_drawability(candidate_flight_ids, trajectories, eval_records, show_rejected, median_s=median_s)
     row2_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
     row3_stats = {"total": 0, "plotted": 0, "rejected": 0, "missing_geom": 0, "invalid_coords": 0, "drawn_rejected": 0}
 
     if is_three_row:
-        row2_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row2, eval_records_pre, show_rejected)
-        row3_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row3, eval_records, show_rejected)
+        row2_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row2, eval_records_pre, show_rejected, median_s=median_s)
+        row3_stats = _audit_drawability(candidate_flight_ids, trajectories_for_row3, eval_records, show_rejected, median_s=median_s)
 
     page_plotted = row1_stats["plotted"] + row2_stats["plotted"] + row3_stats["plotted"]
     page_rejected = row1_stats["drawn_rejected"] + row2_stats["drawn_rejected"] + row3_stats["drawn_rejected"]
@@ -427,6 +433,7 @@ def compile_route_audit_pdf(
     show_rejected: bool = False,
     plot_format: str = "SVG",
     trajectories_clean: dict[str, pd.DataFrame] | None = None,
+    median_s: float | None = None,
 ) -> Path:
     """Compiles a multi-page PDF report for a route by iterating through all cohorts."""
     out_pdf_path = Path(out_pdf_path)
@@ -455,6 +462,7 @@ def compile_route_audit_pdf(
                 crop_padding=1.5,
                 plot_format=plot_format,
                 trajectories_clean=trajectories_clean,
+                median_s=median_s,
             )
             pdf.savefig(fig, dpi=DEFAULT_DPI, bbox_inches="tight")
             plt.close(fig)

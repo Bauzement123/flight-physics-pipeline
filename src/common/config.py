@@ -227,9 +227,9 @@ DEFAULT_POSTFILTER_THRESHOLDS = {
     "max_coord_horiz_velocity_kt": 800.0,    # max horizontal coord-derived speed    (kt)
     "max_coord_vert_velocity_fpm": 7000.0,   # max vertical coord-derived speed      (ft/min)
     "max_acceleration_mps2":         7.5,    # max 3D acceleration                   (m/s²)
-    "max_dep_horiz_dist":        15000.0,    # max departure horizontal distance     (m)
+    "max_dep_horiz_dist":        30000.0,    # max departure horizontal distance     (m)
     "max_dep_vert_dist":          1000.0,    # max departure vertical distance       (m)
-    "max_arr_horiz_dist":        15000.0,    # max arrival horizontal distance       (m)
+    "max_arr_horiz_dist":        30000.0,    # max arrival horizontal distance       (m)
     "max_arr_vert_dist":          1000.0,    # max arrival vertical distance         (m)
 }
 

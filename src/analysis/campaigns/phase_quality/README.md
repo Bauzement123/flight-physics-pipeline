@@ -43,6 +43,7 @@ Phase Quality Campaign Objectives
       │
       ├── Sub-objective 3: Evaluate Trajectory Post-Filters (Script 2 Part B)
       │    └── Solution: apply_trajectory_postfilters() in phase_quality_filters.py (delegates to src.core.processing.trajectory_filters)
+      │         ├── Defaults: Uses DEFAULT_POSTFILTER_THRESHOLDS from src.common.config unless overridden via thresholds arg
       │         ├── extract_horiz_velocity_metric(df_clean): extract maximum horizontal speed gs (kt)
       │         ├── extract_vert_velocity_metric(df_clean): extract maximum vertical speed rocd (fpm)
       │         ├── extract_coord_horiz_velocity_metric(df_clean): extract coordinate-derived horiz speed (kt) via haversine_distance_m()
@@ -58,8 +59,9 @@ Phase Quality Campaign Objectives
       │
       ├── Sub-objective 5: Compile Multi-Page Visual Audit PDF Reports (Script 2 Part A)
       │    └── Solution: compile_route_audit_pdf() in phase_quality_plots.py
-      │         ├── Inputs: Route trajectories, evaluation status records, output format (PNG/SVG)
+      │         ├── Inputs: Route trajectories, evaluation status records, output format (PNG/SVG), median_s (route median duration in seconds)
       │         ├── Route Parsing: split_route_string() from src.common.utils parses departure/arrival ICAO codes for map cache extent
+      │         ├── Time Normalization: Profile X-axis normalized to route median duration (1.0 = route median duration) via median_s
       │         ├── Safety: Rasterized PNG mode (--format PNG) prevents laptop PDF rendering lag
       │         └── Outputs: 10-page audit PDF report per route (40 flights rendered per page)
       │

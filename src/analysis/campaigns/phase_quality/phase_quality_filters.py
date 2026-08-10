@@ -430,7 +430,7 @@ from src.core.processing.trajectory_filters import (
 def apply_trajectory_postfilters(
     df_clean: pd.DataFrame,
     df_raw: pd.DataFrame,
-    thresholds: Dict[str, Any]
+    thresholds: Dict[str, Any] | None = None
 ) -> Tuple[bool, str, dict]:
     """
     Evaluates a loaded trajectory against canonical processing pipeline post-filters:
@@ -448,7 +448,8 @@ def apply_trajectory_postfilters(
 
     from src.common import config
     merged_post_thresholds = config.DEFAULT_POSTFILTER_THRESHOLDS.copy()
-    merged_post_thresholds.update(thresholds)
+    if thresholds:
+        merged_post_thresholds.update(thresholds)
 
     all_metrics = {}
 

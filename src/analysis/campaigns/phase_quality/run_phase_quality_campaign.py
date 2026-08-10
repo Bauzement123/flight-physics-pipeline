@@ -55,6 +55,7 @@ def _worker_run_campaign_route(
     show_rejected: bool = False,
     use_clean: bool = False,
     thresholds: dict = DEFAULT_PREFILTER_THRESHOLDS,
+    median_s: float | None = None,
 ) -> tuple[str, dict]:
     """Worker target to load trajectories, run post-filters, and compile PDF report for a route."""
     setup_file_logger("calibration.log")
@@ -193,9 +194,9 @@ def _worker_run_campaign_route(
                             df_clean = recompute_airport_distances(df_clean, coords)
                             trajectories_clean[fid] = df_clean
                             
-                # Run the post-filters
+                # Run the post-filters using the default post-filter config
                 rejected, reason, metrics = apply_trajectory_postfilters(
-                    df_clean, df_raw, thresholds= thresholds
+                    df_clean, df_raw, thresholds=None
                 )
                 
                 if rejected:
@@ -228,6 +229,7 @@ def _worker_run_campaign_route(
             show_rejected=show_rejected,
             plot_format=plot_format,
             trajectories_clean=trajectories_clean if (trajectories_clean and len(trajectories_clean) > 0) else None,
+            median_s=median_s,
         )
         return f"[{route_id}] Successfully generated {out_pdf.name}", flight_updates
     except Exception as e:
@@ -298,7 +300,7 @@ def main():
         
     df_pool = pd.read_parquet(pool_file)
     df_map = pd.read_parquet(map_file)
-    df_route_summary = load_route_summary()
+    df_route_summary = load_route_summary().set_index("route")
     
 
     thresholds = {
@@ -345,7 +347,8 @@ def main():
                     args.format,
                     args.show_rejected,
                     args.use_clean,
-                    thresholds
+                    thresholds,
+                    (df_route_summary.loc[route, "route_duration_median"] * 60.0) if route in df_route_summary.index else None
                 ): route
                 for route in target_routes
             }
@@ -364,6 +367,8 @@ def main():
                 args.format,
                 args.show_rejected,
                 args.use_clean,
+                thresholds,
+                (df_route_summary.loc[route, "route_duration_median"] * 60.0) if route in df_route_summary.index else None
             )
             logger.info(msg)
             all_flight_updates.update(flight_updates)
