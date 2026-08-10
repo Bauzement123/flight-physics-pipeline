@@ -53,6 +53,7 @@ def main() -> None:
         ],
         help="Sub-filters to run (default: all six).",
     )
+    parser.add_argument("--merge-only", action="store_true", help="Aggregate existing SQLite .db temporary records into the quality manifest without extracting metrics.")
     args = parser.parse_args()
     
     # 0. Target registry path resolution
@@ -139,6 +140,7 @@ def main() -> None:
         overwrite=args.overwrite,
         max_workers=args.max_workers,
         target_flight_ids=target_flight_ids,
+        merge_only=args.merge_only,
     )
 
 if __name__ == "__main__":

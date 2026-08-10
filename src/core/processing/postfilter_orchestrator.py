@@ -3,10 +3,10 @@ import concurrent.futures
 import logging
 import multiprocessing as mp
 from pathlib import Path
+import sqlite3
 from typing import Generator
 
 import pandas as pd
-import numpy as np
 
 from src.common.config import (
     BASE_DIR,
@@ -41,7 +41,7 @@ from src.common.config import (
     GLOBAL_TRAJECTORY_REGISTRY,
     GLOBAL_RAW_QUALITY_REGISTRY,
 )
-from src.common.registry_utils import load_clean_cohort, load_raw_cohort, join_flight_registries
+from src.common.registry_utils import join_flight_registries
 from .filter_result import FilterResult
 from .postfilter_worker import _worker_init, process_batch
 
@@ -73,12 +73,66 @@ FILTER_METRIC_MAP: dict[str, list[str]] = {
 # Private helpers
 # ---------------------------------------------------------------------------
 
-
-
 def _chunks(lst: list, n: int) -> Generator[list, None, None]:
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
+
+
+def _init_sqlite_db(db_path: Path) -> None:
+    """Initialize SQLite database table and WAL mode for fast crash-safe upserts."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS results (
+                flight_id TEXT PRIMARY KEY,
+                metric_max_horiz_speed_mps REAL,
+                metric_max_vert_speed_mps REAL,
+                metric_max_coord_horiz_speed_mps REAL,
+                metric_max_coord_vert_speed_mps REAL,
+                metric_max_acceleration_mps2 REAL,
+                metric_dep_horiz_dist_m REAL,
+                metric_dep_vert_dist_m REAL,
+                metric_arr_horiz_dist_m REAL,
+                metric_arr_vert_dist_m REAL
+            );
+        """)
+
+
+def _upsert_batch_sqlite(db_path: Path, completed_batch: list[FilterResult]) -> None:
+    """Upsert a completed batch into SQLite in a single transaction (O(batch_size))."""
+    rows = []
+    for fr in completed_batch:
+        d = fr.as_dict()
+        rows.append((
+            d.get("flight_id"),
+            d.get("metric_max_horiz_speed_mps"),
+            d.get("metric_max_vert_speed_mps"),
+            d.get("metric_max_coord_horiz_speed_mps"),
+            d.get("metric_max_coord_vert_speed_mps"),
+            d.get("metric_max_acceleration_mps2"),
+            d.get("metric_dep_horiz_dist_m"),
+            d.get("metric_dep_vert_dist_m"),
+            d.get("metric_arr_horiz_dist_m"),
+            d.get("metric_arr_vert_dist_m"),
+        ))
+    sql = """
+        INSERT OR REPLACE INTO results (
+            flight_id,
+            metric_max_horiz_speed_mps,
+            metric_max_vert_speed_mps,
+            metric_max_coord_horiz_speed_mps,
+            metric_max_coord_vert_speed_mps,
+            metric_max_acceleration_mps2,
+            metric_dep_horiz_dist_m,
+            metric_dep_vert_dist_m,
+            metric_arr_horiz_dist_m,
+            metric_arr_vert_dist_m
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(sql, rows)
 
 
 def _load_registry(
@@ -86,8 +140,7 @@ def _load_registry(
     quality_registry_path: Path,
     filters_to_run: list[str]
 ) -> pd.DataFrame:
-    """Read the base registry locator and join quality metrics, set flight_id index, add missing filter columns, and
-    drop any legacy 3-D combined velocity columns left over from the old filter logic."""
+    """Read the base registry locator and join quality metrics, set flight_id index, add missing filter columns."""
     if not registry_path.exists():
         raise FileNotFoundError(f"Registry file not found: {registry_path}")
         
@@ -171,11 +224,12 @@ def _run_pool(
     df: pd.DataFrame,
     batches: list[list[FilterResult]],
     filters_to_run: list[str],
-    tmp_path: Path,
+    db_path: Path,
     n_workers: int,
 ) -> None:
-    """Submit batches to the process pool, merge results, flush snapshot, and log progress milestones."""
+    """Submit batches to the process pool, upsert results to SQLite db_path, and log progress milestones."""
     import time
+    _init_sqlite_db(db_path)
     ctx = mp.get_context("spawn")
     total_flights = sum(len(b) for b in batches)
     total_batches = len(batches)
@@ -196,7 +250,7 @@ def _run_pool(
             batch_size = futures[future]
             completed_batch = future.result()
             _merge_results(df, completed_batch, filters_to_run)
-            df.reset_index(drop=True).to_parquet(tmp_path, index=False)
+            _upsert_batch_sqlite(db_path, completed_batch)
 
             processed_flights += batch_size
             completed_batches += 1
@@ -212,6 +266,36 @@ def _run_pool(
                 last_log_pct = current_pct
 
 
+def _merge_sqlite(
+    df: pd.DataFrame,
+    db_path: Path,
+    filters_to_run: list[str],
+) -> int:
+    """Read all records from SQLite db_path and merge them back into in-memory DataFrame.
+
+    Uses df.update() for vectorized index-aligned merging — only overwrites cells
+    where the SQLite row has a non-NA value, leaving existing metrics intact.
+    """
+    if not db_path.exists():
+        return 0
+
+    logger.info(f"Merging SQLite database from {db_path}...")
+    with sqlite3.connect(db_path) as conn:
+        dumped_df = pd.read_sql_query("SELECT * FROM results", conn)
+
+    if dumped_df.empty:
+        return 0
+
+    dumped_df.set_index("flight_id", inplace=True)
+
+    # Only update the metric columns relevant to the requested filters
+    cols_to_update = [mc for f in filters_to_run for mc in FILTER_METRIC_MAP[f]]
+    cols_present = [c for c in cols_to_update if c in dumped_df.columns]
+    df.update(dumped_df[cols_present])  # Vectorized; skips NaN; aligns on index
+
+    return int(df.index.isin(dumped_df.index).sum())
+
+
 def evaluate_thresholds(
     df: pd.DataFrame, 
     filters_to_run: list[str], 
@@ -219,20 +303,15 @@ def evaluate_thresholds(
     target_flight_ids: set[str] | None = None
 ) -> None:
     """Vectorized evaluation of metric columns against thresholds to update pass/reason columns."""
-    
-    # Determine which rows to evaluate. If specific flights were targeted, evaluate only those.
-    # Otherwise, evaluate all flights that have been processed (have non-NA in any metric column).
     if target_flight_ids is not None:
         eval_mask = df.index.isin(target_flight_ids)
     else:
-        # If no specific target, evaluate rows that have at least one metric populated
         all_metric_cols = [m for sublist in FILTER_METRIC_MAP.values() for m in sublist]
         eval_mask = df[all_metric_cols].notna().any(axis=1)
 
     for f in filters_to_run:
         pass_col, reason_col = FILTER_COL_MAP[f]
         
-        # Reset columns for the filter, BUT ONLY for the evaluated rows
         df.loc[eval_mask, pass_col] = True
         df.loc[eval_mask, reason_col] = "PASSED"
         
@@ -272,7 +351,6 @@ def evaluate_thresholds(
             df.loc[mask, reason_col] = "max 3D acceleration > limit"
             
         elif f == "distance":
-            # For distance we check 4 limits
             limits = {
                 METRIC_COL_DEP_HORIZ_DIST: (thresholds.get("max_dep_horiz_dist"), "DEP_HORIZ"),
                 METRIC_COL_DEP_VERT_DIST: (thresholds.get("max_dep_vert_dist"), "DEP_VERT"),
@@ -286,7 +364,6 @@ def evaluate_thresholds(
                     df.loc[mask, pass_col] = False
                     df.loc[mask, reason_col] = f"{name}_DIST > limit"
 
-        # Handle NaNs from metric extraction (e.g. empty trajectories, missing airports)
         for mcol in FILTER_METRIC_MAP[f]:
             mask_na = eval_mask & (df[pass_col] == True) & df[mcol].isna()
             df.loc[mask_na, pass_col] = False
@@ -295,8 +372,6 @@ def evaluate_thresholds(
 
 def _log_summary(df: pd.DataFrame, filters_to_run: list[str], target_flight_ids: set[str] | None = None) -> None:
     """Log passed / failed / missing counts per requested filter."""
-    
-    # Restrict summary to the target scope if specified
     if target_flight_ids is not None:
         df_target = df[df.index.isin(target_flight_ids)]
     else:
@@ -324,6 +399,7 @@ def run_postfilters(
     max_workers: int | None = None,
     target_flight_ids: set[str] | None = None,
     quality_registry_path: Path | None = None,
+    merge_only: bool = False,
 ) -> None:
     """Orchestrate the post-filtering pipeline on clean or raw trajectory registries."""
     if filters_to_run is None:
@@ -337,36 +413,46 @@ def run_postfilters(
         else:
             quality_registry_path = GLOBAL_CLEAN_QUALITY_REGISTRY
 
-    logger.info(
-        f"Starting post-filter run — registry: {registry_path.name}, "
-        f"quality target: {quality_registry_path.name}, filters: {filters_to_run}"
-    )
+    db_path = BASE_DIR / "data" / "temp" / "postfilter_tmp" / f"{quality_registry_path.stem}.db"
 
-    df = _load_registry(registry_path, quality_registry_path, filters_to_run)
-    work_list, skipped = _build_work_list(df, filters_to_run, overwrite, target_flight_ids)
+    if merge_only:
+        logger.info(f"Running MERGE-ONLY mode — scanning SQLite database: {db_path}")
+        df = _load_registry(registry_path, quality_registry_path, filters_to_run)
+        merged_count = _merge_sqlite(df, db_path, filters_to_run)
+        logger.info(f"Merged {merged_count} flight record(s) from SQLite database.")
+    else:
+        logger.info(
+            f"Starting post-filter run — registry: {registry_path.name}, "
+            f"quality target: {quality_registry_path.name}, filters: {filters_to_run}"
+        )
 
-    logger.info(
-        f"Registry rows: {len(df)} | Target: {len(work_list) + skipped} | "
-        f"To process (metrics extraction): {len(work_list)} | Skipped (metrics already exist): {skipped}"
-    )
-    
-    tmp_path = quality_registry_path.with_suffix(".tmp.parquet")
-    
-    if work_list:
-        batches = list(_chunks(work_list, batch_size))
-        n_workers = max(1, min(max_workers or PROCESSING_DEFAULT_MAX_WORKERS, len(batches)))
+        df = _load_registry(registry_path, quality_registry_path, filters_to_run)
+        work_list, skipped = _build_work_list(df, filters_to_run, overwrite, target_flight_ids)
 
-        try:
-            _run_pool(df, batches, filters_to_run, tmp_path, n_workers)
-        except Exception as exc:
-            logger.error(f"Orchestrator crashed — snapshot preserved at: {tmp_path} ({exc})")
-            raise
+        logger.info(
+            f"Registry rows: {len(df)} | Target: {len(work_list) + skipped} | "
+            f"To process (metrics extraction): {len(work_list)} | Skipped (metrics already exist): {skipped}"
+        )
+        
+        if work_list:
+            batches = list(_chunks(work_list, batch_size))
+            n_workers = max(1, min(max_workers or PROCESSING_DEFAULT_MAX_WORKERS, len(batches)))
+
+            try:
+                _run_pool(df, batches, filters_to_run, db_path, n_workers)
+            except Exception as exc:
+                logger.error(f"Orchestrator crashed — SQLite database preserved at: {db_path} ({exc})")
+                raise
+        else:
+            # No work needed — all metrics already present. Merge any partial
+            # DB left behind by a prior crashed run, if one exists.
+            if db_path.exists():
+                _merge_sqlite(df, db_path, filters_to_run)
 
     # 3. Evaluate thresholds and update boolean pass columns vectorized
     evaluate_thresholds(df, filters_to_run, thresholds, target_flight_ids)
     
     # 4. Save to disk (Quality metrics only!)
-    # We drop file_path since it belongs in the core index, not the quality registry
     quality_cols = [c for c in df.columns if c != "file_path"]
     quality_df = df[quality_cols].reset_index(drop=True)
     if quality_registry_path.exists():
@@ -377,7 +463,17 @@ def run_postfilters(
     
     quality_registry_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_parquet(quality_registry_path, index=False)
-    tmp_path.unlink(missing_ok=True)
+    logger.info(f"Successfully saved quality manifest with {len(merged):,} rows to {quality_registry_path.name}")
+
+    # Clean up SQLite temporary file on successful completion
+    if db_path.exists():
+        try:
+            db_path.unlink(missing_ok=True)
+            db_path.with_suffix(".db-wal").unlink(missing_ok=True)
+            db_path.with_suffix(".db-shm").unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Could not remove temporary SQLite database {db_path}: {e}")
 
     _log_summary(df, filters_to_run, target_flight_ids)
+
 
