@@ -343,9 +343,9 @@ def filter_max_acceleration(df_clean: pd.DataFrame, thresholds: dict) -> tuple[b
     return False, "PASSED", metrics
 
 
-def passes_distance_prefilters(df_clean: pd.DataFrame, thresholds: dict) -> tuple[bool, str, dict]:
+def passes_distance_filters(df_clean: pd.DataFrame, thresholds: dict) -> tuple[bool, str, dict]:
     """
-    Check if the first and last waypoints of df_clean are within distance pre-filter limits
+    Check if the first and last waypoints of df_clean are within distance filter limits
     of the origin and destination airports.
     """
     from src.common.utils import haversine_distance_m
@@ -487,11 +487,8 @@ def apply_trajectory_postfilters(
     if max_accel_mps2 > limit:
         return True, f"max 3D acceleration {max_accel_mps2:.2f} m/s^2 > {limit} m/s^2", all_metrics
 
-    # 6. Distance Pre-filters / Proximity
-    merged_pre_thresholds = config.DEFAULT_PREFILTER_THRESHOLDS.copy()
-    merged_pre_thresholds.update(thresholds)
-
-    rejected, reason, metrics = passes_distance_prefilters(df_clean, merged_pre_thresholds)
+    # 6. Distance Filters / Proximity
+    rejected, reason, metrics = passes_distance_filters(df_clean, merged_post_thresholds)
     all_metrics.update(metrics)
     if rejected:
         return True, reason, all_metrics

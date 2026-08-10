@@ -475,6 +475,10 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `--overwrite` | flag | `False` | No | When set, ignores cached columns and re-evaluates all target rows. |
 | `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` (currently `4`). |
 | `--batch-size` | `int` | `200` | No | Number of rows processed per worker batch. |
+| `--max-dep-horiz-dist` | `float` | `15000.0` | No | Max departure horizontal distance in meters. |
+| `--max-dep-vert-dist` | `float` | `1000.0` | No | Max departure vertical distance in meters. |
+| `--max-arr-horiz-dist` | `float` | `15000.0` | No | Max arrival horizontal distance in meters. |
+| `--max-arr-vert-dist` | `float` | `1000.0` | No | Max arrival vertical distance in meters. |
 | `--filters` | `str` (list) | all six | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `distance`. |
 | `--recheck-flags` | flag | `False` | No | Skip metric extraction entirely. Re-evaluate threshold pass/fail flags vectorized on existing quality metrics. Fast (~30s, no workers). Mutually exclusive with `--overwrite`. |
 | `--merge-only` | flag | `False` | No | Skip metric extraction entirely. Read the preserved SQLite crash-recovery database (`data/temp/postfilter_tmp/<registry>.db`) and merge its records into the quality manifest. Use after a crashed run to recover partial results without re-processing. |
@@ -507,6 +511,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `GLOBAL_RAW_QUALITY_REGISTRY` | `Path` → `data/registries/global_raw_quality_registry.parquet` | Quality registry file mapping post-filter quality metrics, pass/fail flags, and reject reasons for raw trajectories |
 | `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
+| `DEFAULT_POSTFILTER_THRESHOLDS` | `dict` | Default trajectory post-filter thresholds used when invoking `run_postfilters` or not overridden via CLI |
 | `POSTFILTER_BATCH_SIZE_DEFAULT` | `200` (int) | Default batch size of stubs evaluated per worker process during post-filtering |
 | `POSTFILTER_COL_HORIZ_VEL_PASS` | `"horiz_velocity_pass"` (str) | Clean-registry column: flight passed horizontal gs speed check (`gs` ≤ `max_horiz_velocity_kt`) |
 | `POSTFILTER_COL_HORIZ_VEL_REASON` | `"horiz_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for horizontal velocity check |

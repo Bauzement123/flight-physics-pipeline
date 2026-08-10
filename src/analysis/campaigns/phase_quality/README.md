@@ -48,7 +48,7 @@ Phase Quality Campaign Objectives
       │         ├── extract_coord_horiz_velocity_metric(df_clean): extract coordinate-derived horiz speed (kt) via haversine_distance_m()
       │         ├── extract_coord_vert_velocity_metric(df_clean): extract coordinate-derived vert speed (fpm)
       │         ├── extract_acceleration_metric(df_clean): extract 3D acceleration (m/s²)
-      │         ├── passes_distance_prefilters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport via haversine_distance_m() and resolve_airport_coordinates()
+      │         ├── passes_distance_filters(df_clean, thresholds): haversine distance from first/last waypoint to origin/dest airport via haversine_distance_m() and resolve_airport_coordinates()
       │         └── Outputs: (rejected: bool, reason: str, metrics: dict) per flight; aggregated POSTFILTER status written to filter_evaluation.csv
       │
       ├── Sub-objective 4: Orchestrate Multi-Route Campaign Runs (Script 2 Part C)
@@ -112,7 +112,7 @@ flowchart TD
     H -->|No| J[Worker: Skip clean loading]
     I --> K[Worker: Per PASSED flight — recompute_airport_distances]
     J --> K
-    K --> L[Worker: apply_trajectory_postfilters\nfilter_max_velocity → filter_max_acceleration → passes_distance_prefilters]
+    K --> L[Worker: apply_trajectory_postfilters\nfilter_max_velocity → filter_max_acceleration → passes_distance_filters]
     L --> M[Worker: Log aggregate Post-filter results]
     M --> N[Worker: compile_route_audit_pdf\n3-row layout: Raw+Prefilter / Those But Clean / Clean+Postfilter]
     N --> O[Save Route Audit PDF Report]
@@ -136,7 +136,7 @@ flowchart TD
    - **Step 3 — Coordinate-Derived Horizontal Velocity**: `extract_coord_horiz_velocity_metric()` calculates step-by-step 2D Haversine displacement via `haversine_distance_m()` from `src.common.utils` and compares it to $\le$ `max_coord_horiz_velocity_kt` (650.0 kt).
    - **Step 4 — Coordinate-Derived Vertical Velocity**: `extract_coord_vert_velocity_metric()` calculates step-by-step altitude change and compares it to $\le$ `max_coord_vert_velocity_fpm` (8000.0 fpm).
    - **Step 5 — 3D Acceleration**: `extract_acceleration_metric()` calculates step-by-step acceleration magnitude and compares it to $\le$ `max_acceleration_mps2` (10.0 m/s$^2$).
-   - **Step 6 — Distance Prefilters**: `passes_distance_prefilters()` verifies waypoint-to-airport distance cutoffs using `resolve_airport_coordinates()` and `haversine_distance_m()`.
+   - **Step 6 — Distance Prefilters**: `passes_distance_filters()` verifies waypoint-to-airport distance cutoffs using `resolve_airport_coordinates()` and `haversine_distance_m()`.
 10. A per-route aggregate log is emitted: `[ROUTE] Post-filter results: N PASSED, M REJECTED (reasons: ...)`.
 11. The worker compiles a 10-page visual audit PDF. When clean trajectories are loaded, each cohort page renders a **3-row 3×2 grid**:
     - **Row 1 (Raw + Prefilter)** and **Row 2 (Those But Clean)** show only pre-filter rejections (rendered as light purple/magenta dashed lines via `REJECTED_PREFILTER_COLOR = "#cc00ff"`).
@@ -316,7 +316,7 @@ python -m src.analysis.campaigns.phase_quality.analyze_ekf_diagnostics `
 - `src.common.config.PhaseControl`: Central dataclass controls toggling phases.
 - `src.common.config.PHASE_QUALITY_RUNS_DIR`: Base directory for campaign output folders.
 - `src.common.config.DEFAULT_PREFILTER_THRESHOLDS`: Dictionary of metadata pre-filter thresholds (max horiz/vert dist, duration pct).
-- `src.common.config.DEFAULT_POSTFILTER_THRESHOLDS`: Dictionary of trajectory post-filter thresholds: `max_velocity_kt` (650.0, used by both `filter_max_coordinate_velocity` and `filter_max_velocity`) and `max_acceleration_mps2` (340.29 ≈ Mach 1).
+- `src.common.config.DEFAULT_POSTFILTER_THRESHOLDS`: Dictionary of trajectory post-filter thresholds (velocity, acceleration, and distance thresholds).
 - `src.common.config.RECOMPUTE_AIRPORT_DISTANCES`: Boolean flag. When `True`, worker processes call `recompute_airport_distances()` on each clean trajectory before running post-filters.
 - For global project naming conventions, see [conventions.md](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/conventions.md).
 

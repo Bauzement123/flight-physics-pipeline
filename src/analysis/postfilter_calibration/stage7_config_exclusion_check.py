@@ -14,7 +14,6 @@ sys.path.append(str(BASE_DIR))
 
 from src.common.config import (
     DEFAULT_POSTFILTER_THRESHOLDS,
-    DEFAULT_PREFILTER_THRESHOLDS,
     METRIC_COL_MAX_COORD_HORIZ_VEL,
     METRIC_COL_MAX_HORIZ_VEL,
     METRIC_COL_MAX_VERT_VEL,
@@ -64,10 +63,10 @@ def main():
     max_vert_fpm = DEFAULT_POSTFILTER_THRESHOLDS["max_vert_velocity_fpm"]
     max_accel = DEFAULT_POSTFILTER_THRESHOLDS["max_acceleration_mps2"]
     
-    max_arr_dist = DEFAULT_PREFILTER_THRESHOLDS["max_arr_horiz_dist"]
-    max_dep_dist = DEFAULT_PREFILTER_THRESHOLDS["max_dep_horiz_dist"]
-    max_arr_vdist = DEFAULT_PREFILTER_THRESHOLDS["max_arr_vert_dist"]
-    max_dep_vdist = DEFAULT_PREFILTER_THRESHOLDS["max_dep_vert_dist"]
+    max_arr_dist = DEFAULT_POSTFILTER_THRESHOLDS["max_arr_horiz_dist"]
+    max_dep_dist = DEFAULT_POSTFILTER_THRESHOLDS["max_dep_horiz_dist"]
+    max_arr_vdist = DEFAULT_POSTFILTER_THRESHOLDS["max_arr_vert_dist"]
+    max_dep_vdist = DEFAULT_POSTFILTER_THRESHOLDS["max_dep_vert_dist"]
 
     logging.info(f"Active Config Applied:")
     logging.info(f"  - Max Coord Horiz Vel: {max_coord_kt} kt")

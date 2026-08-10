@@ -12,7 +12,6 @@ from src.common.config import (
     GLOBAL_RAW_QUALITY_REGISTRY,
     POSTFILTER_BATCH_SIZE_DEFAULT,
     PROCESSING_DEFAULT_MAX_WORKERS,
-    DEFAULT_PREFILTER_THRESHOLDS,
     DEFAULT_POSTFILTER_THRESHOLDS,
     BASE_DIR,
 )
@@ -38,6 +37,10 @@ def main() -> None:
     parser.add_argument("--recheck-flags", action="store_true", help="Skip metric extraction entirely. Re-evaluate threshold pass/fail flags on existing quality metrics.")
     parser.add_argument("--workers", "--num-workers", "--max-workers", dest="max_workers", type=int, default=None, help="Maximum worker processes.")
     parser.add_argument("--batch-size", type=int, default=POSTFILTER_BATCH_SIZE_DEFAULT, help=f"Batch size (default: {POSTFILTER_BATCH_SIZE_DEFAULT}).")
+    parser.add_argument("--max-dep-horiz-dist", type=float, help=f"Max departure horizontal distance in meters (default: {DEFAULT_POSTFILTER_THRESHOLDS['max_dep_horiz_dist']}).")
+    parser.add_argument("--max-dep-vert-dist", type=float, help=f"Max departure vertical distance in meters (default: {DEFAULT_POSTFILTER_THRESHOLDS['max_dep_vert_dist']}).")
+    parser.add_argument("--max-arr-horiz-dist", type=float, help=f"Max arrival horizontal distance in meters (default: {DEFAULT_POSTFILTER_THRESHOLDS['max_arr_horiz_dist']}).")
+    parser.add_argument("--max-arr-vert-dist", type=float, help=f"Max arrival vertical distance in meters (default: {DEFAULT_POSTFILTER_THRESHOLDS['max_arr_vert_dist']}).")
     parser.add_argument(
         "--filters",
         type=str,
@@ -132,8 +135,9 @@ def main() -> None:
     _DISTANCE_KEYS = ("max_dep_horiz_dist", "max_dep_vert_dist", "max_arr_horiz_dist", "max_arr_vert_dist")
     thresholds = DEFAULT_POSTFILTER_THRESHOLDS.copy()
     for k in _DISTANCE_KEYS:
-        if k in DEFAULT_PREFILTER_THRESHOLDS:
-            thresholds[k] = DEFAULT_PREFILTER_THRESHOLDS[k]
+        val = getattr(args, k, None)
+        if val is not None:
+            thresholds[k] = val
 
     run_postfilters(
         registry_path=target_registry_path,
