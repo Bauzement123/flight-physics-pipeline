@@ -250,6 +250,32 @@ def build_flight_id(row: Any) -> str | None:
         return None
 
 
+def parse_flight_id_components(flight_id: str) -> dict[str, str] | None:
+    """
+    Inverse of build_flight_id(). Parses a flight_id string back into its key components:
+    (icao24, callsign, estdepartureairport, estarrivalairport, firstseen_minute_str).
+    """
+    if not flight_id or not isinstance(flight_id, str):
+        return None
+    parts = flight_id.split("_")
+    if len(parts) < 5:
+        return None
+    icao24 = parts[0]
+    fs_minute_str = f"{parts[-2]}_{parts[-1]}"
+    route = parts[-3]
+    callsign = "_".join(parts[1:-3])
+    if "-" not in route:
+        return None
+    dep, arr = route.split("-", 1)
+    return {
+        "icao24": icao24,
+        "callsign": callsign,
+        "estdepartureairport": dep,
+        "estarrivalairport": arr,
+        "firstseen_minute_str": fs_minute_str,
+    }
+
+
 def parse_time_bounds(
     firstseen: Any, lastseen: Any
 ) -> tuple[datetime, datetime, datetime, datetime, str] | None:

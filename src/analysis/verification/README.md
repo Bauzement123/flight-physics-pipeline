@@ -8,12 +8,14 @@ The `verification` module provides tools and scripts to aggregate flight traject
 
 ```text
 src/analysis/verification/
+├── build_r2_distance_table.py    # Extraction script for 3-way 6-metric endpoint distance comparison table
 ├── evaluate_custom_filters.py    # CLI evaluation tool for custom spatial, candidate, & duration filters
 ├── extract_bounding_airports.py   # CLI utility script to extract bounding box airport extreme coordinates
 ├── flight_analysis.py             # CLI execution script for distance vs altitude analysis
 ├── flight_level_analysis.py       # CLI execution script for cruise Flight Level distribution boxplots
 ├── matlab_prepare.py              # CLI script for MATLAB verification data exports
 ├── plot_corridor_clusters.py      # CLI script for dual-panel cluster, medoid, & altitude visualizations
+├── plot_r2_distance_errors.py     # CLI script for endpoint distance statistical analysis and plots
 ├── route_class_analysis.py        # CLI execution script for route class distribution histogram
 ├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
 ├── summarize_population.py        # CLI inspection tool for master_flights route summary tables
@@ -42,6 +44,8 @@ Flight Trajectory Analysis (Goal)
 ---
 
 ## 3. Data Workflow
+
+### 3.1 Workflow A — Flight Distance vs Altitude (`flight_analysis.py`)
 
 ```mermaid
 graph TD
@@ -74,12 +78,55 @@ graph TD
 > [!NOTE]
 > Visual rendering warning: Mermaid flowcharts require a compatible markdown viewer or renderer. If viewing in a raw text environment, refer to the step-by-step description below.
  
-### Step-by-Step Data Workflow Description
+**Step-by-step:**
 1. **Ingest Registries**: The orchestrator loads the global trajectory registry (`global_trajectory_registry.parquet`, referenced via `GLOBAL_TRAJECTORY_REGISTRY`) and the global corridor model registry (`global_model_registry.parquet`, referenced via `GLOBAL_CORRIDOR_MODEL_REGISTRY`) to identify files on disk. Simultaneously, it loads the master route summary parquet (`master_flights_route_summary.parquet`, referenced via `ROUTE_SUMMARY_PARQUET`) to obtain geodesic route distances.
 2. **Batch Trajectory Processing**: The script loops over all unique parquet files, groups the waypoints by `flight_id`, and calculates the altitude at the top-K percent threshold using the `(1 - K/100)` quantile of the raw barometric pressure altitude column (`baroaltitude` for raw flights, `altitude` for corridor model paths).
 3. **Distance Matching**: The flight departure and arrival airport ICAOs are concatenated to form a route key `'DEP -> ARR'`. This key is matched against the route summary dictionary to retrieve the geodesic distance in meters.
 4. **Plotting**: Distance is scaled from meters to kilometers (`km`) for plotting, and the height threshold is kept in meters (`m`). Ticks and grid sublines are drawn at every 1 km (1,000 meters) of altitude. A scatter plot is generated with Matplotlib mapping airport distance (X-axis) against altitude (Y-axis), with corridor model baselines overlaid as red dots if enabled.
 5. **Export**: The generated figure is saved in SVG vector format under dynamic filename parameterization to `data/analysis/plots/`.
+
+---
+
+### 3.2 Workflow B — Endpoint Distance Verification (`build_r2_distance_table.py` & `plot_r2_distance_errors.py`)
+
+```mermaid
+graph TD
+    %% Inputs
+    CleanReg[("global_clean_quality_registry.parquet")]
+    RawReg[("global_raw_quality_registry.parquet")]
+    Master[("master_flights.parquet")]
+    
+    %% Processing Nodes
+    P1["Parse flight ID components (build_r2_distance_table.py)"]
+    P2["Join Master, Clean, and Raw tables on flight ID"]
+    P3["Extract 6 horizontal distance metrics (dep/arr)"]
+    P4["Compute errors and build 4x2 diagnostic plots (plot_r2_distance_errors.py)"]
+    
+    %% Outputs
+    OutTable[("r2_distance_table.parquet")]
+    OutStats["r2_error_summary.csv"]
+    OutOutliers["r2_dep/arr_route_outliers.csv"]
+    OutImg["r2_distance_errors.svg"]
+    
+    %% Connections
+    CleanReg --> P1
+    RawReg --> P1
+    Master --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> OutTable
+    OutTable --> P4
+    P4 --> OutStats
+    P4 --> OutOutliers
+    P4 --> OutImg
+```
+
+**Step-by-step:**
+1. **Data Ingestion & Parsing**: The `build_r2_distance_table.py` orchestrator loads the `master_flights.parquet` along with the Clean and Raw quality registries. It parses the embedded ICAO routes and timestamps from the `flight_id` strings to ensure perfect joins.
+2. **Table Joining**: The three tables are joined on `flight_id` to unify the departure and arrival horizontal distance metrics (FD4 ground truth vs. Clean vs. Raw).
+3. **Table Export**: The unified 6-metric distance table is exported to `r2_distance_table.parquet`.
+4. **Statistical Analysis**: The `plot_r2_distance_errors.py` script reads the unified table, computes signed and absolute errors relative to FD4, and calculates percentage thresholds (e.g., % within 500m).
+5. **Plotting**: The script generates a 4x2 multi-panel SVG plot visualizing absolute distances, error distributions, log-scale boxplots, and error-vs-error density scatters. It also exports statistical summaries and top-15 route outliers to CSV.
 
 ---
 
@@ -175,6 +222,12 @@ python -m src.analysis.verification.flight_analysis `
 * `--out-dir` (string): Destination directory to save output reports. Default: `data/reports`.
 * `--name` (string): Name prefix for output report files. Default: `master_flights`.
 
+#### Endpoint Distance 3-Way Extraction (`build_r2_distance_table.py`)
+* Takes no arguments. Reads `GLOBAL_CLEAN_QUALITY_REGISTRY`, `GLOBAL_RAW_QUALITY_REGISTRY`, and `MASTER_FLIGHTS_FILE` to build the 6-distance comparison table outputting to `data/analysis/reports/r2_distance_table.parquet`.
+
+#### Endpoint Distance Error Plotting (`plot_r2_distance_errors.py`)
+* Takes no arguments. Reads the generated `r2_distance_table.parquet`, outputs `r2_error_summary.csv`, two route outlier CSVs, and the final SVG diagnostic plot `r2_distance_errors.svg`.
+
 #### Bounding Box Airport Extraction (`extract_bounding_airports.py`)
 * Takes no arguments. Executes coordinate bounds resolution across all registered airports and prints geographic extreme nodes (North, South, East, West).
 
@@ -200,7 +253,7 @@ All entrypoint scripts initialize logging via `setup_file_logger()` from `src.co
 
 | Log file written to `data/logs/` | Writer | Purpose |
 |---|---|---|
-| `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlab_prepare.py`, `plot_corridor_clusters.py`, `route_class_analysis.py`, `route_popularity_analysis.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
+| `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlab_prepare.py`, `plot_corridor_clusters.py`, `route_class_analysis.py`, `route_popularity_analysis.py`, `plot_r2_distance_errors.py`, `build_r2_distance_table.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
 | `calibration.log` | `evaluate_custom_filters.py` | Logs custom filter retention evaluations and parameter statistics. |
 | `acquisition.log` | `summarize_population.py` | Logs route summary population inspection and Pareto distribution metrics. |
 

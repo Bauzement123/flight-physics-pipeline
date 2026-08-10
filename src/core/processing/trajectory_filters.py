@@ -144,9 +144,20 @@ def extract_distance_metrics(df: pd.DataFrame, airports: dict) -> dict[str, floa
     dep_elev_m, arr_elev_m = dep_elev_ft / 3.280839895, arr_elev_ft / 3.280839895
     df_sorted = df.sort_values(by="time")
 
-    result["dep_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[0], df_sorted["longitude"].iloc[0], dep_lat, dep_lon))
-    result["arr_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[-1], df_sorted["longitude"].iloc[-1], arr_lat, arr_lon))
-    result["dep_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(df_sorted["altitude"].iloc[0], dep_elev_m))
-    result["arr_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(df_sorted["altitude"].iloc[-1], arr_elev_m))
+    if "latitude" in df_sorted.columns and "longitude" in df_sorted.columns:
+        df_coords = df_sorted.dropna(subset=["latitude", "longitude"])
+        if not df_coords.empty:
+            first_c = df_coords.iloc[0]
+            last_c = df_coords.iloc[-1]
+            result["dep_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(first_c["latitude"], first_c["longitude"], dep_lat, dep_lon))
+            result["arr_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(last_c["latitude"], last_c["longitude"], arr_lat, arr_lon))
+
+    if "altitude" in df_sorted.columns:
+        df_alt = df_sorted.dropna(subset=["altitude"])
+        if not df_alt.empty:
+            first_alt = df_alt["altitude"].iloc[0]
+            last_alt = df_alt["altitude"].iloc[-1]
+            result["dep_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(first_alt, dep_elev_m))
+            result["arr_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(last_alt, arr_elev_m))
 
     return result
