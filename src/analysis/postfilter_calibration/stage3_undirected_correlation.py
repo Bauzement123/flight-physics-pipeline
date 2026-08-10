@@ -25,17 +25,28 @@ def main():
         logger.error("Cohort registry is empty.")
         return
 
-    # Metrics to correlate
+    from src.common.config import (
+        METRIC_COL_MAX_HORIZ_VEL,
+        METRIC_COL_MAX_VERT_VEL,
+        METRIC_COL_MAX_COORD_HORIZ_VEL,
+        METRIC_COL_MAX_COORD_VERT_VEL,
+        METRIC_COL_MAX_ACCEL,
+        METRIC_COL_DEP_HORIZ_DIST,
+        METRIC_COL_DEP_VERT_DIST,
+        METRIC_COL_ARR_HORIZ_DIST,
+        METRIC_COL_ARR_VERT_DIST,
+    )
+
     metrics = [
-        'metric_max_horiz_speed_kt', 
-        'metric_max_vert_speed_fpm', 
-        'metric_max_coord_horiz_speed_kt', 
-        'metric_max_coord_vert_speed_fpm', 
-        'metric_max_acceleration_mps2', 
-        'metric_dep_horiz_dist_m', 
-        'metric_dep_vert_dist_m', 
-        'metric_arr_horiz_dist_m', 
-        'metric_arr_vert_dist_m'
+        METRIC_COL_MAX_HORIZ_VEL, 
+        METRIC_COL_MAX_VERT_VEL, 
+        METRIC_COL_MAX_COORD_HORIZ_VEL, 
+        METRIC_COL_MAX_COORD_VERT_VEL, 
+        METRIC_COL_MAX_ACCEL, 
+        METRIC_COL_DEP_HORIZ_DIST, 
+        METRIC_COL_DEP_VERT_DIST, 
+        METRIC_COL_ARR_HORIZ_DIST, 
+        METRIC_COL_ARR_VERT_DIST
     ]
 
     available_metrics = [m for m in metrics if m in df.columns]

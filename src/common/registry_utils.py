@@ -14,7 +14,8 @@ from src.common.config import (
     GLOBAL_CORRIDOR_MODEL_REGISTRY,
     GLOBAL_FLIGHT_CLUSTER_MAP,
     GLOBAL_CLEAN_REGISTRY,
-    GLOBAL_CLEAN_QUALITY_REGISTRY
+    GLOBAL_CLEAN_QUALITY_REGISTRY,
+    GLOBAL_RAW_QUALITY_REGISTRY,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,9 @@ def load_trajectory_registry(registry_path: Path = None) -> pd.DataFrame:
         raise
 
 
-def get_flights_for_route(dep: str, arr: str) -> pd.DataFrame:
+def get_flights_for_route(dep: str, arr: str, registry_path: Path | None = None) -> pd.DataFrame:
     """Filters trajectory registry for flight IDs containing '_{dep}-{arr}_'."""
-    df = load_trajectory_registry()
+    df = load_trajectory_registry(registry_path=registry_path)
     if df.empty:
         return df
     pattern = f"_{dep}-{arr}_"
@@ -474,3 +475,18 @@ def load_clean_cohort(require_metrics: bool = True) -> pd.DataFrame:
         regs.append(GLOBAL_CLEAN_QUALITY_REGISTRY)
         
     return join_flight_registries(regs, how="left")
+
+
+def load_raw_cohort(require_metrics: bool = True) -> pd.DataFrame:
+    """
+    Loads the global raw trajectory registry locator (flight_id -> file_path).
+    If require_metrics is True, it automatically joins the dynamic quality metrics
+    from GLOBAL_RAW_QUALITY_REGISTRY so downstream scripts have access to
+    boolean pass/fail flags and scalar metrics without manual joining.
+    """
+    regs = [GLOBAL_TRAJECTORY_REGISTRY]
+    if require_metrics:
+        regs.append(GLOBAL_RAW_QUALITY_REGISTRY)
+        
+    return join_flight_registries(regs, how="left")
+

@@ -10,6 +10,8 @@ import numpy as np
 
 from src.common.config import (
     BASE_DIR,
+    MPS_TO_KT,
+    MPS_TO_FPM,
     POSTFILTER_BATCH_SIZE_DEFAULT,
     PROCESSING_DEFAULT_MAX_WORKERS,
     POSTFILTER_COL_HORIZ_VEL_PASS,
@@ -34,9 +36,12 @@ from src.common.config import (
     METRIC_COL_ARR_HORIZ_DIST,
     METRIC_COL_ARR_VERT_DIST,
     _LEGACY_VELOCITY_COLS,
-    GLOBAL_CLEAN_QUALITY_REGISTRY
+    GLOBAL_CLEAN_REGISTRY,
+    GLOBAL_CLEAN_QUALITY_REGISTRY,
+    GLOBAL_TRAJECTORY_REGISTRY,
+    GLOBAL_RAW_QUALITY_REGISTRY,
 )
-from src.common.registry_utils import load_clean_cohort
+from src.common.registry_utils import load_clean_cohort, load_raw_cohort, join_flight_registries
 from .filter_result import FilterResult
 from .postfilter_worker import _worker_init, process_batch
 
@@ -76,13 +81,17 @@ def _chunks(lst: list, n: int) -> Generator[list, None, None]:
         yield lst[i : i + n]
 
 
-def _load_registry(registry_path: Path, filters_to_run: list[str]) -> pd.DataFrame:
-    """Read the clean registry locator and join quality metrics, set flight_id index, add missing filter columns, and
+def _load_registry(
+    registry_path: Path,
+    quality_registry_path: Path,
+    filters_to_run: list[str]
+) -> pd.DataFrame:
+    """Read the base registry locator and join quality metrics, set flight_id index, add missing filter columns, and
     drop any legacy 3-D combined velocity columns left over from the old filter logic."""
     if not registry_path.exists():
         raise FileNotFoundError(f"Registry file not found: {registry_path}")
         
-    df = load_clean_cohort(require_metrics=True)
+    df = join_flight_registries([registry_path, quality_registry_path], how="left")
     df.set_index("flight_id", drop=False, inplace=True)
 
     # Drop legacy combined-velocity columns if present
@@ -203,28 +212,28 @@ def evaluate_thresholds(
         df.loc[eval_mask, reason_col] = "PASSED"
         
         if f == "horiz_velocity":
-            limit = thresholds.get("max_horiz_velocity_kt", 650.0)
+            limit = thresholds.get("max_horiz_velocity_mps", thresholds.get("max_horiz_velocity_kt", 800.0) / MPS_TO_KT)
             metric_col = METRIC_COL_MAX_HORIZ_VEL
             mask = eval_mask & (df[metric_col] > limit)
             df.loc[mask, pass_col] = False
             df.loc[mask, reason_col] = "max horiz speed > limit"
             
         elif f == "vert_velocity":
-            limit = thresholds.get("max_vert_velocity_fpm", 8000.0)
+            limit = thresholds.get("max_vert_velocity_mps", thresholds.get("max_vert_velocity_fpm", 7000.0) / MPS_TO_FPM)
             metric_col = METRIC_COL_MAX_VERT_VEL
             mask = eval_mask & (df[metric_col] > limit)
             df.loc[mask, pass_col] = False
             df.loc[mask, reason_col] = "max vert speed > limit"
             
         elif f == "coord_horiz_velocity":
-            limit = thresholds.get("max_coord_horiz_velocity_kt", 650.0)
+            limit = thresholds.get("max_coord_horiz_velocity_mps", thresholds.get("max_coord_horiz_velocity_kt", 800.0) / MPS_TO_KT)
             metric_col = METRIC_COL_MAX_COORD_HORIZ_VEL
             mask = eval_mask & (df[metric_col] > limit)
             df.loc[mask, pass_col] = False
             df.loc[mask, reason_col] = "max coord horiz speed > limit"
             
         elif f == "coord_vert_velocity":
-            limit = thresholds.get("max_coord_vert_velocity_fpm", 8000.0)
+            limit = thresholds.get("max_coord_vert_velocity_mps", thresholds.get("max_coord_vert_velocity_fpm", 7000.0) / MPS_TO_FPM)
             metric_col = METRIC_COL_MAX_COORD_VERT_VEL
             mask = eval_mask & (df[metric_col] > limit)
             df.loc[mask, pass_col] = False
@@ -282,18 +291,33 @@ def _log_summary(df: pd.DataFrame, filters_to_run: list[str], target_flight_ids:
 # ---------------------------------------------------------------------------
 
 def run_postfilters(
-    registry_path: Path,
-    filters_to_run: list[str],
-    thresholds: dict[str, float],
+    registry_path: Path = GLOBAL_CLEAN_REGISTRY,
+    filters_to_run: list[str] = None,
+    thresholds: dict[str, float] = None,
     batch_size: int = POSTFILTER_BATCH_SIZE_DEFAULT,
     overwrite: bool = False,
     max_workers: int | None = None,
     target_flight_ids: set[str] | None = None,
+    quality_registry_path: Path | None = None,
 ) -> None:
-    """Orchestrate the post-filtering pipeline on the clean registry."""
-    logger.info(f"Starting post-filter run — filters: {filters_to_run}")
+    """Orchestrate the post-filtering pipeline on clean or raw trajectory registries."""
+    if filters_to_run is None:
+        filters_to_run = list(FILTER_COL_MAP.keys())
+    if thresholds is None:
+        thresholds = {}
 
-    df = _load_registry(registry_path, filters_to_run)
+    if quality_registry_path is None:
+        if registry_path.name == GLOBAL_TRAJECTORY_REGISTRY.name:
+            quality_registry_path = GLOBAL_RAW_QUALITY_REGISTRY
+        else:
+            quality_registry_path = GLOBAL_CLEAN_QUALITY_REGISTRY
+
+    logger.info(
+        f"Starting post-filter run — registry: {registry_path.name}, "
+        f"quality target: {quality_registry_path.name}, filters: {filters_to_run}"
+    )
+
+    df = _load_registry(registry_path, quality_registry_path, filters_to_run)
     work_list, skipped = _build_work_list(df, filters_to_run, overwrite, target_flight_ids)
 
     logger.info(
@@ -301,7 +325,7 @@ def run_postfilters(
         f"To process (metrics extraction): {len(work_list)} | Skipped (metrics already exist): {skipped}"
     )
     
-    tmp_path = registry_path.with_suffix(".tmp.parquet")
+    tmp_path = quality_registry_path.with_suffix(".tmp.parquet")
     
     if work_list:
         batches = list(_chunks(work_list, batch_size))
@@ -320,12 +344,15 @@ def run_postfilters(
     # We drop file_path since it belongs in the core index, not the quality registry
     quality_cols = [c for c in df.columns if c != "file_path"]
     quality_df = df[quality_cols].reset_index(drop=True)
-    if GLOBAL_CLEAN_QUALITY_REGISTRY.exists():
-        existing = pd.read_parquet(GLOBAL_CLEAN_QUALITY_REGISTRY)
+    if quality_registry_path.exists():
+        existing = pd.read_parquet(quality_registry_path)
         merged = pd.concat([existing, quality_df]).drop_duplicates(subset=['flight_id'], keep='last')
     else:
         merged = quality_df
-    merged.to_parquet(GLOBAL_CLEAN_QUALITY_REGISTRY, index=False)
+    
+    quality_registry_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(quality_registry_path, index=False)
     tmp_path.unlink(missing_ok=True)
 
     _log_summary(df, filters_to_run, target_flight_ids)
+

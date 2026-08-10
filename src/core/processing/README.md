@@ -256,9 +256,9 @@ This workflow applies physical threshold checks (horizontal velocity, vertical v
 
 ```mermaid
 flowchart TD
-    A["CLI: python -m src.core.processing.postfilter_cli\n--routes / --ranks / --filters\n--batch-size N --max-workers W"] --> B["setup_file_logger('processing.log')\ninit_runtime()"]
-    B --> C["Resolve target flights from GLOBAL_CLEAN_REGISTRY\nusing ranks, routes, or source_dir"]
-    C --> D["run_postfilters()\nLoad GLOBAL_CLEAN_REGISTRY into memory DataFrame\nDrop legacy velocity_pass / coordinate_velocity_pass columns if present"]
+    A["CLI: python -m src.core.processing.postfilter_cli\n--mode {clean,raw} --routes / --ranks\n--batch-size N --max-workers W"] --> B["setup_file_logger('processing.log')\ninit_runtime()"]
+    B --> C["Resolve target flights from target trajectory registry\n(GLOBAL_CLEAN_REGISTRY for clean mode, GLOBAL_TRAJECTORY_REGISTRY for raw mode)\nusing ranks, routes, or source_dir"]
+    C --> D["run_postfilters()\nLoad base trajectory registry and join target quality registry into memory DataFrame\nDrop legacy velocity_pass / coordinate_velocity_pass columns if present"]
     D --> E["Prepare missing columns (pass / reject_reason)\nBuild list of FilterResult stubs"]
     E --> F{"overwrite == False?"}
     F -->|Yes| G["Skip flights where all requested filters are already non-NA"]
@@ -266,9 +266,9 @@ flowchart TD
     G --> I["Partition remaining flights into batches of size N"]
     H --> I
     I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer preloads airport coordinate cache via resolve_airport_coordinates([])"]
-    J --> K["Workers: process_batch()\nRead _clean_si.parquet from disk →\nextract_horiz_velocity_metric (gs kt)\nextract_vert_velocity_metric (rocd fpm)\nextract_coord_horiz_velocity_metric (haversine_distance_m kt)\nextract_coord_vert_velocity_metric (coord alt-diff fpm)\nextract_acceleration_metric (3D m/s²)\nextract_distance_metrics (O(1) _AIRPORTS lookup with cache-miss fallback)\nReturn list of updated FilterResult stubs containing scalar metrics"]
-    K --> L["Main process: future as_completed\nMerge extracted metrics back to index of in-memory DataFrame\nEvaluate thresholds vectorized to determine boolean pass/fail\nFlush temporary snapshot to global_clean_quality_registry.tmp.parquet"]
-    L --> M["Final step: incremental merge into global_clean_quality_registry.parquet\n(keep='last' on flight_id) & delete .tmp.parquet snapshot"]
+    J --> K["Workers: process_batch()\nRead trajectory Parquet from disk →\nextract_horiz_velocity_metric (gs kt)\nextract_vert_velocity_metric (rocd fpm)\nextract_coord_horiz_velocity_metric (haversine_distance_m kt)\nextract_coord_vert_velocity_metric (coord alt-diff fpm)\nextract_acceleration_metric (3D m/s²)\nextract_distance_metrics (O(1) _AIRPORTS lookup with cache-miss fallback)\nReturn list of updated FilterResult stubs containing scalar metrics"]
+    K --> L["Main process: future as_completed\nMerge extracted metrics back to index of in-memory DataFrame\nEvaluate thresholds vectorized to determine boolean pass/fail\nFlush temporary snapshot to <quality_registry>.tmp.parquet"]
+    L --> M["Final step: incremental merge into target quality registry\n(global_clean_quality_registry.parquet or global_raw_quality_registry.parquet, keep='last' on flight_id) & delete .tmp.parquet snapshot"]
 ```
 
 **Step-by-step:**
@@ -464,10 +464,13 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 
 | Option | Type | Default | Required | Description |
 | :--- | :--- | :--- | :--- | :--- |
+| `--mode` | `str` | `"clean"` | No | Target trajectory registry mode. Choices: `clean` (uses `GLOBAL_CLEAN_REGISTRY` & `GLOBAL_CLEAN_QUALITY_REGISTRY`), `raw` (uses `GLOBAL_TRAJECTORY_REGISTRY` & `GLOBAL_RAW_QUALITY_REGISTRY`). |
+| `--registry-path` | `str` | `None` | No | Optional explicit override for base trajectory registry path. |
+| `--quality-registry-path` | `str` | `None` | No | Optional explicit override for target quality manifest registry path. |
 | `--ranks` | `int` (list) | `None` | No | One or more specific corridor volume rank indices to process. Looked up in `master_flights_route_summary.parquet`. |
 | `--rank-range` | `int int` | `None` | No | Inclusive start–end rank range to process. |
 | `--routes` | `str` (list) | `None` | No | One or more explicit corridor strings to process (e.g. `EDDF-LIRF`). |
-| `--source-dir` | `str` | `None` | No | Filter flights by their parent path in the clean registry. |
+| `--source-dir` | `str` | `None` | No | Filter flights by their parent path in the target trajectory registry. |
 | `--overwrite` | flag | `False` | No | When set, ignores cached columns and re-evaluates all target rows. |
 | `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` (currently `4`). |
 | `--batch-size` | `int` | `200` | No | Number of rows processed per worker batch. |
@@ -497,7 +500,8 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `BASE_DIR` | `pathlib.Path` | Workspace root; used to construct all absolute paths and compute registry-relative path strings |
 | `CORRIDOR_TIME_GRID_SECONDS` | `60` (int) | Default temporal resolution of the injected uniform time grid when no CLI or programmatic override is specified |
 | `GLOBAL_CLEAN_REGISTRY` | `Path` → `data/registries/global_clean_registry.parquet` | Core clean flight locator: maps `flight_id` to relative clean trajectory `file_path` |
-| `GLOBAL_CLEAN_QUALITY_REGISTRY` | `Path` → `data/registries/global_clean_quality_registry.parquet` | Quality registry file mapping post-filter quality metrics, pass/fail flags, and reject reasons |
+| `GLOBAL_CLEAN_QUALITY_REGISTRY` | `Path` → `data/registries/global_clean_quality_registry.parquet` | Quality registry file mapping post-filter quality metrics, pass/fail flags, and reject reasons for clean trajectories |
+| `GLOBAL_RAW_QUALITY_REGISTRY` | `Path` → `data/registries/global_raw_quality_registry.parquet` | Quality registry file mapping post-filter quality metrics, pass/fail flags, and reject reasons for raw trajectories |
 | `GLOBAL_EKF_DIAG_REGISTRY` | `Path` → `data/registries/global_ekf_diag_registry.parquet` | Dedicated manifest file mapping diagnostic path and EKF metrics |
 | `is_supported_typecode` | `Callable[[Any], bool]` | Rule 11 typecode validation: checks membership in `ALL_TARGET_FAMILIES` (A320neo, A320ceo, B737NG, B737MAX families) |
 | `POSTFILTER_BATCH_SIZE_DEFAULT` | `200` (int) | Default batch size of stubs evaluated per worker process during post-filtering |

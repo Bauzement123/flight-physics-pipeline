@@ -37,20 +37,30 @@ def main():
 
     logger.info(f"Found {len(valid_canonicals)} canonical routes with bi-directional data.")
 
-    # Define the comparisons
-    # Tuple: (Comparison_Name, Dir_A_Metric, Dir_B_Metric)
+    from src.common.config import (
+        METRIC_COL_MAX_HORIZ_VEL,
+        METRIC_COL_MAX_VERT_VEL,
+        METRIC_COL_MAX_COORD_HORIZ_VEL,
+        METRIC_COL_MAX_COORD_VERT_VEL,
+        METRIC_COL_MAX_ACCEL,
+        METRIC_COL_DEP_HORIZ_DIST,
+        METRIC_COL_DEP_VERT_DIST,
+        METRIC_COL_ARR_HORIZ_DIST,
+        METRIC_COL_ARR_VERT_DIST,
+    )
+
     comparisons = [
-        ('metric_max_horiz_speed_kt', 'metric_max_horiz_speed_kt', 'metric_max_horiz_speed_kt'),
-        ('metric_max_vert_speed_fpm', 'metric_max_vert_speed_fpm', 'metric_max_vert_speed_fpm'),
-        ('metric_max_coord_horiz_speed_kt', 'metric_max_coord_horiz_speed_kt', 'metric_max_coord_horiz_speed_kt'),
-        ('metric_max_coord_vert_speed_fpm', 'metric_max_coord_vert_speed_fpm', 'metric_max_coord_vert_speed_fpm'),
-        ('metric_max_acceleration_mps2', 'metric_max_acceleration_mps2', 'metric_max_acceleration_mps2'),
+        (METRIC_COL_MAX_HORIZ_VEL, METRIC_COL_MAX_HORIZ_VEL, METRIC_COL_MAX_HORIZ_VEL),
+        (METRIC_COL_MAX_VERT_VEL, METRIC_COL_MAX_VERT_VEL, METRIC_COL_MAX_VERT_VEL),
+        (METRIC_COL_MAX_COORD_HORIZ_VEL, METRIC_COL_MAX_COORD_HORIZ_VEL, METRIC_COL_MAX_COORD_HORIZ_VEL),
+        (METRIC_COL_MAX_COORD_VERT_VEL, METRIC_COL_MAX_COORD_VERT_VEL, METRIC_COL_MAX_COORD_VERT_VEL),
+        (METRIC_COL_MAX_ACCEL, METRIC_COL_MAX_ACCEL, METRIC_COL_MAX_ACCEL),
         
         # Cross-mapped Asymmetric terminal metrics
-        ('crossmap_Country1_horiz_radar', 'metric_dep_horiz_dist_m', 'metric_arr_horiz_dist_m'),
-        ('crossmap_Country2_horiz_radar', 'metric_arr_horiz_dist_m', 'metric_dep_horiz_dist_m'),
-        ('crossmap_Country1_vert_radar', 'metric_dep_vert_dist_m', 'metric_arr_vert_dist_m'),
-        ('crossmap_Country2_vert_radar', 'metric_arr_vert_dist_m', 'metric_dep_vert_dist_m')
+        ('crossmap_Country1_horiz_radar', METRIC_COL_DEP_HORIZ_DIST, METRIC_COL_ARR_HORIZ_DIST),
+        ('crossmap_Country2_horiz_radar', METRIC_COL_ARR_HORIZ_DIST, METRIC_COL_DEP_HORIZ_DIST),
+        ('crossmap_Country1_vert_radar', METRIC_COL_DEP_VERT_DIST, METRIC_COL_ARR_VERT_DIST),
+        ('crossmap_Country2_vert_radar', METRIC_COL_ARR_VERT_DIST, METRIC_COL_DEP_VERT_DIST)
     ]
 
     percentiles = ['75th', '80th', '85th', '90th', '95th', '99th']

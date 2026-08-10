@@ -61,42 +61,51 @@ def _calc_acceleration_mps2(df: pd.DataFrame) -> pd.Series:
     acc_3d = np.sqrt(acc_horiz**2 + acc_vert**2)
     return pd.Series(acc_3d, index=df_sorted.index)
 
+def _safe_float(val: Any) -> float:
+    """Safely convert value to float, mapping pd.NA / NaN / invalid types to float('nan')."""
+    if pd.isna(val) or val is pd.NA:
+        return float("nan")
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return float("nan")
+
 # ---------------------------------------------------------------------------
 # Metric Extractors - Feature computation
 # ---------------------------------------------------------------------------
 
 def extract_horiz_velocity_metric(df: pd.DataFrame) -> float:
-    """Extract max horizontal speed from gs (kt)."""
+    """Extract max horizontal speed from gs (m/s)."""
     if df.empty or "gs" not in df.columns:
         return float("nan")
-    return float(df["gs"].max() * MPS_TO_KT)
+    return _safe_float(df["gs"].max())
 
 def extract_vert_velocity_metric(df: pd.DataFrame) -> float:
-    """Extract max vertical speed from rocd (fpm)."""
+    """Extract max vertical speed from rocd (m/s)."""
     if df.empty or "rocd" not in df.columns:
         return float("nan")
-    return float(df["rocd"].abs().max() * MPS_TO_FPM)
+    return _safe_float(df["rocd"].abs().max())
 
 def extract_coord_horiz_velocity_metric(df: pd.DataFrame) -> float:
-    """Extract max horizontal coordinate-derived speed (kt)."""
+    """Extract max horizontal coordinate-derived speed (m/s)."""
     if df.empty or "latitude" not in df.columns or "longitude" not in df.columns:
         return float("nan")
     vel_horiz_mps, _ = _calc_coord_velocity_mps(df)
-    return float(vel_horiz_mps.max() * MPS_TO_KT)
+    return _safe_float(vel_horiz_mps.max())
 
 def extract_coord_vert_velocity_metric(df: pd.DataFrame) -> float:
-    """Extract max vertical coordinate-derived speed (fpm)."""
+    """Extract max vertical coordinate-derived speed (m/s)."""
     if df.empty or "altitude" not in df.columns:
         return float("nan")
     _, vel_vert_mps = _calc_coord_velocity_mps(df)
-    return float(vel_vert_mps.abs().max() * MPS_TO_FPM)
+    return _safe_float(vel_vert_mps.abs().max())
 
 def extract_acceleration_metric(df: pd.DataFrame) -> float:
     """Extract maximum 3D acceleration (m/s^2)."""
     if df.empty or "gs" not in df.columns or "rocd" not in df.columns:
         return float("nan")
     acc_3d = _calc_acceleration_mps2(df)
-    return float(acc_3d.max())
+    return _safe_float(acc_3d.max())
 
 def extract_distance_metrics(df: pd.DataFrame, airports: dict) -> dict[str, float]:
     """Extract origin/destination proximity distances (meters)."""
@@ -120,15 +129,17 @@ def extract_distance_metrics(df: pd.DataFrame, airports: dict) -> dict[str, floa
     if dep_icao not in airports or arr_icao not in airports:
         return result
 
-    dep_lat, dep_lon, dep_elev_ft = airports[dep_icao]["lat"], airports[dep_icao]["lon"], airports[dep_icao]["elevation"]
-    arr_lat, arr_lon, arr_elev_ft = airports[arr_icao]["lat"], airports[arr_icao]["lon"], airports[arr_icao]["elevation"]
+    dep_lat, dep_lon = airports[dep_icao]["lat"], airports[dep_icao]["lon"]
+    arr_lat, arr_lon = airports[arr_icao]["lat"], airports[arr_icao]["lon"]
+    dep_elev_ft = airports[dep_icao].get("elevation", airports[dep_icao].get("elev", 0.0)) or 0.0
+    arr_elev_ft = airports[arr_icao].get("elevation", airports[arr_icao].get("elev", 0.0)) or 0.0
 
     dep_elev_m, arr_elev_m = dep_elev_ft / 3.280839895, arr_elev_ft / 3.280839895
     df_sorted = df.sort_values(by="time")
 
-    result["dep_horiz_dist_m"] = float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[0], df_sorted["longitude"].iloc[0], dep_lat, dep_lon))
-    result["arr_horiz_dist_m"] = float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[-1], df_sorted["longitude"].iloc[-1], arr_lat, arr_lon))
-    result["dep_vert_dist_m"]  = float(_calc_vert_dist_m(df_sorted["altitude"].iloc[0], dep_elev_m))
-    result["arr_vert_dist_m"]  = float(_calc_vert_dist_m(df_sorted["altitude"].iloc[-1], arr_elev_m))
+    result["dep_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[0], df_sorted["longitude"].iloc[0], dep_lat, dep_lon))
+    result["arr_horiz_dist_m"] = _safe_float(_calc_horiz_dist_m(df_sorted["latitude"].iloc[-1], df_sorted["longitude"].iloc[-1], arr_lat, arr_lon))
+    result["dep_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(df_sorted["altitude"].iloc[0], dep_elev_m))
+    result["arr_vert_dist_m"]  = _safe_float(_calc_vert_dist_m(df_sorted["altitude"].iloc[-1], arr_elev_m))
 
     return result

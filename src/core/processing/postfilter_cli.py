@@ -7,6 +7,9 @@ import pandas as pd
 
 from src.common.config import (
     GLOBAL_CLEAN_REGISTRY,
+    GLOBAL_CLEAN_QUALITY_REGISTRY,
+    GLOBAL_TRAJECTORY_REGISTRY,
+    GLOBAL_RAW_QUALITY_REGISTRY,
     POSTFILTER_BATCH_SIZE_DEFAULT,
     PROCESSING_DEFAULT_MAX_WORKERS,
     DEFAULT_PREFILTER_THRESHOLDS,
@@ -19,15 +22,18 @@ from .postfilter_orchestrator import run_postfilters
 logger = logging.getLogger(__name__)
 
 def main() -> None:
-    """CLI entrypoint for the post-filtering pipeline."""
+    """CLI entrypoint for the trajectory post-filtering pipeline."""
     # Setup logger first (idempotent, standard log file name is processing.log)
     setup_file_logger(log_filename="processing.log")
     
-    parser = argparse.ArgumentParser(description="Clean trajectory post-filtering pipeline.")
+    parser = argparse.ArgumentParser(description="Trajectory post-filtering pipeline (supports clean and raw registries).")
+    parser.add_argument("--mode", type=str, choices=["clean", "raw"], default="clean", help="Target trajectory registry mode (default: clean).")
+    parser.add_argument("--registry-path", type=str, help="Optional explicit path to the base trajectory registry.")
+    parser.add_argument("--quality-registry-path", type=str, help="Optional explicit path to the output quality manifest registry.")
     parser.add_argument("--ranks", type=int, nargs="+", help="Route volume ranks to process.")
     parser.add_argument("--rank-range", type=int, nargs=2, help="Inclusive rank range (e.g. 1 10).")
     parser.add_argument("--routes", type=str, nargs="+", help="Corridor strings (e.g. EDDF-LIRF).")
-    parser.add_argument("--source-dir", type=str, help="Directory path to filter clean parquets by location.")
+    parser.add_argument("--source-dir", type=str, help="Directory path to filter parquets by location.")
     parser.add_argument("--overwrite", action="store_true", help="Re-process and overwrite existing filter outcomes.")
     parser.add_argument("--workers", "--num-workers", "--max-workers", dest="max_workers", type=int, default=None, help="Maximum worker processes.")
     parser.add_argument("--batch-size", type=int, default=POSTFILTER_BATCH_SIZE_DEFAULT, help=f"Batch size (default: {POSTFILTER_BATCH_SIZE_DEFAULT}).")
@@ -49,6 +55,21 @@ def main() -> None:
     )
     args = parser.parse_args()
     
+    # 0. Target registry path resolution
+    if args.registry_path:
+        target_registry_path = Path(args.registry_path).resolve()
+    elif args.mode == "raw":
+        target_registry_path = GLOBAL_TRAJECTORY_REGISTRY
+    else:
+        target_registry_path = GLOBAL_CLEAN_REGISTRY
+
+    if args.quality_registry_path:
+        target_quality_path = Path(args.quality_registry_path).resolve()
+    elif args.mode == "raw":
+        target_quality_path = GLOBAL_RAW_QUALITY_REGISTRY
+    else:
+        target_quality_path = GLOBAL_CLEAN_QUALITY_REGISTRY
+
     # 1. Route, rank, and directory scope resolution
     target_flight_ids: set[str] | None = None
     
@@ -58,8 +79,8 @@ def main() -> None:
         # Filter flights by source-dir location if provided
         if args.source_dir:
             s_dir = Path(args.source_dir).resolve()
-            if GLOBAL_CLEAN_REGISTRY.exists():
-                df_reg = pd.read_parquet(GLOBAL_CLEAN_REGISTRY)
+            if target_registry_path.exists():
+                df_reg = pd.read_parquet(target_registry_path)
                 for _, row in df_reg.iterrows():
                     fpath = Path(row["file_path"])
                     if not fpath.is_absolute():
@@ -95,7 +116,7 @@ def main() -> None:
             from src.common.registry_utils import get_flights_for_route
             matching_dfs = []
             for dep, arr in target_corridors:
-                matching_dfs.append(get_flights_for_route(dep, arr))
+                matching_dfs.append(get_flights_for_route(dep, arr, registry_path=target_registry_path))
                 
             if matching_dfs:
                 df_target = pd.concat(matching_dfs).drop_duplicates(subset=["flight_id"])
@@ -110,7 +131,8 @@ def main() -> None:
             thresholds[k] = DEFAULT_PREFILTER_THRESHOLDS[k]
 
     run_postfilters(
-        registry_path=GLOBAL_CLEAN_REGISTRY,
+        registry_path=target_registry_path,
+        quality_registry_path=target_quality_path,
         filters_to_run=args.filters,
         thresholds=thresholds,
         batch_size=args.batch_size,
@@ -123,3 +145,4 @@ if __name__ == "__main__":
     from src.common.config import init_runtime
     init_runtime()
     main()
+

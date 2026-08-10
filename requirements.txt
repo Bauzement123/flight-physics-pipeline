@@ -5,6 +5,7 @@
 airportsdata==20260315
 cartopy==0.25.0
 matplotlib==3.10.9
+netCDF4
 numpy==2.4.6
 openap==2.4
 pandas==2.3.3
@@ -19,3 +20,4 @@ sqlalchemy==2.0.49
 threadpoolctl==3.6.0
 traffic==2.13
 xarray==2026.4.0
+python-dotenv==1.0.1

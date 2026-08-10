@@ -8,10 +8,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _METRIC_FIELDS = [
-    "metric_max_horiz_speed_kt",
-    "metric_max_vert_speed_fpm",
-    "metric_max_coord_horiz_speed_kt",
-    "metric_max_coord_vert_speed_fpm",
+    "metric_max_horiz_speed_mps",
+    "metric_max_vert_speed_mps",
+    "metric_max_coord_horiz_speed_mps",
+    "metric_max_coord_vert_speed_mps",
     "metric_max_acceleration_mps2",
     "metric_dep_horiz_dist_m",
     "metric_dep_vert_dist_m",
@@ -22,13 +22,13 @@ _METRIC_FIELDS = [
 @dataclass
 class FilterResult:
     flight_id: str
-    file_path: str  # absolute path to _clean_si.parquet
+    file_path: str  # absolute path to trajectory file
 
     # Scalar feature metrics extracted from trajectory
-    metric_max_horiz_speed_kt: Optional[float] = None
-    metric_max_vert_speed_fpm: Optional[float] = None
-    metric_max_coord_horiz_speed_kt: Optional[float] = None
-    metric_max_coord_vert_speed_fpm: Optional[float] = None
+    metric_max_horiz_speed_mps: Optional[float] = None
+    metric_max_vert_speed_mps: Optional[float] = None
+    metric_max_coord_horiz_speed_mps: Optional[float] = None
+    metric_max_coord_vert_speed_mps: Optional[float] = None
     metric_max_acceleration_mps2: Optional[float] = None
     metric_dep_horiz_dist_m: Optional[float] = None
     metric_dep_vert_dist_m: Optional[float] = None

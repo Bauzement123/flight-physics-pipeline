@@ -38,8 +38,9 @@ def process_batch(
     filters_to_run: list[str],
 ) -> list[FilterResult]:
     """
-    Worker task: Processes a batch of flights by loading their clean trajectory Parquet files,
-    running the specified metric extractors, and updating their FilterResult objects.
+    Worker task: Processes a batch of flights by loading their trajectory Parquet files (clean or raw),
+    running the specified metric extractors, and updating their FilterResult objects. Any I/O or
+    schema errors are caught in a try-except block, leaving uncomputed metrics as NaN.
     """
     for fr in batch:
         try:
@@ -50,16 +51,16 @@ def process_batch(
                 
             # 2. Extract selected metrics
             if "horiz_velocity" in filters_to_run:
-                fr.metric_max_horiz_speed_kt = extract_horiz_velocity_metric(df)
+                fr.metric_max_horiz_speed_mps = extract_horiz_velocity_metric(df)
 
             if "vert_velocity" in filters_to_run:
-                fr.metric_max_vert_speed_fpm = extract_vert_velocity_metric(df)
+                fr.metric_max_vert_speed_mps = extract_vert_velocity_metric(df)
 
             if "coord_horiz_velocity" in filters_to_run:
-                fr.metric_max_coord_horiz_speed_kt = extract_coord_horiz_velocity_metric(df)
+                fr.metric_max_coord_horiz_speed_mps = extract_coord_horiz_velocity_metric(df)
 
             if "coord_vert_velocity" in filters_to_run:
-                fr.metric_max_coord_vert_speed_fpm = extract_coord_vert_velocity_metric(df)
+                fr.metric_max_coord_vert_speed_mps = extract_coord_vert_velocity_metric(df)
 
             if "acceleration" in filters_to_run:
                 fr.metric_max_acceleration_mps2 = extract_acceleration_metric(df)
