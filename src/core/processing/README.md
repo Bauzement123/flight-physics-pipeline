@@ -476,6 +476,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `--workers`, `--num-workers`, `--max-workers` | `int` | `None` | No | Maximum number of parallel worker processes to spawn. Defaults to `PROCESSING_DEFAULT_MAX_WORKERS` (currently `4`). |
 | `--batch-size` | `int` | `200` | No | Number of rows processed per worker batch. |
 | `--filters` | `str` (list) | all six | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `distance`. |
+| `--recheck-flags` | flag | `False` | No | Skip metric extraction entirely. Re-evaluate threshold pass/fail flags vectorized on existing quality metrics. Fast (~30s, no workers). Mutually exclusive with `--overwrite`. |
 | `--merge-only` | flag | `False` | No | Skip metric extraction entirely. Read the preserved SQLite crash-recovery database (`data/temp/postfilter_tmp/<registry>.db`) and merge its records into the quality manifest. Use after a crashed run to recover partial results without re-processing. |
 
 ---

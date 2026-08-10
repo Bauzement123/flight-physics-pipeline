@@ -171,8 +171,12 @@ def _build_work_list(
     filters_to_run: list[str],
     overwrite: bool,
     target_flight_ids: set[str] | None,
+    recheck_flags: bool = False,
 ) -> tuple[list[FilterResult], int]:
     """Build the list of FilterResult stubs to process, applying skip logic."""
+    if recheck_flags:
+        return [], 0
+
     ids_to_check = (
         df.index if target_flight_ids is None
         else [fid for fid in df.index if fid in target_flight_ids]
@@ -396,12 +400,16 @@ def run_postfilters(
     thresholds: dict[str, float] = None,
     batch_size: int = POSTFILTER_BATCH_SIZE_DEFAULT,
     overwrite: bool = False,
+    recheck_flags: bool = False,
     max_workers: int | None = None,
     target_flight_ids: set[str] | None = None,
     quality_registry_path: Path | None = None,
     merge_only: bool = False,
 ) -> None:
     """Orchestrate the post-filtering pipeline on clean or raw trajectory registries."""
+    if overwrite and recheck_flags:
+        raise ValueError("--overwrite and --recheck-flags are mutually exclusive.")
+
     if filters_to_run is None:
         filters_to_run = list(FILTER_COL_MAP.keys())
     if thresholds is None:
@@ -415,11 +423,19 @@ def run_postfilters(
 
     db_path = BASE_DIR / "data" / "temp" / "postfilter_tmp" / f"{quality_registry_path.stem}.db"
 
+    work_list: list[FilterResult] = []
+
     if merge_only:
         logger.info(f"Running MERGE-ONLY mode — scanning SQLite database: {db_path}")
         df = _load_registry(registry_path, quality_registry_path, filters_to_run)
         merged_count = _merge_sqlite(df, db_path, filters_to_run)
         logger.info(f"Merged {merged_count} flight record(s) from SQLite database.")
+    elif recheck_flags:
+        logger.info(
+            f"Running RECHECK-FLAGS mode — registry: {registry_path.name}, "
+            f"quality target: {quality_registry_path.name}, filters: {filters_to_run}"
+        )
+        df = _load_registry(registry_path, quality_registry_path, filters_to_run)
     else:
         logger.info(
             f"Starting post-filter run — registry: {registry_path.name}, "
@@ -427,7 +443,7 @@ def run_postfilters(
         )
 
         df = _load_registry(registry_path, quality_registry_path, filters_to_run)
-        work_list, skipped = _build_work_list(df, filters_to_run, overwrite, target_flight_ids)
+        work_list, skipped = _build_work_list(df, filters_to_run, overwrite, target_flight_ids, recheck_flags)
 
         logger.info(
             f"Registry rows: {len(df)} | Target: {len(work_list) + skipped} | "
@@ -452,27 +468,42 @@ def run_postfilters(
     # 3. Evaluate thresholds and update boolean pass columns vectorized
     evaluate_thresholds(df, filters_to_run, thresholds, target_flight_ids)
     
-    # 4. Save to disk (Quality metrics only!)
+    # 4. Save to disk (Quality metrics delta upsert)
     quality_cols = [c for c in df.columns if c != "file_path"]
-    quality_df = df[quality_cols].reset_index(drop=True)
-    if quality_registry_path.exists():
-        existing = pd.read_parquet(quality_registry_path)
-        merged = pd.concat([existing, quality_df]).drop_duplicates(subset=['flight_id'], keep='last')
+
+    if recheck_flags or merge_only:
+        if target_flight_ids is not None:
+            save_ids = target_flight_ids
+        else:
+            all_metric_cols = [m for sublist in FILTER_METRIC_MAP.values() for m in sublist]
+            save_ids = set(df.index[df[all_metric_cols].notna().any(axis=1)].tolist())
     else:
-        merged = quality_df
-    
-    quality_registry_path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(quality_registry_path, index=False)
-    logger.info(f"Successfully saved quality manifest with {len(merged):,} rows to {quality_registry_path.name}")
+        save_ids = {fr.flight_id for fr in work_list}
+
+    if save_ids:
+        delta_df = df.loc[df.index.isin(save_ids), quality_cols].reset_index(drop=True)
+        if quality_registry_path.exists():
+            existing = pd.read_parquet(quality_registry_path)
+            merged = pd.concat([existing, delta_df]).drop_duplicates(subset=['flight_id'], keep='last')
+        else:
+            merged = delta_df
+        
+        quality_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_parquet(quality_registry_path, index=False)
+        logger.info(
+            f"Successfully updated quality manifest ({len(delta_df):,} delta rows upserted, "
+            f"total manifest: {len(merged):,} rows) → {quality_registry_path.name}"
+        )
+    else:
+        logger.info("No rows modified; quality manifest left unchanged.")
 
     # Clean up SQLite temporary file on successful completion
     if db_path.exists():
-        try:
-            db_path.unlink(missing_ok=True)
-            db_path.with_suffix(".db-wal").unlink(missing_ok=True)
-            db_path.with_suffix(".db-shm").unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning(f"Could not remove temporary SQLite database {db_path}: {e}")
+        for p in (db_path, db_path.with_suffix(".db-wal"), db_path.with_suffix(".db-shm")):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception as e:
+                logger.debug(f"Could not remove temporary file {p}: {e}")
 
     _log_summary(df, filters_to_run, target_flight_ids)
 

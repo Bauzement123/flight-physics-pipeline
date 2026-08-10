@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--routes", type=str, nargs="+", help="Corridor strings (e.g. EDDF-LIRF).")
     parser.add_argument("--source-dir", type=str, help="Directory path to filter parquets by location.")
     parser.add_argument("--overwrite", action="store_true", help="Re-process and overwrite existing filter outcomes.")
+    parser.add_argument("--recheck-flags", action="store_true", help="Skip metric extraction entirely. Re-evaluate threshold pass/fail flags on existing quality metrics.")
     parser.add_argument("--workers", "--num-workers", "--max-workers", dest="max_workers", type=int, default=None, help="Maximum worker processes.")
     parser.add_argument("--batch-size", type=int, default=POSTFILTER_BATCH_SIZE_DEFAULT, help=f"Batch size (default: {POSTFILTER_BATCH_SIZE_DEFAULT}).")
     parser.add_argument(
@@ -55,6 +56,9 @@ def main() -> None:
     )
     parser.add_argument("--merge-only", action="store_true", help="Aggregate existing SQLite .db temporary records into the quality manifest without extracting metrics.")
     args = parser.parse_args()
+    
+    if args.overwrite and args.recheck_flags:
+        parser.error("Cannot specify both --overwrite and --recheck-flags.")
     
     # 0. Target registry path resolution
     if args.registry_path:
@@ -138,6 +142,7 @@ def main() -> None:
         thresholds=thresholds,
         batch_size=args.batch_size,
         overwrite=args.overwrite,
+        recheck_flags=args.recheck_flags,
         max_workers=args.max_workers,
         target_flight_ids=target_flight_ids,
         merge_only=args.merge_only,
