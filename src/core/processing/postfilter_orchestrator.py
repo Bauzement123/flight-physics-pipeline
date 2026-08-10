@@ -174,17 +174,42 @@ def _run_pool(
     tmp_path: Path,
     n_workers: int,
 ) -> None:
-    """Submit batches to the process pool, merge results, and flush after each batch."""
+    """Submit batches to the process pool, merge results, flush snapshot, and log progress milestones."""
+    import time
     ctx = mp.get_context("spawn")
+    total_flights = sum(len(b) for b in batches)
+    total_batches = len(batches)
+    processed_flights = 0
+    completed_batches = 0
+
+    log_interval_seconds = 10.0
+    last_log_time = time.time()
+    last_log_pct = 0.0
+
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=n_workers,
         mp_context=ctx,
         initializer=_worker_init,
     ) as executor:
-        futures = [executor.submit(process_batch, batch, filters_to_run) for batch in batches]
+        futures = {executor.submit(process_batch, batch, filters_to_run): len(batch) for batch in batches}
         for future in concurrent.futures.as_completed(futures):
-            _merge_results(df, future.result(), filters_to_run)
+            batch_size = futures[future]
+            completed_batch = future.result()
+            _merge_results(df, completed_batch, filters_to_run)
             df.reset_index(drop=True).to_parquet(tmp_path, index=False)
+
+            processed_flights += batch_size
+            completed_batches += 1
+            now = time.time()
+            current_pct = (processed_flights / total_flights) * 100.0 if total_flights > 0 else 100.0
+
+            if (now - last_log_time >= log_interval_seconds) or (current_pct - last_log_pct >= 10.0) or (completed_batches == total_batches):
+                logger.info(
+                    f"Progress: {processed_flights:,}/{total_flights:,} flights processed "
+                    f"({current_pct:.1f}%) | Batches: {completed_batches}/{total_batches}"
+                )
+                last_log_time = now
+                last_log_pct = current_pct
 
 
 def evaluate_thresholds(

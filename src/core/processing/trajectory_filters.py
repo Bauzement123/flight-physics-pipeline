@@ -23,14 +23,18 @@ def _calc_coord_velocity_mps(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
     df_sorted = df.sort_values(by="time").drop_duplicates(subset=["time"])
 
+    lat = pd.to_numeric(df_sorted["latitude"], errors="coerce").astype(float)
+    lon = pd.to_numeric(df_sorted["longitude"], errors="coerce").astype(float)
+    alt = pd.to_numeric(df_sorted["altitude"], errors="coerce").astype(float)
+
     horiz_dist_m = haversine_distance_m(
-        lat1=df_sorted["latitude"].shift(1).fillna(df_sorted["latitude"]),
-        lon1=df_sorted["longitude"].shift(1).fillna(df_sorted["longitude"]),
-        lat2=df_sorted["latitude"],
-        lon2=df_sorted["longitude"],
+        lat1=lat.shift(1).fillna(lat),
+        lon1=lon.shift(1).fillna(lon),
+        lat2=lat,
+        lon2=lon,
     )
 
-    vert_dist_m = df_sorted["altitude"].diff().fillna(0.0)
+    vert_dist_m = alt.diff().fillna(0.0)
 
     t_series = pd.to_datetime(df_sorted["time"])
     dt = t_series.diff().dt.total_seconds().fillna(1.0)
@@ -45,15 +49,18 @@ def _calc_acceleration_mps2(df: pd.DataFrame) -> pd.Series:
     """Calculate step-to-step 3D acceleration in m/s^2."""
     df_sorted = df.sort_values(by="time").drop_duplicates(subset=["time"])
 
-    gs_mps = df_sorted["gs"]
-    rocd_mps = df_sorted["rocd"]
+    gs_mps = pd.to_numeric(df_sorted["gs"], errors="coerce").astype(float)
+    rocd_mps = pd.to_numeric(df_sorted["rocd"], errors="coerce").astype(float)
+
+    if gs_mps.notna().sum() < 2 and rocd_mps.notna().sum() < 2:
+        return pd.Series(dtype=float)
 
     t_series = pd.to_datetime(df_sorted["time"])
-    dt = t_series.diff().dt.total_seconds().fillna(1.0)
-    dt = dt.replace(0.0, 1.0)
+    dt = t_series.diff().dt.total_seconds()
+    dt = dt.replace(0.0, np.nan)
 
-    dv_horiz = gs_mps.diff().fillna(0.0)
-    dv_vert = rocd_mps.diff().fillna(0.0)
+    dv_horiz = gs_mps.diff()
+    dv_vert = rocd_mps.diff()
 
     acc_horiz = dv_horiz / dt
     acc_vert = dv_vert / dt
