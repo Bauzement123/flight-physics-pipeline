@@ -188,7 +188,7 @@ def filter_cohort_flights(
     ranks: list = None,
     out_dir: str = None,
     overwrite: bool = False,
-    min_distance: float = 800.0,
+    min_distance: float = 0,
     valid_routes_set: set = None
 ) -> pd.DataFrame:
     """
