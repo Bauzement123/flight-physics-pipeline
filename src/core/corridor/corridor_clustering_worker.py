@@ -13,6 +13,7 @@ from src.common.config import (
     SILHOUETTE_THRESHOLD,
     CHAOS_VARIANCE_THRESHOLD,
     UNSUPPORTED_TYPECODE_FLAG,
+    M_TO_FT,
     is_supported_typecode,
 )
 from src.common.adapters import (
@@ -230,12 +231,22 @@ def cluster_route(
 
             rel_path = to_registry_path(out_path)
 
+            alt_col = "altitude" if "altitude" in df_final.columns else ("baroaltitude" if "baroaltitude" in df_final.columns else "geoaltitude")
+            if alt_col in df_final.columns and not df_final[alt_col].empty:
+                max_alt_m = float(df_final[alt_col].max())
+                fl_val = int(round(max_alt_m * M_TO_FT / 100.0))
+            else:
+                max_alt_m = None
+                fl_val = None
+
             corridors.append({
                 "cluster_id": cluster_id,
                 "cluster_size": int(np.sum(clustering_res.labels == cluster_id)),
                 "medoid_historical_flight_id": medoid_fid,
                 "corridor_flight_id": corridor_flight_id,
                 "file_path": rel_path,
+                "max_altitude_m": max_alt_m,
+                "fl": fl_val,
             })
             logger.info(f"Route {route_id} cluster {cluster_id}: Saved corridor template to {rel_path}")
 

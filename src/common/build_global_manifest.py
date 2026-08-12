@@ -8,7 +8,7 @@ from src.common.config import (
     BASE_DIR, TRAJECTORIES_DIR, RESULTS_DIR, CORRIDOR_PATHS_DIR, REGISTRIES_DIR,
     GLOBAL_TRAJECTORY_REGISTRY, GLOBAL_CLEAN_REGISTRY, GLOBAL_SIMULATION_REGISTRY,
     GLOBAL_CORRIDOR_SIM_REGISTRY, GLOBAL_CORRIDOR_MODEL_REGISTRY, RAW_CONCAT_SUFFIX,
-    CLEAN_CONCAT_SUFFIX, GLOBAL_EKF_DIAG_REGISTRY
+    CLEAN_CONCAT_SUFFIX, GLOBAL_EKF_DIAG_REGISTRY, M_TO_FT,
 )
 from src.common.registry_utils import save_model_registry
 from src.common.utils import setup_file_logger, to_project_relative
@@ -215,19 +215,30 @@ def index_corridor_models(registry_file: Path, search_dir: Path, force: bool = F
                 cluster_id = int(c_part.strip())
                 rank = route_to_rank.get(route, -1)
                 
-                # Load route_class column from file to get metadata
+                # Load metadata & altitude columns from file
                 try:
-                    df_first = pd.read_parquet(filepath, columns=['route_class'])
-                    route_class = int(df_first['route_class'].iloc[0])
+                    df_first = pd.read_parquet(filepath)
+                    route_class = int(df_first['route_class'].iloc[0]) if 'route_class' in df_first.columns else 1
+                    alt_col = "altitude" if "altitude" in df_first.columns else ("baroaltitude" if "baroaltitude" in df_first.columns else "geoaltitude")
+                    if alt_col in df_first.columns and not df_first[alt_col].empty:
+                        max_alt_m = float(df_first[alt_col].max())
+                        fl_val = int(round(max_alt_m * M_TO_FT / 100.0))
+                    else:
+                        max_alt_m = None
+                        fl_val = None
                 except Exception:
                     route_class = 1 # fallback
+                    max_alt_m = None
+                    fl_val = None
                     
                 new_entries.append({
                     "route": route,
                     "rank": rank,
                     "file_path": rel_path,
                     "route_class": route_class,
-                    "cluster_id": cluster_id
+                    "cluster_id": cluster_id,
+                    "max_altitude_m": max_alt_m,
+                    "fl": fl_val,
                 })
             except Exception as e:
                 logger.warning(f"Failed to parse or read corridor model file {name}: {e}")
@@ -241,7 +252,7 @@ def index_corridor_models(registry_file: Path, search_dir: Path, force: bool = F
             df_updated = existing_df
         else:
             logger.warning("No corridor model entries were extracted.")
-            df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id"])
+            df_updated = pd.DataFrame(columns=["route", "rank", "file_path", "route_class", "cluster_id", "max_altitude_m", "fl"])
     else:
         df_new = pd.DataFrame(new_entries)
         if existing_df is not None:

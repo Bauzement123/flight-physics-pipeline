@@ -224,11 +224,13 @@ def load_model_registry() -> pd.DataFrame:
         corridor_flight_id        : str   e.g. 'EGLL-EDDF_corridor_c0'
         file_path                 : str   posix path to corridor .parquet
         route_class               : int   1=Single 2=Binary 3=Multi 4=Chaos
+        max_altitude_m            : float max altitude of medoid in meters
+        fl                        : int   flight level (hundreds of feet)
     """
     cols = [
         "route_id", "cluster_id", "optimal_k", "silhouette_score",
         "cluster_size", "medoid_historical_flight_id", "corridor_flight_id",
-        "file_path", "route_class",
+        "file_path", "route_class", "max_altitude_m", "fl",
     ]
     if not GLOBAL_CORRIDOR_MODEL_REGISTRY.exists():
         logger.info(f"Model registry does not exist at {GLOBAL_CORRIDOR_MODEL_REGISTRY}. Returning empty registry.")
@@ -266,7 +268,7 @@ def register_corridors(
 
     Each dict in ``corridors`` must contain:
         cluster_id, cluster_size, medoid_historical_flight_id,
-        corridor_flight_id, file_path.
+        corridor_flight_id, file_path, max_altitude_m, fl.
     """
     df = load_model_registry()
     df = df[df["route_id"] != route_id]
@@ -286,6 +288,8 @@ def register_corridors(
             "corridor_flight_id": corr.get("corridor_flight_id"),
             "file_path": file_path_val,
             "route_class": route_class,
+            "max_altitude_m": corr.get("max_altitude_m"),
+            "fl": corr.get("fl"),
         }
         new_entries.append(entry)
 
@@ -342,6 +346,8 @@ def batch_register_corridors(route_results: list) -> None:
                 "corridor_flight_id": corr.get("corridor_flight_id"),
                 "file_path": file_path_val,
                 "route_class": route_class,
+                "max_altitude_m": corr.get("max_altitude_m"),
+                "fl": corr.get("fl"),
             })
 
     if not new_entries:
