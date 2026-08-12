@@ -6,15 +6,16 @@ This document defines the architecture, data schemas, module objectives, and wor
 
 ## 1. Pipeline Overview
 
-The Flight Physics Pipeline is an end-to-end, modular, data-driven framework written in Python designed to ingest, process, cluster, and simulate aircraft trajectories. It transitions raw Automatic Dependent Surveillance–Broadcast (ADS-B) waypoints into physical contrail and emissions simulations by executing a sequence of decoupled processing loops:
+The Flight Physics Pipeline is an end-to-end, modular, data-driven framework written in Python designed to ingest, process, cluster, and simulate aircraft trajectories. It transitions raw Automatic Dependent Surveillance–Broadcast (ADS-B) waypoints into physical contrail and emissions simulations by executing a structured 8-step sequence:
 
-1. **Acquisition & Population Building**: Constructing master flight schedules, enriching route summaries with geodesic distances, and assembling fleet databases (`src/core/acquisition`).
-2. **Fetching (Loops 1 & 2)**: Querying, slicing, and downloading raw ADS-B trajectory waypoints from remote OpenSky Trino database partitions (`src/core/fetching`).
-3. **Trajectory Processing (Loop 2b)**: Coordinate smoothing via Extended Kalman Filtering (EKF) in a local Lambert projection plane and uniform 1-minute temporal resampling (`src/core/processing`).
-4. **Corridor & Path Synthesis (Loop 2c)**: Dynamic Time Warping (DTW) clustering, PCA compression, stability sweeps, and streaming corridor pipeline orchestration (`src/core/corridor`).
-5. **Weather Acquisition (Loop 3a)**: Bulk downloading and managing Copernicus Climate Data Store (CDS) ERA5 NetCDF reanalysis atmospheric data (`src/core/weather`).
-6. **Physics Simulation (Loop 3b)**: Simulating flight performance, fuel burn, emissions, and CoCiP contrail formation using `PSFlight` and PyContrails (`src/core/physics`).
-7. **Analysis & Campaigns**: Statistical verification of trajectory characteristics, route popularity, flight levels, and phase quality calibration campaigns (`src/analysis/*`).
+1. **Step 1 — Acquisition**: Constructing master flight schedules, enriching fleet databases, applying geographic bounding box filters, and generating geodesic route summaries (`src/core/acquisition`).
+2. **Step 2 — Overfetching & Phase Quality Calibration**: Fetching a small calibration cohort on known routes, applying EKF cleaning, running the Phase Quality campaign on raw and clean data simultaneously to tune pre-filter and post-filter thresholds in `config.py` (`src/analysis/campaigns/phase_quality`).
+3. **Step 3 — Trajectory Fetching**: Full-scale batch fetching of raw ADS-B waypoints for all target corridor ranks (`src/core/fetching`).
+4. **Step 4 — EKF + RTS Cleaning**: Coordinate smoothing via a 6D Kinematic Extended Kalman Filter and Rauch-Tung-Striebel smoother, producing SI-unit clean trajectories (`src/core/processing`).
+5. **Step 5 — Post-Filter Refinement**: Six independent axis-level filters (horizontal velocity, vertical velocity, coordinate-derived horizontal and vertical velocity, 3D acceleration, airport distance) evaluate each cleaned trajectory and annotate the registry (`src/core/processing`).
+6. **Step 6 — Corridor Clustering**: PCA dimensionality reduction and K-Medoids clustering synthesize representative 4D medoid trajectory templates per route corridor (`src/core/corridor`).
+7. **Step 7 — Weather Download**: Bulk download and caching of Copernicus ERA5 NetCDF reanalysis files. Independent of Steps 3–6 and may run from Step 1 onwards (`src/core/weather`).
+8. **Step 8 — Physics & Contrail Simulation**: Cloning synthetic medoid paths across real departure timestamps and simulating aircraft performance, fuel burn, and CoCiP contrail radiative forcing (`src/core/physics`).
 
 ---
 
@@ -33,10 +34,10 @@ data/
 │   ├── raw/                 # Raw waypoints fetched from OpenSky Trino
 │   └── clean/               # Resampled and EKF-smoothed trajectory outputs
 ├── weather/                 # Local cache of Copernicus CDS ERA5 NetCDF files
-├── corridor_paths/          # Temporal gridded route centroids and cluster paths
+├── corridor_paths/          # Temporal gridded route medoid paths
 ├── calibration/             # Calibration outputs, cluster maps, oracle caches, and phase quality runs
 │   ├── cache/               # Cached oracle cohorts
-│   ├── phase_quality/       # Phase schema campaign registries and run outputs
+│   ├── phase_quality/       # Phase Quality campaign registries and run outputs
 │   └── plots/               # Calibration diagnostic plots
 ├── results/                 # Final simulation results
 │   └── corridor_simulations/ # PSFlight + CoCiP simulated trajectories
@@ -46,8 +47,6 @@ data/
 ```
 
 ### 2.1 Source Code Directory Structure
-
-The source files under `src/` are structured strictly by functional domain and module:
 
 ```text
 src/
@@ -61,11 +60,11 @@ src/
 │   ├── utils.py             # Centralized logging setup (setup_file_logger) and retry/backoff utilities
 │   └── README.md
 ├── core/                    # Core pipeline processing modules
-│   ├── acquisition/         # Master population building, fleet merging, and route summary enrichment
-│   ├── corridor/            # DTW clustering, PCA compression, stability sweeps, and streaming pipeline
+│   ├── acquisition/         # Master population building, fleet merging, bounding box filtering, and route summary enrichment
+│   ├── corridor/            # K-Medoids clustering, PCA compression, and stability sweeps
 │   ├── fetching/            # OpenSky Trino querying, caching, and batch download orchestration
 │   ├── physics/             # PSFlight performance and CoCiP contrail simulation engine and cloning
-│   ├── processing/          # Coordinate EKF smoothing and uniform 1-minute temporal resampling
+│   ├── processing/          # EKF+RTS trajectory smoothing, resampling, and post-filter evaluation
 │   └── weather/             # Copernicus CDS ERA5 NetCDF reanalysis management and downloading
 ├── analysis/                # Analytical suites, verification, and calibration campaigns
 │   ├── campaigns/           # Phase quality filtering, stability sweeps, and variational orchestrators
@@ -77,27 +76,22 @@ src/
 ```
 
 > [!NOTE]
-> **Deprecated Namespaces**: Historical root-level folders (`src/fetching`, `src/filtering`, `src/physics`, `src/processing`, `src/synthesis`, `src/weather`) have been removed. All active modules reside within `src/core/*` or `src/analysis/*`. The `src/scratchpad/` directory is deprecated per Section 8 of project rules and should not be used for new development.
+> **Deprecated Namespaces**: Historical root-level folders (`src/fetching`, `src/filtering`, `src/physics`, `src/processing`, `src/synthesis`, `src/weather`) have been removed. All active modules reside within `src/core/*` or `src/analysis/*`. The `src/scratchpad/` directory is deprecated and must not be used for new development.
 
 > **Devtools — Trajectory Manager** (`src/devtools/trajectory_manager.py`): A CLI utility for managing raw and clean trajectory datasets. It is **not** part of the automated pipeline and is invoked manually as needed.
-> - `pack --type {raw,clean,both}` — **Backup**: appends loose single-flight Parquets into a cohort batch archive (`*_all_raw.parquet` at cohort root for raw; `*_all_clean.parquet` at cohort root for clean). Only flights not already in the archive are appended. The processing and fetching pipelines **never** auto-create these archives.
-> - `unpack --type {raw,clean,both}` — **Restore**: extracts single-flight Parquets from the batch archive for any flight that has no individual file on disk. Triggers `rebuild_raw_registry()` or `rebuild_clean_registry()` after extraction.
+> - `pack --type {raw,clean,both}` — **Backup**: appends loose single-flight Parquets into a cohort batch archive (`*_all_raw.parquet` / `*_all_clean.parquet`). Only flights not already in the archive are appended.
+> - `unpack --type {raw,clean,both}` — **Restore**: extracts single-flight Parquets from the batch archive for any flight that has no individual file on disk.
 > - `relabel` — Re-applies OpenAP fuzzy-logic flight phase labels to raw single files (raw only).
 > Both `*_all_raw.parquet` and `*_all_clean.parquet` batch archives are **excluded** from `global_trajectory_registry.parquet` and `global_clean_registry.parquet` indexing.
 
-### 2.2 Trajectory Folder Naming
+### 2.2 Run Folder Naming Template
 
-Trajectory output folders inside `data/trajectories/` are organized by route pair:
-`{DEP}-{ARR}/` (e.g., `EDDF-EGLL/`, `LEPA-LEBL/`)
-
-Each route folder contains `raw/` (raw waypoints), `clean/` (EKF-smoothed outputs), and `fetch_runs/` (per-run JSON manifests).
-
-**Run tracking**: Each batch fetch run generates a deterministic run ID via `generate_dataset_name()` in `src.common.utils`. The format is:
+Run directories under `data/trajectories/` are generated dynamically based on CLI configurations:
 `ranks_[ranks_spec]_strat_[strategy]_val_[val]_seed_[seed]_format_[format]_start_[start]_end_[end]_[hash_suffix]`
+* **Ranks Specification (`[ranks_spec]`)**: Range uses `to` (e.g., `ranks_1to5`), list uses hyphens (e.g., `ranks_1-5`).
+* **Hash Suffix**: A deterministic 6-character MD5 checksum of the parameter prefix generated via `src.common.utils` to guarantee unique cohort namespaces.
 
-This ID is logged as a progress milestone and embedded in run manifests — it is **not** used as a directory name.
-
-Simulation results stored under `data/results/` are saved corridor-by-corridor in route-specific subfolders inside `data/results/corridor_simulations/`.
+Simulation results stored under `data/results/` do not use this naming scheme and are saved iteratively corridor-by-corridor inside `data/results/corridor_simulations/`.
 
 ---
 
@@ -110,12 +104,12 @@ Simulation results stored under `data/results/` are saved corridor-by-corridor i
 Standard suffixes indicate the processing state of trajectory datasets across the pipeline:
 
 | File Suffix | Description | Format |
-|---|---|
+|---|---|---|
 | `*_raw.parquet` | Raw waypoints containing coordinates, noise, and gaps. | Parquet |
 | `*_all_raw.parquet` | Concatenated raw trajectory waypoints across a cohort (manual backup archive). Never auto-generated by the pipeline. Created by `trajectory_manager pack --type raw`. | Parquet |
 | `*_clean_si.parquet` | Resampled and EKF-smoothed coordinates in SI units. | Parquet |
 | `*_all_clean.parquet` | Concatenated clean trajectory waypoints across a cohort (manual backup archive). Never auto-generated by the pipeline. Created by `trajectory_manager pack --type clean`. | Parquet |
-| `*_corridor_c[ID].parquet` | Temporal-gridded DTW trajectory route centroids (medoids) generated by `corridor_clustering_worker.py`, stored in `data/corridor_paths/`, indexed by `GLOBAL_CORRIDOR_MODEL_REGISTRY`. | Parquet |
+| `*_synthesized_c[ID].parquet` | Temporal-gridded K-Medoids route medoid trajectory. | Parquet |
 | `*_simulated.parquet` | Trajectories containing PSFlight and CoCiP simulation results. | Parquet |
 | `*_ekf_diag.npz` | Per-flight EKF diagnostic tensor archive containing covariance (`S_k`, `P_k`) and innovation (`e_k`) arrays and scalar quality metrics. Written by `kalman_filter.py` when `--save-diagnostics` is active. | Compressed NumPy NPZ |
 
@@ -134,13 +128,14 @@ The pipeline converts raw aviation inputs into SI units during EKF smoothing and
 All global state tracking is managed via atomic Parquet registries defined in `src/common/config.py`:
 
 * `GLOBAL_TRAJECTORY_REGISTRY`: Tracks raw trajectory acquisition status (`data/registries/global_trajectory_registry.parquet`).
-* `GLOBAL_CLEAN_REGISTRY`: Tracks EKF-cleaned trajectories (`data/registries/global_clean_registry.parquet`). Contains `flight_id` and `file_path` of resampled `*_clean_si.parquet` files.
-* `GLOBAL_EKF_DIAG_REGISTRY`: Dedicated diagnostic manifest (`data/registries/global_ekf_diag_registry.parquet`). Maps `flight_id` → `diag_file_path` (relative `*_ekf_diag.npz` path) + scalar columns `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`. Written by `kalman_filter.py` when `--save-diagnostics` is active; can be rebuilt/recomputed via `build_global_manifest.py --diag-only`.
+* `GLOBAL_CLEAN_REGISTRY`: Tracks EKF-cleaned trajectories and post-filter pass/fail columns (`data/registries/global_clean_registry.parquet`).
+* `GLOBAL_CLEAN_QUALITY_REGISTRY`: Stores scalar metric feature columns per flight (e.g. `metric_max_horiz_speed_kt`, `metric_max_accel_mps2`) written by the post-filter stage (`data/registries/global_clean_quality_registry.parquet`).
+* `GLOBAL_EKF_DIAG_REGISTRY`: Dedicated diagnostic manifest (`data/registries/global_ekf_diag_registry.parquet`). Maps `flight_id` → `diag_file_path` (`*_ekf_diag.npz`) + scalar columns `ekf_quality_score`, `ekf_mean_nis`, `ekf_max_trace_p`. Written by `kalman_filter.py` when `--save-diagnostics` is active.
 * `GLOBAL_SIMULATION_REGISTRY`: Tracks individual flight physics simulation outcomes (`data/registries/global_simulation_registry.parquet`).
 * `GLOBAL_CORRIDOR_SIM_REGISTRY`: Tracks corridor-level cloned simulation progress (`data/registries/global_corridor_simulation_registry.parquet`).
-* `GLOBAL_CORRIDOR_MODEL_REGISTRY`: Stores DTW cluster medoid IDs and corridor model metadata (`data/registries/global_model_registry.parquet`).
+* `GLOBAL_MODEL_REGISTRY`: Stores K-Medoids cluster medoid IDs and corridor model metadata (`data/registries/global_model_registry.parquet`).
 * `GLOBAL_STABILITY_REGISTRY`: Tracks corridor stability sweep metrics (`data/registries/global_stability_registry.parquet`).
-* `GLOBAL_FLIGHT_CLUSTER_MAP`: Maps individual flights to assigned DTW clusters (`data/registries/global_flight_cluster_map.parquet`).
+* `GLOBAL_FLIGHT_CLUSTER_MAP`: Maps individual flights to assigned cluster labels (`data/registries/global_flight_cluster_map.parquet`).
 * `CALIBRATION_PLOT_REGISTRY`: Indexes diagnostic calibration plots (`data/registries/calibration_plot_registry.parquet`).
 * `AUDIT_CANDIDATE_POOL_REGISTRY`: Tracks candidate flights for phase quality campaigns (`data/calibration/phase_quality/registries/audit_candidate_pool.parquet`).
 * `AUDIT_COHORT_MAP_REGISTRY`: Maps cohorts audited during phase quality filtering (`data/calibration/phase_quality/registries/audit_cohort_map.parquet`).
@@ -150,13 +145,13 @@ All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `l
 
 * `fetching.log`: OpenSky Trino queries and download progress.
 * `acquisition.log`: Master population building and fleet merging.
-* `processing.log`: Kalman filtering and coordinate smoothing.
-* `corridor.log`: Corridor clustering, PCA compression, and streaming pipeline execution.
+* `processing.log`: Kalman filtering, coordinate smoothing, and post-filter evaluation.
+* `corridor.log`: Corridor clustering and K-Medoids medoid path generation.
 * `weather.log`: Copernicus CDS ERA5 NetCDF downloads.
 * `simulation.log`: PSFlight and CoCiP simulation runs.
 * `clone_simulation.log`: Cloned corridor batch simulation runs (`clone_simulation.py`).
 * `stability_orchestrator.log`: Corridor stability sweep runs (`stability_orchestrator.py`).
-* `calibration.log`: General phase quality, schema enrichment, and variational calibration campaigns.
+* `calibration.log`: Phase quality campaigns, schema enrichment, and variational calibration.
 * `gt_stability_sweep.log`: Ground Truth stability sweep runs (`gt_stability_sweep.py`).
 * `phase_a_calibration.log`: PCA dimension fit iterations (`phase_a_d_pca.py`).
 * `variational_orchestrator.log`: Variational calibration campaign runs (`variational_orchestrator.py`).
@@ -165,21 +160,23 @@ All logging is handled via `setup_file_logger()` in `src.common.utils`. Using `l
 * `skipped_aircraft.log`: Global append-only log recording skipped airframes across all pipeline stages.
 
 > [!NOTE]
-> Legacy logs (such as `filtering.log`, `clustering_orchestrator.log`, `streaming_pipeline.log`, `synthesis.log`, and `enrichment.log`) have been cleaned up and moved to the project's root `legacy/logs/` directory to keep `data/logs/` organized.
+> Legacy logs (such as `filtering.log`, `clustering_orchestrator.log`, `streaming_pipeline.log`, `synthesis.log`, and `enrichment.log`) have been cleaned up and moved to the project's root `legacy/logs/` directory.
 
 ### 3.6 Concurrency & Thread-Limiting Policy
 
-To maximize pipeline performance and prevent CPU oversubscription (thrashing) when executing parallel tasks, the pipeline strictly separates process-level task concurrency from low-level thread-level parallelism:
+The pipeline strictly separates process-level task concurrency from low-level thread-level parallelism to prevent CPU oversubscription:
 
-* **Multi-Process Concurrency (CPU-Bound)**: Employs `ProcessPoolExecutor` or `multiprocessing.Pool` initialized with a `spawn` start context. Child workers initialize their own logging handlers and restrict underlying C-libraries (OpenBLAS, MKL, NumExpr, BLIS) to exactly **1 thread** using `limit_numeric_threads(1)` from `src.common.concurrency`.
-* **Multi-Threaded Concurrency (I/O-Bound / Shared Memory)**: Employs `ThreadPoolExecutor` for workflows requiring zero-copy access to large shared-memory datasets (e.g., Copernicus ERA5 NetCDF grid objects in physics simulations) or running GIL-releasing C-routines.
+* **Multi-Process Concurrency (CPU-Bound)**: Employs `ProcessPoolExecutor` with a `spawn` start context. Child workers initialize their own logging handlers and restrict C-libraries (OpenBLAS, MKL, NumExpr, BLIS) to exactly **1 thread** via `limit_numeric_threads(1)`.
+* **Multi-Threaded Concurrency (I/O-Bound / Shared Memory)**: Employs `ThreadPoolExecutor` for zero-copy access to large shared-memory datasets or GIL-releasing C-routines.
 
-| Pipeline Stage / Module | Concurrency Engine | Memory / Resource Behavior | Numeric Thread Limit | Strategy Purpose |
+| Pipeline Stage | Concurrency Engine | Memory Behavior | Numeric Thread Limit | Rationale |
 | :--- | :--- | :--- | :--- | :--- |
-| **EKF Cleaning (`kalman_filter.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker; processes individual flight files. | `limit_numeric_threads(1)` | Prevents CPU oversubscription across \(N\) parallel workers; small per-flight data arrays do not benefit from C-library thread scaling. |
-| **Corridor Medoid / Clustering** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker; processes route clusters independently. | `limit_numeric_threads(1)` | Maximizes multi-core throughput when hundreds of routes are processed concurrently. |
-| **Weather I/O & Preloading** | `ThreadPoolExecutor` | Shared RAM; concurrent disk reads and NetCDF parsing. | OS / C-library default | NetCDF/HDF5 compression routines release the GIL during file I/O, allowing fast parallel loading. |
-| **Flight Simulation (`engine.py` / `clone_simulation.py`)** | `ThreadPoolExecutor` | **Zero-Copy Shared Memory**; threads read from the same `met` & `rad` weather grids in RAM. | `1` per thread | Avoids massive RAM duplication of multi-gigabyte weather data; underlying physics routines release the GIL for safe multi-threaded execution. |
+| **EKF Cleaning (`kalman_filter.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker | `limit_numeric_threads(1)` | Prevents oversubscription; per-flight arrays are small |
+| **Post-Filtering (`postfilter_orchestrator.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker | `limit_numeric_threads(1)` | 6 independent axis checks run per flight in isolation |
+| **Corridor Clustering (`corridor_clustering_orchestrator.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker | `limit_numeric_threads(1)` | Maximizes throughput across hundreds of routes |
+| **Phase Quality Campaign (`run_phase_quality_campaign.py`)** | `ProcessPoolExecutor` (`spawn`) | Isolated memory per worker | OS default | Multi-page PDF/SVG report compilation per route |
+| **Weather I/O & Preloading** | `ThreadPoolExecutor` | Shared RAM | OS default | NetCDF/HDF5 routines release GIL during file I/O |
+| **Flight Simulation (`clone_simulation.py`)** | `ThreadPoolExecutor` | Zero-copy shared `met` & `rad` ERA5 grids | 1 per thread | Avoids RAM duplication of multi-GB weather data |
 
 ---
 
@@ -193,8 +190,8 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
   ```text
   Common Infrastructure
    ├── Paths & Constants: config.py
-   │    ├── Inputs: OS environment / filesystem location
-   │    └── Outputs: Resolved pathlib.Path objects and SI conversion constants
+   │    ├── Inputs: OS environment / filesystem location (FLIGHT_PIPELINE_BASE_DIR or config.py location)
+   │    └── Outputs: Resolved pathlib.Path objects, SI conversion constants, filter thresholds
    ├── Serialization: adapters.py::dataframe_to_flight()
    │    ├── Inputs: EKF clean DataFrame (SI units, UTC time)
    │    ├── Outputs: pycontrails.Flight container
@@ -205,25 +202,26 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
    │    └── Safety: Prevents corrupted Parquet files during concurrent worker execution
    └── Logging & Retries: utils.py::setup_file_logger() / retry_backoff()
         ├── Inputs: Module log filename and retry parameters
-        └── Safety: Implements exponential backoff (`BACKOFF_FACTOR=2.0`) up to `BACKOFF_MAX_RETRIES=10`
+        └── Safety: Exponential backoff (BACKOFF_FACTOR=2.0) up to BACKOFF_MAX_RETRIES=10
   ```
 
 ### 4.2 Core Acquisition (`src/core/acquisition/`)
-* **Objective**: Build master flight schedules, filter by geographic bounding boxes, enrich routes with geodesic distances, and merge aircraft metadata.
+* **Objective**: Build master flight schedules, apply strict geographic bounding box filters, enrich routes with geodesic distances, and merge aircraft metadata.
 * **FAST Mapping**:
   ```text
   Population Acquisition
    ├── Schedule Building: build_master_population.py::main()
-   │    ├── Inputs: Raw ADS-B schedule databases and airport prefix filters
-   │    ├── Outputs: MASTER_FLIGHTS_FILE (`data/databases/master_flights/master_flights.parquet`)
-   │    └── Safety: Logs progress to `acquisition.log`; skips malformed schedule rows
-   ├── Route Summary & Enrichment: build_route_summary.py::main()
-   │    ├── Inputs: master_flights.parquet dataset and airport coordinates cache
-   │    ├── Outputs: ROUTE_SUMMARY_PARQUET / ROUTE_SUMMARY_PKL / ROUTE_SUMMARY_CSV and report files
-   │    └── Safety: Vectorized Haversine geodesic distance calculation and spatial quality filters
-   └── Fleet Construction: fleet_builder.py / master_merger.py
-        ├── Inputs: OpenAirframes database (`openairframes_adsb_2024-01-01_2026-02-23.csv.gz`)
-        └── Outputs: Enriched flight schedules with validated ICAO typecodes and engine families
+   │    ├── Inputs: Raw ADS-B schedule databases and airport prefix filters (DEFAULT_AIRPORT_PREFIXES)
+   │    └── Outputs: ParentPopulation_*.parquet intermediate files
+   ├── Fleet Construction: fleet_builder.py / master_merger.py
+   │    ├── Inputs: OpenAirframes database, aircraft metadata CSV
+   │    └── Outputs: Enriched flight schedules with validated ICAO typecodes and engine families
+   ├── Bounding Box Filtering: apply_bounds_and_filters.py::main()
+   │    ├── Inputs: Merged population parquets, EUR_LAT/LON bounds from config.py
+   │    └── Outputs: MASTER_FLIGHTS_FILE (data/databases/master_flights/master_flights.parquet)
+   └── Route Summary Enrichment: build_route_summary.py::main()
+        ├── Inputs: master_flights.parquet, airport coordinates cache
+        └── Outputs: ROUTE_SUMMARY_PARQUET / ROUTE_SUMMARY_PKL / ROUTE_SUMMARY_CSV
   ```
 
 ### 4.3 Core Fetching (`src/core/fetching/`)
@@ -233,64 +231,76 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
   Trajectory Fetching
    ├── Query Execution: opensky_fetcher.py::fetch_trajectory()
    │    ├── Inputs: Flight icao24, callsign, and time bounds
-   │    ├── Outputs: Raw waypoints DataFrame (`*_raw.parquet` in SI units)
-   │    └── Safety: Checks local cache before querying; applies `retry_backoff()` on Trino timeouts
+   │    ├── Outputs: Raw waypoints DataFrame (*_raw.parquet in SI units)
+   │    └── Safety: Checks local cache before querying; applies retry_backoff() on Trino timeouts
    └── Batch Orchestration: fetcher_orchestrator.py::main()
         ├── Inputs: Corridor flight list parquets and rank specifications
-        ├── Outputs: Populates `GLOBAL_TRAJECTORY_REGISTRY`; saves raw trajectory files
-        └── Safety: Logs to `fetching.log`; validates conflicting `--ranks` vs `--upper-rank` flags; supports `--resume`
+        ├── Outputs: Populates GLOBAL_TRAJECTORY_REGISTRY; saves *_raw.parquet files
+        └── Safety: Logs to fetching.log; supports --resume; validates conflicting --ranks vs --upper-rank
   ```
 
 ### 4.4 Core Processing (`src/core/processing/`)
-* **Objective**: Clean raw ADS-B waypoints by applying a 6D Kinematic Extended Kalman Filter (EKF) in a per-flight LAEA projection plane, resample to a uniform time grid (default 60 s), assign OpenAP aerodynamic flight phases, and optionally export EKF diagnostic tensors for offline mathematical autopsy.
+* **Objective**: Clean raw ADS-B waypoints via a 6D Kinematic Extended Kalman Filter (EKF) and Rauch-Tung-Striebel (RTS) smoother, resample to a uniform 60 s grid, assign OpenAP flight phases, evaluate six independent post-filter axis checks, and annotate the clean registry with pass/fail outcomes and scalar quality metrics.
 * **FAST Mapping**:
   ```text
-  Trajectory Processing (EKF)
-   └── Smoothing, Resampling & Diagnostics: kalman_filter.py
-        ├── Inputs: Raw trajectory waypoints (`*_raw.parquet`) queried via GLOBAL_TRAJECTORY_REGISTRY
+  Trajectory Processing & Post-Filtering
+   ├── EKF + RTS Smoothing: kalman_filter.py
+   │    ├── Inputs: Raw trajectory waypoints (*_raw.parquet) queried via GLOBAL_TRAJECTORY_REGISTRY
+   │    ├── Outputs:
+   │    │    ├── *_clean_si.parquet → GLOBAL_CLEAN_REGISTRY updated
+   │    │    └── (optional) *_ekf_diag.npz → GLOBAL_EKF_DIAG_REGISTRY updated
+   │    ├── Core: run_6d_kinematic_ekf() forward pass; RTS backward smoother; 60 s uniform resampling
+   │    ├── Safety: Rule 11 typecode validation via is_supported_typecode(); logs rejects to skipped_aircraft.log
+   │    └── Exception: Index setting prior to EKF is intentionally omitted to prevent JSON serialization crashes
+   └── Post-Filter Evaluation: postfilter_cli.py / postfilter_orchestrator.py / trajectory_filters.py
+        ├── Inputs: GLOBAL_CLEAN_REGISTRY; DEFAULT_POSTFILTER_THRESHOLDS from config.py
+        ├── Six independent axis filters (all must pass for a flight to be included in clustering):
+        │    ├── horiz_velocity       — max gs ≤ max_horiz_velocity_kt (800.0 kt)
+        │    ├── vert_velocity        — max |rocd| ≤ max_vert_velocity_fpm (7000.0 fpm)
+        │    ├── coord_horiz_velocity — Haversine step speed ≤ max_coord_horiz_velocity_kt (800.0 kt)
+        │    ├── coord_vert_velocity  — altitude step rate ≤ max_coord_vert_velocity_fpm (7000.0 fpm)
+        │    ├── acceleration         — max 3D accel ≤ max_acceleration_mps2 (7.5 m/s²)
+        │    └── distance             — waypoint-to-airport distance ≤ prefilter distance thresholds
         ├── Outputs:
-        │    ├── Clean SI trajectories (`*_clean_si.parquet`) → GLOBAL_CLEAN_REGISTRY updated
-        │    └── (optional) Diagnostic archives (`*_ekf_diag.npz`) → GLOBAL_EKF_DIAG_REGISTRY updated
-        ├── Core Functions:
-        │    ├── run_6d_kinematic_ekf(): Forward EKF pass recording S_hist[i], e_hist[i] per step
-        │    ├── compute_ekf_quality_metrics(S_hist, P_hist, e_hist): NIS-based scalar quality score
-        │    ├── load_ekf_diag_arrays(diag_path): Reads S_k, P_k, e_k from an NPZ archive
-        │    └── compute_ekf_quality_metrics_from_diag(diag_path): Wraps loader + quality metric calculator
-        ├── Safety: Rule 11 typecode validation via is_supported_typecode(); logs rejects to skipped_aircraft.log
-        └── Exception: Index setting prior to EKF is omitted to prevent time-serialization JSON crashes
+        │    ├── GLOBAL_CLEAN_REGISTRY annotated with 8 boolean pass/fail columns
+        │    └── GLOBAL_CLEAN_QUALITY_REGISTRY with 5 scalar metric columns per flight
+        └── Concurrency: ProcessPoolExecutor (spawn); batch size = POSTFILTER_BATCH_SIZE_DEFAULT (200)
   ```
 
 ### 4.5 Core Corridor (`src/core/corridor/`)
-* **Objective**: Synthesize baseline route paths via Dynamic Time Warping (DTW) clustering, perform PCA dimensionality compression, and evaluate cluster stability across cohorts.
+* **Objective**: Synthesize representative 4D medoid trajectory templates per route corridor using PCA dimensionality reduction and K-Medoids clustering, and evaluate cohort stability.
 * **FAST Mapping**:
   ```text
-  Corridor Synthesis & Clustering
-   ├── Path Generation: path_generator.py::generate_corridor_paths()
-   │    ├── Inputs: Clean SI trajectories across a route cohort
-   │    ├── Outputs: Temporal gridded route centroids (`*_corridor_c[ID].parquet`)
-   │    └── Safety: Drops derivative kinematic columns (`gs`, `heading`, `rocd`) before PyContrails instantiation to force dynamic recalculation; enforces FL250 cruise altitude validations
-   ├── PCA Compression: pca_compressor.py::compress_trajectories()
-   │    ├── Inputs: Clean trajectory coordinates
-   │    ├── Outputs: Reduced feature matrix retaining 95% variance (`D_PCA`)
-   │    └── Safety: Fallback to standard features if trajectory count < `MIN_FLIGHTS_FOR_CLUSTERING`
-   ├── Stability Sweeps: stability_orchestrator.py / stability_worker.py
-   │    ├── Inputs: Resampled cohort flights across clustering rounds
-   │    ├── Outputs: Updates `GLOBAL_STABILITY_REGISTRY` and `GLOBAL_CORRIDOR_MODEL_REGISTRY`
-   │    └── Safety: Sequential loop fallback if parallel worker pool fails
-   └── Streaming Pipeline: streaming_pipeline.py::main()
-        ├── Inputs: End-to-end corridor run parameters
-        └── Outputs: Orchestrates fetching, EKF processing, clustering, and simulation
+  Corridor Clustering & Medoid Synthesis
+   ├── CLI & Config: corridor_clustering_cli.py::main()
+   │    ├── Inputs: CLI flags (--ranks/--rank-range/--routes, --require-pass, --threads-per-worker, --metric)
+   │    └── Outputs: Configures logging (corridor.log) and invokes run_corridor_clustering()
+   ├── Route Resolution & Batch Registry Flushing: corridor_clustering_orchestrator.py
+   │    ├── Inputs: Target corridors, GLOBAL_CLEAN_REGISTRY (filter-passed flights via --require-pass)
+   │    └── Outputs: Batch updates to GLOBAL_MODEL_REGISTRY and GLOBAL_FLIGHT_CLUSTER_MAP
+   ├── Worker Task Coordination & Medoid Saving: corridor_clustering_worker.py
+   │    ├── Inputs: Cohort row metadata list; baseline time (2025-01-01 00:00:00 UTC)
+   │    └── Outputs: *_synthesized_c[ID].parquet in data/corridor_paths/; skipped_aircraft.log entries
+   ├── Feature Matrix & K-Medoids Engine: corridor_clustering_engine.py
+   │    ├── Feature matrix: 300-dim vector [lat×100, lon×100, alt×100] per flight
+   │    ├── Processing: Z-score normalization → PCA (D_PCA=13 components, 95% variance retained)
+   │    ├── Clustering: pyclustering kmedoids with euclidean distance; k optimized up to CLUSTERING_MAX_K=1
+   │    ├── Outputs: ClusteringResult(k, route_class 1–4, silhouette_score, labels, medoid_indices, X_raw, X_scaled, X_pca)
+   │    └── Safety: Falls back to k=1 if cohort < MIN_FLIGHTS_FOR_CLUSTERING=3 or silhouette < SILHOUETTE_THRESHOLD=0.35
+   └── Stability Sampling: stability_orchestrator.py / stability_worker.py
+        ├── Inputs: Target ranks, GLOBAL_TRAJECTORY_REGISTRY, N_STANDARD=65, DELTA_CV_THRESHOLD=0.01
+        └── Outputs: GLOBAL_STABILITY_REGISTRY updated with ΔCV convergence metrics
   ```
 
 ### 4.6 Core Weather (`src/core/weather/`)
-* **Objective**: Bulk download and manage Copernicus Climate Data Store (CDS) ERA5 NetCDF atmospheric reanalysis data on required pressure levels and surface grids.
+* **Objective**: Bulk download and manage Copernicus CDS ERA5 NetCDF atmospheric reanalysis data on required pressure levels and surface grids.
 * **FAST Mapping**:
   ```text
   Weather Acquisition
    └── ERA5 Management: era5_manager.py::download_era5()
-        ├── Inputs: Bounding box (`WEATHER_BOUNDS_BBOX`), time range, and required pressure levels
-        ├── Outputs: Cached NetCDF files in `data/weather/`
-        └── Safety: Background download threads; self-healing corruption checks; logs to `weather.log`
+        ├── Inputs: WEATHER_BOUNDS_BBOX (EUR_BBOX + WEATHER_PADDING=10°), time range, pressure levels
+        ├── Outputs: Cached NetCDF files in data/weather/
+        └── Safety: Background download threads; self-healing corruption checks; logs to weather.log
   ```
 
 ### 4.7 Core Physics (`src/core/physics/`)
@@ -300,115 +310,249 @@ Every module adheres to a Function Analysis Solution Tree (FAST) structure mappi
   Physics Simulation
    ├── Individual Simulation: simulation.py::run_simulation()
    │    ├── Inputs: Clean SI trajectories and ERA5 NetCDF weather data
-   │    ├── Outputs: Simulated trajectories (`*_simulated.parquet`) and `GLOBAL_SIMULATION_REGISTRY`
-   │    └── Safety: Skips unsupported aircraft typecodes, appending details to `skipped_aircraft.log`
+   │    ├── Outputs: *_simulated.parquet → GLOBAL_SIMULATION_REGISTRY updated
+   │    └── Safety: Skips unsupported typecodes; appends to skipped_aircraft.log
    └── Cohort Cloning: clone_simulation.py::clone_corridor()
-        ├── Inputs: Synthesized route centroids and temporal departure offsets
-        ├── Outputs: Route-specific simulation results in `data/results/corridor_simulations/` and `GLOBAL_CORRIDOR_SIM_REGISTRY`
-        └── Safety: Logs execution to `clone_simulation.log`; appends unsupported airframes to `skipped_aircraft.log`
+        ├── Inputs: *_synthesized_c[ID].parquet medoid paths from GLOBAL_MODEL_REGISTRY; departure timestamps from master_flights.parquet
+        ├── Outputs: *_flight.parquet in data/results/corridor_simulations/<origin>-<dest>/ → GLOBAL_CORRIDOR_SIM_REGISTRY updated
+        ├── Concurrency: ThreadPoolExecutor (zero-copy shared met & rad ERA5 grids in RAM)
+        └── Safety: Logs to simulation.log; unsupported airframes appended to skipped_aircraft.log
   ```
 
 ### 4.8 Analysis & Campaigns (`src/analysis/`)
-* **Objective**: Verify flight characteristics, analyze route popularity and flight levels, and execute phase quality calibration campaigns.
+* **Objective**: Evaluate data quality via Phase Quality calibration campaigns, verify flight characteristics, and analyze route popularity and flight levels.
 * **FAST Mapping**:
   ```text
-  Analysis & Verification
-   ├── Flight Verification: verification/flight_analysis.py / flight_level_analysis.py
-   │    ├── Inputs: Clean trajectories and route summary tables
-   │    ├── Outputs: Distance vs height scatter plots, candlestick flight level boxplots, and CSV reports
-   │    └── Safety: Aggregates logs cleanly; handles missing optional columns gracefully
-   ├── Route Classification: verification/route_popularity_analysis.py / route_class_analysis.py
-   │    ├── Inputs: Master flight route summaries
-   │    ├── Outputs: Dual Y-axis popularity histograms and 4-class route percentage charts
-   │    └── Safety: Exports reproducible summary tables to `data/analysis/reports/`
-   └── Phase Quality Campaigns: campaigns/phase_schema_orchestrator.py / variational_orchestrator.py
-        ├── Inputs: Calibration routes (`CALIBRATION_ROUTES`), candidate pools, and stability sweeps
-        ├── Outputs: Updates `AUDIT_CANDIDATE_POOL_REGISTRY`, `AUDIT_COHORT_MAP_REGISTRY`, and diagnostic plots
-        └── Safety: Enforces pre-filter thresholds (`DEFAULT_PREFILTER_THRESHOLDS`); logs to `calibration.log`
+  Analysis & Calibration
+   ├── Phase Quality Campaign: src/analysis/campaigns/phase_quality/
+   │    ├── Candidate Pool Extraction: build_audit_candidate_pool.py
+   │    │    ├── Inputs: master_flights.parquet; 6 CALIBRATION_ROUTES from config.py
+   │    │    ├── Stratification: 10 temporal cohorts × 40 flights = 400 flights per route (2,400 total)
+   │    │    └── Outputs: AUDIT_CANDIDATE_POOL_REGISTRY, AUDIT_COHORT_MAP_REGISTRY
+   │    ├── Campaign Orchestration: run_phase_quality_campaign.py
+   │    │    ├── Inputs: Candidate pool; raw *_raw.parquet; clean *_clean_si.parquet via GLOBAL_CLEAN_REGISTRY
+   │    │    ├── Evaluates: Metadata pre-filters (departure/arrival distances, duration anomalies) AND
+   │    │    │              6-axis trajectory post-filters (delegating to src.core.processing.trajectory_filters)
+   │    │    ├── Outputs: filter_evaluation.csv per run; recalibrated thresholds applied to config.py manually
+   │    │    └── Concurrency: ProcessPoolExecutor; one worker per calibration route
+   │    └── Visual Audit Reports: phase_quality_plots.py
+   │         ├── 3-row layout per cohort page: Raw+Prefilter / Raw-But-Clean / Clean+Postfilter
+   │         ├── Rejection coloring: light red (pre-filter) / deep red (post-filter)
+   │         └── Output formats: multi-page PDF with vector SVG lines or rasterized PNG (300 DPI)
+   ├── EKF Tensor Autopsy: analyze_ekf_diagnostics.py
+   │    ├── Inputs: GLOBAL_EKF_DIAG_REGISTRY, *_ekf_diag.npz tensor archives
+   │    ├── Math: Phase 1 NIS vs Chi²₆; Phase 2 Residual ACF; Phase 3 Condition & Drift
+   │    └── Outputs: ekf_autopsy_flight_metrics.parquet, ekf_autopsy_route_summary.csv, 4-page corridor PDF
+   └── Statistical Verification: verification/flight_analysis.py / flight_level_analysis.py / route_popularity_analysis.py
+        ├── Inputs: Clean trajectories, route summaries
+        └── Outputs: Distance vs height scatter plots, candlestick FL charts, popularity histograms, CSV tables
   ```
 
 ---
 
 ## 5. End-to-End Data Workflow
 
-### Part 1: Acquisition & Route Summary
+### Step 1 — Acquisition
 
 ```mermaid
 flowchart TD
-    subgraph Acquisition ["1. Acquisition & Regional Scoping Layer"]
-        A1[Raw ADS-B Schedules] -->|build_master_population.py| A2["ParentPopulation_*.parquet"]
-        B1[Raw Aircraft DBs] -->|fleet_builder.py| B2["*_Enriched_Fleet.parquet"]
-        W1[Copernicus CDS API] -->|era5_manager.py| W2[(ERA5 NetCDF Cache)]
-        
+    subgraph Acquisition ["Step 1: Acquisition"]
+        A1[Raw ADS-B Schedule DBs] -->|build_master_population.py| A2["ParentPopulation_*.parquet"]
+        B1[OpenAirframes + Aircraft DB CSVs] -->|fleet_builder.py| B2["*_Enriched_Fleet.parquet"]
         A2 --> M[master_merger.py]
         B2 --> M
-        M --> C[(master_flights.parquet)]
-        
-        C -->|build_route_summary.py| D[(master_flights_route_summary.parquet)]
+        M --> C["Merged Population parquets"]
+        C -->|apply_bounds_and_filters.py\nEUR_LAT/LON bounds| D[("MASTER_FLIGHTS_FILE\nmaster_flights.parquet")]
+        D -->|build_route_summary.py\nHaversine geodesic distances| E[("ROUTE_SUMMARY_PARQUET\nmaster_flights_route_summary.parquet")]
     end
 ```
 
-**Regional Scoping & Airport Indicators:**
-This initial phase is where we define the bounding box and geographical region we want to simulate. The flight schedules, route generation, and ERA5 weather downloads are all constrained to this target region (e.g., Europe vs. North America) via the CLI dates and boundary parameters.
+**Step-by-step:**
+1. `build_master_population.py` ingests raw ADS-B schedule databases filtered by `DEFAULT_AIRPORT_PREFIXES` (e.g. `["B", "E", "L"]` for European ICAO regions) and produces intermediate `ParentPopulation_*.parquet` files.
+2. `fleet_builder.py` processes the OpenAirframes CSV and aircraft metadata databases to produce `*_Enriched_Fleet.parquet` files with validated ICAO typecodes and engine families.
+3. `master_merger.py` joins the population and fleet tables on `icao24` / `callsign`, producing a merged population parquet.
+4. `apply_bounds_and_filters.py` applies the strict European bounding box filter (`EUR_LAT_MIN/MAX`, `EUR_LON_MIN/MAX` from `config.py`) and any additional pre-filter thresholds, writing the final `master_flights.parquet`.
+5. `build_route_summary.py` computes Haversine geodesic distances, popularity ranks, and route metadata, writing `master_flights_route_summary.parquet` and its pickle/CSV counterparts.
 
-> [!WARNING]
-> **Note on Airport Indicators (America):** When querying `flightdata4/trino` for North American regions, many flights are recorded using three- to five-character alphanumeric **FAA location identifiers** (FAA LIDs) instead of standard 4-letter **ICAO identifiers**. The pipeline's departure/arrival prefix filters and downstream location merging logic must account for this discrepancy when scoping non-European simulations.
+> [!NOTE]
+> It often makes sense to run Steps 1–4 without the bounding box first, then use `verify_map` to visually identify the correct bounding box, and re-run `apply_bounds_and_filters.py` with the confirmed bounds.
 
-### Part 2: Calibration & Data Quality Phase
+---
 
-Before entering the main execution pipeline, the system verifies data quality and parameter stability via an isolated **Calibration Phase**:
-- **Trajectory Overfetching**: A small subset of trajectories is overfetched from the OpenSky Trino API.
-- **Filter Evaluation**: The raw data is passed through the `kalman_filter` and clustering components purely to evaluate and tune the **Pre-Filter** and **Post-Filter** parameters.
-- **Verification**: This ensures the thresholds for outlier rejection, physical limit violations (e.g., velocity, acceleration), and Silhouette clustering scores are optimal before bulk processing begins.
-
-### Part 3: The Main Waterfall Pipeline (Fetching to Simulation)
+### Step 2 — Overfetching & Phase Quality Calibration
 
 ```mermaid
 flowchart TD
-    subgraph Fetching ["2. Fetching"]
-        D[(master_flights_route_summary.parquet)] -->|fetcher_orchestrator.py| E1[OpenSky Trino API]
-        C[(master_flights.parquet)] -->|opensky_fetcher.py| E1
-        E1 --> E2["Raw Trajectories (*_raw.parquet)"]
-        E2 -->|Update| E3[(GLOBAL_TRAJECTORY_REGISTRY)]
-        E2 -->|Update| E3A[(Concat Buffer)]
-    end
-
-    subgraph EKF_PostFilter ["3. EKF & Post-Filtering"]
-        E3 -->|kalman_filter.py| E4[Extended Kalman Filter & RTS]
-        D --> E4
-        E4 --> E5["Clean SI Trajectories (*_clean_si.parquet)"]
-        E5 -->|Update| E6[(GLOBAL_CLEAN_REGISTRY)]
-        
-        E6 -->|postfilter_cli.py| P1[Load Flights & Check Filters]
-        P1 -->|Update| E6
-    end
-
-    subgraph Corridor_Synthesis ["4. Corridor Clustering"]
-        E6 -->|corridor_clustering_cli.py| F1[Load Filter-Passed Clean Flights]
-        F1 --> F2[Sampling & Z-Norm]
-        F2 --> F3[PCA & DTW Clustering]
-        
-        F3 --> F4["Synthesized Centroids / Medoids"]
-        F3 --> F5[(GLOBAL_FLIGHT_CLUSTER_MAP)]
-        F4 -->|Update| F6[(GLOBAL_CORRIDOR_MODEL_REGISTRY)]
-    end
-
-    subgraph Physics_Simulation ["5. Clone Simulation"]
-        W1[(ERA5 Weather Cache)] -->|clone_simulation.py| S1[Load Corridors & Shift Times]
-        F6 --> S1
-        C --> S1
-        D --> S1
-        S1 -->|PSFlight & CoCiP| S2["Corridor Simulation Results (*_flight.parquet)"]
-        S2 -->|Update| S3[(GLOBAL_CORRIDOR_SIM_REGISTRY)]
+    subgraph Calibration ["Step 2: Overfetching & Phase Quality Calibration"]
+        E[("master_flights_route_summary.parquet")] -->|fetcher_orchestrator.py\nCALIBRATION_ROUTES only\nsmall fixed sample| F["*_raw.parquet\n(calibration cohort)"]
+        F -->|kalman_filter.py| G["*_clean_si.parquet\n(calibration cohort)"]
+        F --> H["build_audit_candidate_pool.py\n6 routes × 400 flights"]
+        H --> I[("AUDIT_CANDIDATE_POOL_REGISTRY")]
+        G --> J["run_phase_quality_campaign.py\n(ProcessPoolExecutor)"]
+        I --> J
+        J --> K["Per-flight metadata pre-filter\ndep/arr distance & duration checks"]
+        K --> L["Per-flight 6-axis post-filter\nvia trajectory_filters.py"]
+        L --> M["phase_quality_plots.py\n3-row layout per cohort page\nSVG / PNG audit PDF reports"]
+        L --> N["filter_evaluation.csv\n(PASSED / REJECTED per flight)"]
+        M --> O[("data/calibration/phase_quality/runs/")]
+        N --> P["Manual recalibration\nof config.py thresholds:\nDEFAULT_PREFILTER_THRESHOLDS\nDEFAULT_POSTFILTER_THRESHOLDS\nD_PCA · N_STANDARD · DELTA_CV_THRESHOLD"]
     end
 ```
 
-**Step-by-Step Description:**
-1. **Schedule Acquisition & Enrichment**: `build_master_population.py` ingests raw ADS-B schedules to build the master flights database (`master_flights.parquet`). `build_route_summary.py` calculates Haversine geodesic distances and populates the route summary tables.
-2. **Corridor Slicing**: Corridor schedules are sliced into specific airport pair flight lists (`data/flight_lists/`) based on geographic bounding boxes and route popularity ranks.
-3. **Trajectory Fetching**: `fetcher_orchestrator.py` reads the corridor flight lists and queries OpenSky Trino via `opensky_fetcher.py`. Raw waypoint parquets (`*_raw.parquet`) are saved to `data/trajectories/raw/`, and `GLOBAL_TRAJECTORY_REGISTRY` is updated atomically.
-4. **EKF Smoothing**: `kalman_filter.py` reads raw waypoints, projects coordinates to a local Lambert azimuthal equal-area plane, applies an Extended Kalman Filter (EKF), and resamples to a uniform 1-minute grid. Clean SI parquets (`*_clean_si.parquet`) are saved to `data/trajectories/clean/`, updating `GLOBAL_CLEAN_REGISTRY`.
-5. **PCA Compression & DTW Clustering**: `pca_compressor.py` reduces trajectory feature dimensions to `D_PCA` components. `path_generator.py` executes Dynamic Time Warping (DTW) clustering across flight cohorts, producing temporal-gridded route centroids (`*_corridor_c[ID].parquet`) in `data/corridor_paths/` and updating `GLOBAL_CORRIDOR_MODEL_REGISTRY` and `GLOBAL_STABILITY_REGISTRY`.
-6. **Weather Retrieval**: `era5_manager.py` downloads atmospheric reanalysis NetCDF files from Copernicus CDS for the European bounding box (`WEATHER_BOUNDS_BBOX`) across required pressure levels, caching them in `data/weather/`.
-7. **Physics & Contrail Simulation**: `simulation.py` and `clone_simulation.py` combine clean trajectories (or synthesized centroids) with ERA5 weather data to run PSFlight performance and CoCiP contrail models. Results are saved to `data/results/corridor_simulations/`, updating `GLOBAL_SIMULATION_REGISTRY` and `GLOBAL_CORRIDOR_SIM_REGISTRY`. Unsupported airframes are safely skipped and logged to `skipped_aircraft.log`.
-8. **Analysis & Verification**: Analytical suites in `src/analysis/` ingest clean trajectories, simulated outputs, and route summaries to export verification plots, flight level candlestick charts, and phase quality campaign reports into `data/analysis/`.
+**Step-by-step:**
+1. `fetcher_orchestrator.py` is invoked with a small fixed sample targeting only the 6 `CALIBRATION_ROUTES` from `config.py` (e.g. `EDDF-LIRF`, `EGLL-BIKF`, `ESSA-LEMD`), producing a calibration-specific cohort of `*_raw.parquet` files.
+2. `kalman_filter.py` EKF-cleans the calibration cohort, producing `*_clean_si.parquet` files and (optionally) `*_ekf_diag.npz` diagnostic archives.
+3. `build_audit_candidate_pool.py` stratifies 400 candidate flights per calibration route into 10 temporal cohorts (40 flights per cohort), writing `AUDIT_CANDIDATE_POOL_REGISTRY` and `AUDIT_COHORT_MAP_REGISTRY`.
+4. `run_phase_quality_campaign.py` dispatches one worker process per route. Each worker loads both raw and clean trajectory files, evaluates metadata pre-filters (departure/arrival horizontal and vertical distance thresholds, duration anomaly checks) and then applies all 6 axis post-filters via `src.core.processing.trajectory_filters`. Results are aggregated into `filter_evaluation.csv`.
+5. `phase_quality_plots.py` compiles a multi-page visual audit PDF per route. Each cohort page renders a 3-row layout: Raw+Prefilter (rejected flights in light red), Those-but-clean (same filter status on clean data), and Clean+Postfilter (additional post-filter rejections in deep red). Output format is either vector SVG (for lossless inspection) or rasterized PNG (300 DPI, for fast PDF rendering on laptops).
+6. The engineer reviews `filter_evaluation.csv` and the audit PDFs, then manually updates `DEFAULT_PREFILTER_THRESHOLDS`, `DEFAULT_POSTFILTER_THRESHOLDS`, `D_PCA`, `N_STANDARD`, and `DELTA_CV_THRESHOLD` in `config.py` before proceeding to Step 3.
+
+---
+
+### Step 3 — Trajectory Fetching
+
+```mermaid
+flowchart TD
+    subgraph Fetching ["Step 3: Full-Scale Trajectory Fetching"]
+        E[("master_flights_route_summary.parquet")] -->|fetcher_orchestrator.py\n--lower-rank / --upper-rank / --strategy| API[OpenSky Trino API]
+        F2[("master_flights.parquet")] --> API
+        API --> R["*_raw.parquet\n(SI units, timezone-aware UTC)"]
+        R -->|Atomic write| REG[("GLOBAL_TRAJECTORY_REGISTRY")]
+        R --> BUF["Concat Buffer\n*_all_raw.parquet\n(manual pack only)"]
+    end
+```
+
+**Step-by-step:**
+1. `fetcher_orchestrator.py` reads `master_flights_route_summary.parquet` to resolve target corridors by rank, strategy (`fixed`, `percent`, `all`), and date range.
+2. For each corridor, `opensky_fetcher.py` queries the OpenSky Trino database. Results are already in SI units (altitude in meters, speed in m/s). Timezone-aware UTC timestamps are preserved at this stage.
+3. Each fetched trajectory is written atomically as `*_raw.parquet` into a hashed run directory under `data/trajectories/raw/`.
+4. `GLOBAL_TRAJECTORY_REGISTRY` is updated atomically after each successful fetch.
+5. `--resume` mode skips corridors already present in the registry.
+
+---
+
+### Step 4 — EKF + RTS Cleaning
+
+```mermaid
+flowchart TD
+    subgraph EKF ["Step 4: EKF + RTS Kinematic Cleaning (ProcessPoolExecutor)"]
+        REG[("GLOBAL_TRAJECTORY_REGISTRY")] -->|kalman_filter.py\n--rank-range / --max-workers| W1["Worker N: Load *_raw.parquet"]
+        W1 --> W2["Project WGS84 → LAEA local plane\n(per-flight centroid)"]
+        W2 --> W3["6D Kinematic EKF forward pass\n(pos_x, pos_y, alt, vel_x, vel_y, rocd)"]
+        W3 --> W4["Rauch-Tung-Striebel backward smoother"]
+        W4 --> W5["60 s uniform temporal resampling\nOpenAP flight phase labelling"]
+        W5 --> W6["*_clean_si.parquet\n(timezone-naive UTC, SI units)"]
+        W6 -->|Atomic write| CREG[("GLOBAL_CLEAN_REGISTRY")]
+        W3 -->|"--save-diagnostics"| D1["*_ekf_diag.npz\n(S_k, P_k, e_k tensors)"]
+        D1 -->|Atomic write| DREG[("GLOBAL_EKF_DIAG_REGISTRY")]
+    end
+```
+
+**Step-by-step:**
+1. `kalman_filter.py` reads `GLOBAL_TRAJECTORY_REGISTRY` to resolve unprocessed raw trajectory files.
+2. Each flight is dispatched to a worker process (via `ProcessPoolExecutor` with `spawn` context). The worker projects WGS84 lat/lon coordinates into a per-flight Lambert Azimuthal Equal Area (LAEA) plane centered at the flight's geographic midpoint.
+3. The 6D Kinematic EKF forward pass filters the [pos_x, pos_y, alt, vel_x, vel_y, rocd] state vector, recording innovation sequences `e_k` and covariance matrices `S_k`, `P_k`.
+4. The Rauch-Tung-Striebel backward smoother refines the forward estimates.
+5. The smoother output is resampled to a uniform 60 s temporal grid and inverse-projected back to WGS84. OpenAP assigns flight phase labels.
+6. The clean trajectory is written as `*_clean_si.parquet` (timezone-naive UTC, all columns in SI units). `GLOBAL_CLEAN_REGISTRY` is updated atomically.
+7. If `--save-diagnostics` is active, raw tensor arrays are compressed into `*_ekf_diag.npz` and indexed in `GLOBAL_EKF_DIAG_REGISTRY`.
+
+---
+
+### Step 5 — Post-Filter Refinement
+
+```mermaid
+flowchart TD
+    subgraph PostFilter ["Step 5: Post-Filter Refinement (ProcessPoolExecutor)"]
+        CREG[("GLOBAL_CLEAN_REGISTRY")] -->|postfilter_cli.py\n--rank-range / --filters / --workers| PO["postfilter_orchestrator.py\nBatch = 200 flights"]
+        PO --> PW["Worker N: Load *_clean_si.parquet"]
+        PW --> F1["horiz_velocity: max gs ≤ 800 kt"]
+        PW --> F2["vert_velocity: max |rocd| ≤ 7000 fpm"]
+        PW --> F3["coord_horiz_velocity: Haversine step ≤ 800 kt"]
+        PW --> F4["coord_vert_velocity: alt step rate ≤ 7000 fpm"]
+        PW --> F5["acceleration: max 3D accel ≤ 7.5 m/s²"]
+        PW --> F6["distance: waypoint-to-airport ≤ prefilter bounds"]
+        F1 & F2 & F3 & F4 & F5 & F6 --> OUT["Pass/fail booleans\n+ reject_reason strings\nper flight"]
+        OUT -->|Atomic write| CREG2[("GLOBAL_CLEAN_REGISTRY\n(annotated)")]
+        OUT -->|Atomic write| QREG[("GLOBAL_CLEAN_QUALITY_REGISTRY\n(scalar metrics)")]
+    end
+```
+
+**Step-by-step:**
+1. `postfilter_cli.py` resolves the target flight scope from `--rank-range`, `--ranks`, `--routes`, or `--source-dir`. If `--overwrite` is not set, already-evaluated flights are skipped.
+2. `postfilter_orchestrator.py` batches flights into groups of `POSTFILTER_BATCH_SIZE_DEFAULT` (200) and dispatches each batch to a worker process.
+3. Each worker loads `*_clean_si.parquet` and independently runs all 6 axis filters via `trajectory_filters.py`. Filters are stateless and short-circuit on first failure per axis.
+4. Results are written back to `GLOBAL_CLEAN_REGISTRY` as 8 boolean columns (`horiz_velocity_pass`, `horiz_velocity_reject_reason`, ...) and to `GLOBAL_CLEAN_QUALITY_REGISTRY` as 5 scalar metric columns (`metric_max_horiz_speed_kt`, `metric_max_vert_speed_fpm`, `metric_max_coord_horiz_speed_kt`, `metric_max_coord_vert_speed_fpm`, `metric_max_accel_mps2`).
+
+---
+
+### Step 6 — Corridor Clustering
+
+```mermaid
+flowchart TD
+    subgraph Clustering ["Step 6: Corridor Clustering (ProcessPoolExecutor)"]
+        CREG[("GLOBAL_CLEAN_REGISTRY\n(filter-passed flights)")] -->|corridor_clustering_cli.py\n--require-pass velocity\ncoordinate_velocity\nacceleration distance| ORC["corridor_clustering_orchestrator.py"]
+        ORC --> WK["Worker N: Load cohort flights\ncorridor_clustering_worker.py"]
+        WK --> FM["build_feature_matrix()\n300-dim [lat×100, lon×100, alt×100]"]
+        FM --> ZN["Z-score normalization"]
+        ZN --> PCA["PCA: D_PCA=13 components\n95% variance retained"]
+        PCA --> KM["K-Medoids clustering\npyclustering · euclidean\nk ≤ CLUSTERING_MAX_K=1"]
+        KM --> CR["ClusteringResult\n(k, route_class 1–4,\nsilhouette_score, labels,\nmedoid_indices)"]
+        CR --> MP["*_synthesized_c0.parquet\n60 s temporal grid\ndata/corridor_paths/"]
+        CR -->|Atomic write| MREG[("GLOBAL_MODEL_REGISTRY")]
+        CR -->|Atomic write| FCMAP[("GLOBAL_FLIGHT_CLUSTER_MAP")]
+    end
+```
+
+**Step-by-step:**
+1. `corridor_clustering_cli.py` resolves target corridors from `--ranks`, `--rank-range`, or `--routes`. The `--require-pass` argument (default: all four groups — `velocity`, `coordinate_velocity`, `acceleration`, `distance`) filters the clean registry to include only flights that passed all required post-filter axes in Step 5.
+2. `corridor_clustering_orchestrator.py` dispatches one worker per corridor using `ProcessPoolExecutor` with `spawn` context and `limit_numeric_threads(1)`.
+3. Each worker calls `build_feature_matrix()` in `corridor_clustering_engine.py`, constructing a 300-dimensional feature vector per flight by resampling [latitude, longitude, altitude] to 100 uniform time points each.
+4. Feature vectors are Z-score normalized. PCA reduces the feature space to `D_PCA=13` components (retaining ≥95% variance), computed fresh per-route cohort (no stored PCA model).
+5. K-Medoids clustering (`pyclustering`) is run with euclidean distance. The optimal `k` is determined up to `CLUSTERING_MAX_K=1`. If `k > 1` would require silhouette ≥ `SILHOUETTE_THRESHOLD=0.35`, otherwise `k=1` is forced.
+6. The medoid flight's clean trajectory is resampled to a uniform 60 s grid and saved as `*_synthesized_c[ID].parquet` in `data/corridor_paths/`.
+7. `GLOBAL_MODEL_REGISTRY` is updated with medoid `flight_id`, route class, cluster count, and silhouette score. `GLOBAL_FLIGHT_CLUSTER_MAP` records each flight's cluster assignment.
+
+---
+
+### Step 7 — Weather Download
+
+```mermaid
+flowchart TD
+    subgraph Weather ["Step 7: ERA5 Weather Download (independent, runs from Step 1 onwards)"]
+        CDS[Copernicus CDS API] -->|era5_manager.py\n--start / --end| DL["Download ERA5 NetCDF\n(pressure-level + surface variables)"]
+        DL --> NC[("data/weather/\n*.nc files\nEUR_BBOX + 10° padding")]
+    end
+```
+
+**Step-by-step:**
+1. `era5_manager.py` downloads hourly ERA5 reanalysis NetCDF files from the Copernicus Climate Data Store.
+2. Downloads cover the European bounding box expanded by `WEATHER_PADDING=10°` (`EUR_BBOX + 10°`), required pressure levels (`ERA5_REQUIRED_PRESSURE_LEVELS`), pressure-level variables (temperature, humidity, wind, ice water content), and surface variables (top-net solar and thermal radiation).
+3. Files are cached in `data/weather/`. Already-downloaded files are skipped. A self-healing check detects and re-downloads corrupted NetCDF files.
+4. This step is fully independent and can be triggered any time from Step 1 onwards, as long as it completes before Step 8.
+
+---
+
+### Step 8 — Physics & Contrail Simulation
+
+```mermaid
+flowchart TD
+    subgraph Simulation ["Step 8: Physics & Contrail Simulation (ThreadPoolExecutor)"]
+        MREG[("GLOBAL_MODEL_REGISTRY\n*_synthesized_c[ID].parquet")] --> CS["clone_simulation.py\n--lower-rank / --upper-rank"]
+        MF[("master_flights.parquet\n(departure timestamps)")] --> CS
+        RS[("master_flights_route_summary.parquet")] --> CS
+        ERA5[("data/weather/*.nc\nERA5 NetCDF cache")] -->|"Load met & rad grids\n(shared RAM, zero-copy)"| CS
+        CS --> TW["ThreadPoolExecutor\nN threads share ERA5 grids"]
+        TW --> SIM["PSFlight: fuel burn,\nthrust, emissions\n+ CoCiP: contrail RF (ΔRF)"]
+        SIM --> FP["*_flight.parquet\ndata/results/corridor_simulations/\n<origin>-<dest>_cloned_simulated/"]
+        FP -->|Atomic write| CSREG[("GLOBAL_CORRIDOR_SIM_REGISTRY")]
+    end
+```
+
+**Step-by-step:**
+1. `clone_simulation.py` reads `GLOBAL_MODEL_REGISTRY` to resolve medoid parquet paths for target corridor ranks. For each corridor, it loads departure timestamps from `master_flights.parquet` via the route summary.
+2. The medoid synthetic trajectory is cloned across all real historical departure times by shifting the baseline timestamp (2025-01-01 00:00:00 UTC) to each actual departure.
+3. ERA5 NetCDF files covering the required time window and geographic extent are loaded into memory as shared `met` (meteorology) and `rad` (radiation) grid objects. These are shared across all simulation threads without copying (`ThreadPoolExecutor`, zero-copy shared RAM).
+4. Each thread simulates one cloned trajectory using `PSFlight` (aircraft performance: thrust, fuel flow, emissions) and `CoCiP` (contrail formation and radiative forcing `ΔRF`).
+5. Simulation results are saved as `*_flight.parquet` in `data/results/corridor_simulations/<origin>-<dest>_cloned_simulated/`.
+6. `GLOBAL_CORRIDOR_SIM_REGISTRY` is updated atomically after each corridor completes. Unsupported aircraft typecodes are skipped and appended to `skipped_aircraft.log`.
