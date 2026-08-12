@@ -32,7 +32,7 @@ src/core/processing/
 ├── kalman_filter.py                   # 6D Kinematic EKF filtering, grid resampling,
 │                                      #   phase assignment & registry update engine
 ├── postfilter_cli.py                  # CLI entrypoint for post-filter pipeline
-├── postfilter_orchestrator.py         # Orchestrator with batching, pooling, and SQLite WAL crash-recovery
+├── postfilter_orchestrator.py         # Orchestrator with batching, pooling, and Delta Lake crash-recovery
 ├── postfilter_worker.py               # Worker initialization and batch processing task
 ├── TRAFFIC_LIBRARY_EKF_ANALYSIS.md   # Advanced mathematical reference for the EKF
 └── trajectory_filters.py              # Pure trajectory checks (velocity, accel, distance)
@@ -185,11 +185,11 @@ Module Objective
        ├── Sub-objective 4 — Batch execution & atomic incremental quality registry update
        │    ├── Input : FilterResult stubs, chunk size, filters_to_run
        │    ├── Solution : postfilter_orchestrator.py::run_postfilters()
-       │    │              Splits stubs into batches, invokes pool, merges outcomes back to in-memory df,
-       │    │              upserts each batch to a SQLite WAL database (data/temp/postfilter_tmp/),
+       │    │              Splits stubs into batches, invokes pool, workers append each completed batch
+       │    │              directly to a Delta Lake crash buffer (data/temp/postfilter_tmp/<stem>/),
        │    │              evaluates thresholds vectorized, and incrementally merges quality metrics
        │    │              into GLOBAL_CLEAN_QUALITY_REGISTRY (keep='last')
-       │    └── Output : global_clean_quality_registry.parquet updated incrementally; SQLite tmp DB deleted on success
+       │    └── Output : global_clean_quality_registry.parquet updated incrementally; Delta Lake crash buffer deleted on success
 ```
 
 ---
@@ -268,8 +268,8 @@ flowchart TD
     H --> I
     I --> J["ProcessPoolExecutor(initializer=_worker_init)\nInitializer preloads airport coordinate cache via resolve_airport_coordinates([])"]
     J --> K["Workers: process_batch()\nRead trajectory Parquet from disk →\nextract_horiz_velocity_metric (gs kt)\nextract_vert_velocity_metric (rocd fpm)\nextract_coord_horiz_velocity_metric (haversine_distance_m kt)\nextract_coord_vert_velocity_metric (coord alt-diff fpm)\nextract_acceleration_metric (3D m/s²)\nextract_distance_metrics (O(1) _AIRPORTS lookup with cache-miss fallback)\nReturn list of updated FilterResult stubs containing scalar metrics"]
-    K --> L["Main process: future as_completed\nMerge extracted metrics back to index of in-memory DataFrame\nUpsert batch rows to SQLite WAL database\n(data/temp/postfilter_tmp/<registry>.db)"]
-    L --> M["Final step: evaluate thresholds vectorized → incremental merge into target quality registry\n(global_clean_quality_registry.parquet or global_raw_quality_registry.parquet, keep='last' on flight_id)\nDelete SQLite tmp DB on success"]
+    K --> L["Workers: append_postfilter_batch()\nAppend completed batch directly to Delta Lake crash buffer\n(data/temp/postfilter_tmp/<registry_stem>/)\nLock-free concurrent write via optimistic concurrency"]
+    L --> M["Final step: evaluate thresholds vectorized → incremental merge into target quality registry\n(global_clean_quality_registry.parquet or global_raw_quality_registry.parquet, keep='last' on flight_id)\nDelete Delta Lake crash buffer dir on success"]
 ```
 
 **Step-by-step:**
@@ -288,8 +288,8 @@ flowchart TD
    - `extract_acceleration_metric()`: Computes 3D step-to-step acceleration from ground speed and vertical rate (m/s²).
    - `extract_distance_metrics()`: Computes absolute horizontal and vertical deviations from origin/destination airport coordinates using O(1) in-process cache lookups.
 6. **Double-Sanitization**: Dataclass attributes are sanitized during instantiation (`__post_init__`) and again upon export (`as_dict()`). Any non-numeric/non-NA metric value is replaced with `pd.NA` and logged as a warning.
-7. **SQLite Incremental Upsert**: As each batch future resolves, the orchestrator merges the extracted scalar metrics into the master in-memory DataFrame. Each completed batch is upserted atomically into a single SQLite WAL database at `data/temp/postfilter_tmp/<registry_stem>.db` via `INSERT OR REPLACE` — O(batch_size) per write with no full-manifest rewrites.
-8. **Threshold Evaluation & Final Registry Flush**: On completion, `evaluate_thresholds()` runs vectorized pass/fail logic over all processed rows. `quality_cols` (excluding `file_path`) are extracted and merged with any existing quality registry via `pd.concat` + `drop_duplicates(subset=['flight_id'], keep='last')`. The updated DataFrame is saved to disk and the SQLite temporary database is unlinked. If the process crashes before this point, the `.db` file is preserved and can be recovered via `--merge-only`.
+7. **Delta Lake Incremental Append (in worker)**: After processing each batch, the worker calls `append_postfilter_batch(lake_path, batch)` from `src.data_manager.io_utils`. This writes the completed batch as a new Parquet file under the Delta Lake crash buffer directory (`data/temp/postfilter_tmp/<registry_stem>/`) and commits an atomic JSON transaction log entry. Because Delta Lake uses optimistic concurrency over a transaction log rather than file-level locks, multiple workers can append concurrently without coordination and without any `fcntl` advisory locks.
+8. **Threshold Evaluation & Final Registry Flush**: On completion, `evaluate_thresholds()` runs vectorized pass/fail logic over all processed rows. `quality_cols` (excluding `file_path`) are extracted and merged with any existing quality registry via `pd.concat` + `drop_duplicates(subset=['flight_id'], keep='last')`. The updated DataFrame is saved to disk and the Delta Lake crash buffer directory is removed via `shutil.rmtree`. If the process crashes before this point, the lake directory is preserved and can be recovered via `--merge-only`.
 
 ---
 
@@ -481,7 +481,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `--max-arr-vert-dist` | `float` | `1000.0` | No | Max arrival vertical distance in meters. |
 | `--filters` | `str` (list) | all six | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `distance`. |
 | `--recheck-flags` | flag | `False` | No | Skip metric extraction entirely. Re-evaluate threshold pass/fail flags vectorized on existing quality metrics. Fast (~30s, no workers). Mutually exclusive with `--overwrite`. |
-| `--merge-only` | flag | `False` | No | Skip metric extraction entirely. Read the preserved SQLite crash-recovery database (`data/temp/postfilter_tmp/<registry>.db`) and merge its records into the quality manifest. Use after a crashed run to recover partial results without re-processing. |
+| `--merge-only` | flag | `False` | No | Skip metric extraction entirely. Read the preserved Delta Lake crash buffer (`data/temp/postfilter_tmp/<registry_stem>/`) and merge its records into the quality manifest. Use after a crashed run to recover partial results without re-processing. Raw and clean runs use separate lake directories keyed on the quality registry stem. |
 
 ---
 
