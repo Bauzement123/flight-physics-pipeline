@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
-from pathlib import Path
 import logging
 from src.common.utils import setup_file_logger, extract_target_routes, split_route_string
-from src.common.config import BASE_DIR, DEFAULT_PREFILTER_THRESHOLDS
+from src.common.config import BASE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,7 @@ def main():
 
     final_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/postfilter_calibration/stage5")
+    out_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "stage5"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage5_master_sensitivity.parquet"
     

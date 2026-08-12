@@ -4,15 +4,10 @@ Analyzes the combined PC and VM registries against the active config limits
 to ensure Western European corridors are not excessively penalized.
 """
 import pandas as pd
-import sys
-from pathlib import Path
 import logging
 
-# Fix python path for src imports
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.append(str(BASE_DIR))
-
 from src.common.config import (
+    BASE_DIR,
     DEFAULT_POSTFILTER_THRESHOLDS,
     METRIC_COL_MAX_COORD_HORIZ_VEL,
     METRIC_COL_MAX_HORIZ_VEL,
@@ -25,10 +20,12 @@ from src.common.config import (
 )
 from src.common.utils import setup_file_logger, split_route_string
 
+logger = logging.getLogger(__name__)
+
 
 def main():
     setup_file_logger("calibration.log")
-    logging.info("Starting Stage 7 Config Exclusion Verification")
+    logger.info("Starting Stage 7 Config Exclusion Verification")
 
     data_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration"
     pc_file = data_dir / "global_clean_quality_registry_PC.parquet"
@@ -39,13 +36,13 @@ def main():
         vm_file = data_dir / "data" / "sources" / "global_clean_quality_registry_VM.parquet"
 
     # 1. Load Data
-    logging.info(f"Loading {pc_file.name}...")
+    logger.info(f"Loading {pc_file.name}...")
     df_pc = pd.read_parquet(pc_file)
-    logging.info(f"Loading {vm_file.name}...")
+    logger.info(f"Loading {vm_file.name}...")
     df_vm = pd.read_parquet(vm_file)
 
     df = pd.concat([df_pc, df_vm], ignore_index=True)
-    logging.info(f"Combined total flights: {len(df)}")
+    logger.info(f"Combined total flights: {len(df)}")
 
     # Extract route from the flight_id (e.g. EDDF-LIRF_20240101_... -> EDDF-LIRF)
     df["route"] = df["flight_id"].apply(lambda fid: str(fid).split("_")[0])
@@ -68,9 +65,9 @@ def main():
     max_arr_vdist = DEFAULT_POSTFILTER_THRESHOLDS["max_arr_vert_dist"]
     max_dep_vdist = DEFAULT_POSTFILTER_THRESHOLDS["max_dep_vert_dist"]
 
-    logging.info(f"Active Config Applied:")
-    logging.info(f"  - Max Coord Horiz Vel: {max_coord_kt} kt")
-    logging.info(f"  - Max Arr Horiz Dist:  {max_arr_dist} m")
+    logger.info(f"Active Config Applied:")
+    logger.info(f"  - Max Coord Horiz Vel: {max_coord_kt} kt")
+    logger.info(f"  - Max Arr Horiz Dist:  {max_arr_dist} m")
 
     # 3. Apply Current Config Masks
     # Check if they pass all current limits
@@ -127,7 +124,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage7_config_exclusion_results.csv"
     stats_sorted.to_csv(out_file, index=False)
-    logging.info(f"Saved complete results to {out_file}")
+    logger.info(f"Saved complete results to {out_file}")
 
 if __name__ == "__main__":
     main()

@@ -49,11 +49,11 @@ flowchart TD
     
     S1 --> C(stage1_directional.csv)
     S2 --> D(stage2_subspace_validation.csv)
-    S3 --> E(stage3_correlations.parquet)
-    S4 --> F(stage4_sensitivity_sweep.parquet)
-    S5 --> G(stage5_master_sensitivity.parquet)
-    S6 --> H(stage6_prefilter_verification.csv)
-    S7 --> I(stage7_config_exclusion_results.csv)
+    S3 --> E(stage3/stage3_correlations.parquet)
+    S4 --> F(stage4/stage4_sensitivity_sweep.parquet)
+    S5 --> G(stage5/stage5_master_sensitivity.parquet)
+    S6 --> H(stage6/stage6_prefilter_verification.csv)
+    S7 --> I(stage7/stage7_config_exclusion_results.csv)
 ```
 
 **Step-by-step:**
@@ -67,7 +67,7 @@ flowchart TD
 8. **Stage 7 (Config Exclusion Check)**: Re-evaluates the combined PC and VM registries strictly against the active parameters in `config.py` to identify which routes are penalized and confirm Western European survival. Saves to `data/calibration/postfilter_calibration/stage7/stage7_config_exclusion_results.csv`.
 
 ## 5. CLI Usage Guide
-Currently, these analytical scripts are executed via the `run_campaign.py` orchestrator without CLI arguments, or as one-off procedural runs.
+`run_campaign.py` orchestrates all stages automatically, passing `--input-registry <merged_registry_path>` to Stages 1, 3, 4, and 6. Stages 0, 2, 5, and 7 take no CLI arguments.
 
 **Bash**
 ```bash
@@ -76,12 +76,12 @@ python -m src.analysis.postfilter_calibration.run_campaign
 
 # Run stages individually
 python -m src.analysis.postfilter_calibration.stage0_merger
-python -m src.analysis.postfilter_calibration.stage1_directional_impact
+python -m src.analysis.postfilter_calibration.stage1_directional_impact --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage2_subspace_validation
-python -m src.analysis.postfilter_calibration.stage3_undirected_correlation
-python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep
+python -m src.analysis.postfilter_calibration.stage3_undirected_correlation --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
+python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage5_master_sensitivity
-python -m src.analysis.postfilter_calibration.stage6_prefilter_verification
+python -m src.analysis.postfilter_calibration.stage6_prefilter_verification --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check
 ```
 
@@ -92,12 +92,12 @@ python -m src.analysis.postfilter_calibration.run_campaign
 
 # Run stages individually
 python -m src.analysis.postfilter_calibration.stage0_merger
-python -m src.analysis.postfilter_calibration.stage1_directional_impact
+python -m src.analysis.postfilter_calibration.stage1_directional_impact --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage2_subspace_validation
-python -m src.analysis.postfilter_calibration.stage3_undirected_correlation
-python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep
+python -m src.analysis.postfilter_calibration.stage3_undirected_correlation --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
+python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage5_master_sensitivity
-python -m src.analysis.postfilter_calibration.stage6_prefilter_verification
+python -m src.analysis.postfilter_calibration.stage6_prefilter_verification --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check
 ```
 
@@ -110,13 +110,13 @@ python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check
 * **Files Read**:
   * `data/databases/master_flights/master_flights_route_summary.parquet`
   * `data/databases/master_flights/master_flights.parquet`
-  * `data/calibration/postfilter_calibration/data/sources/global_clean_quality_registry_PC.parquet` (or `data/calibration/postfilter_calibration/global_clean_quality_registry_PC.parquet`)
-  * `data/calibration/postfilter_calibration/data/sources/global_clean_quality_registry_VM.parquet` (or `data/calibration/postfilter_calibration/global_clean_quality_registry_VM.parquet`)
+  * `data/calibration/postfilter_calibration/global_clean_quality_registry_PC.parquet` (or `data/calibration/postfilter_calibration/data/sources/global_clean_quality_registry_PC.parquet`)
+  * `data/calibration/postfilter_calibration/global_clean_quality_registry_VM.parquet` (or `data/calibration/postfilter_calibration/data/sources/global_clean_quality_registry_VM.parquet`)
 * **Constants Referenced** (from `config.py`):
   * `BASE_DIR`
-  * `DEFAULT_PREFILTER_THRESHOLDS`
   * `DEFAULT_POSTFILTER_THRESHOLDS`
   * `METRIC_COL_MAX_COORD_HORIZ_VEL`
+  * `METRIC_COL_MAX_COORD_VERT_VEL`
   * `METRIC_COL_MAX_HORIZ_VEL`
   * `METRIC_COL_MAX_VERT_VEL`
   * `METRIC_COL_ARR_HORIZ_DIST`

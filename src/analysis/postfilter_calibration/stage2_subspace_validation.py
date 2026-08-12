@@ -1,7 +1,7 @@
 import pandas as pd
-from pathlib import Path
 import logging
 from src.common.utils import setup_file_logger, split_route_string
+from src.common.config import BASE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ def main():
     setup_file_logger(log_filename="calibration.log")
     logger.info("Starting Stage 2: Subspace Failure Comparison (Cross-mapped)")
 
-    in_file = Path("data/calibration/postfilter_calibration/stage1_directional.csv")
+    in_file = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "stage1_directional.csv"
     if not in_file.exists():
         logger.error(f"Input file not found: {in_file}")
         return
@@ -103,7 +103,7 @@ def main():
             
     res_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/postfilter_calibration")
+    out_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration"
     out_file = out_dir / "stage2_subspace_validation.csv"
     
     res_df.to_csv(out_file, index=False)

@@ -1,6 +1,5 @@
 import subprocess
 import logging
-from pathlib import Path
 import sys
 from src.common.utils import setup_file_logger
 from src.common.config import BASE_DIR

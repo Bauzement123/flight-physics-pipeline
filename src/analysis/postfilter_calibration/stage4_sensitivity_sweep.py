@@ -1,20 +1,20 @@
 import pandas as pd
 import numpy as np
-from pathlib import Path
 import logging
 from src.common.utils import setup_file_logger, split_route_string
 from src.common.registry_utils import load_clean_cohort
+from src.common.config import BASE_DIR
 
 import argparse
 
 logger = logging.getLogger(__name__)
 
 def main():
+    setup_file_logger(log_filename="calibration.log")
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-registry', type=str, help='Path to merged registry')
     args = parser.parse_args()
 
-    setup_file_logger(log_filename="calibration.log")
     logger.info("Starting Stage 4: Local Sensitivity Analysis (Discrete Sweep)")
 
     if args.input_registry:
@@ -99,7 +99,7 @@ def main():
 
     final_df = pd.DataFrame(results)
     
-    out_dir = Path("data/calibration/postfilter_calibration/stage4")
+    out_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration" / "stage4"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage4_sensitivity_sweep.parquet"
     
