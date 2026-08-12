@@ -80,18 +80,15 @@ def _chunks(lst: list, n: int) -> Generator[list, None, None]:
 
 
 def _init_sqlite_db(db_path: Path) -> None:
-    """Initialize SQLite database table and WAL mode for fast crash-safe upserts."""
+    """Initialize SQLite database table for crash-safe upserts.
+
+    WAL mode is intentionally omitted: all SQLite writes are serialized through
+    the main process (workers return results via futures), so concurrent write
+    access never occurs and WAL's exclusive-lock setup is both unnecessary and
+    fragile on Linux POSIX filesystems.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    # On Linux, stale .db-wal / .db-shm sidecar files left by a prior crashed run
-    # put the database into WAL recovery state. PRAGMA journal_mode=WAL; requires an
-    # exclusive lock to execute, which Linux POSIX fcntl locking denies while stale
-    # sidecars exist. Deleting them resets the WAL lock state. The committed data
-    # in the .db file itself is unaffected; any uncommitted data from the crash is
-    # already irrecoverable and is recovered via merge_only mode instead.
-    for sidecar in (db_path.with_suffix(".db-wal"), db_path.with_suffix(".db-shm")):
-        sidecar.unlink(missing_ok=True)
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 flight_id TEXT PRIMARY KEY,
