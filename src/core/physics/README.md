@@ -1,341 +1,308 @@
-# Physics Simulation Module
+# Physics Simulation Pipeline (`src/core/physics`)
 
-This module handles the physical simulation of aircraft trajectories under the **CoCiP** (Contrail Cirrus Prediction) and **PSFlight** (Performance-based System Flight) models in `pycontrails`. 
+## 1. Title & Introduction
 
-It has been refactored into a highly modular, thread-safe, and memory-optimized architecture. The core simulation logic is decoupled from file loading and schedule management into a dedicated core engine, allowing it to be easily reused for future studies (such as variational flight level changes).
+The `src/core/physics` module implements the high-performance, slotted contrail simulation engine for the Flight Physics Pipeline. Built on top of the [`pycontrails`](https://pycontrails.org/) framework (utilising standard `PSFlight` performance models and `Cocip` contrail evolution models), this module evaluates total energy forcing ($\text{EF}$ in Joules) and contrail persistence across thousands of historical commercial flights operating over Europe.
 
-It contains three primary files:
-1. **Core Physics Engine (`engine.py`)**: A stateless module containing atomized helper functions for weather dataset cropping, model creation, vectorized batch evaluation (with error recovery), and thread-pool execution.
-2. **Standard Simulation (`simulation.py`)**: The entrypoint that runs weather-canned physics evaluations on already-recorded and cleaned trajectories.
-3. **Batch Clone Simulation (`clone_simulation.py`)**: A fault-tolerant schedule-cloning engine that takes synthesized corridor trajectories, clones them, time-shifts them to match flight schedules, and batch-simulates them daily.
+The engine features a **5-Slot architecture** decoupled from data storage, model selection, and execution orchestration:
+1. **Slot 1 (Task Generation)**: Builds uniform `SimTask` dataclass items from raw flight cohorts.
+2. **Slot 2 (Task Filtering & Batching)**: Filters tasks against Delta Lake execution history (skip-gate) and groups unsimulated tasks by route corridor and cluster trajectory.
+3. **Slot 3 (Trajectory Loading)**: Loads, validates, and time-shifts representative cluster trajectories to match target flight departure timestamps.
+4. **Slot 4 (Model Instantiation & Evaluation)**: Dynamically instantiates PyContrails model pairs (`PSFlight` + `Cocip`) and runs vectorized flight evaluations with sequential per-flight fallbacks.
+5. **Slot 5 (Batch Evaluation)**: Evaluates completed worker outcomes, classifies succeeded vs failed tasks, and yields structured `EvalResult` objects back to the day loop.
 
-It operates as **Loop 3b** of the Flight Physics Pipeline.
+Concurrency is handled via a **`ThreadPoolExecutor`** model dispatch architecture, enabling worker threads to concurrently access shared in-memory ERA5 `MetDataset` objects without duplicating multi-gigabyte weather arrays across process boundaries.
+
+> [!NOTE]
+> legacy entrypoints (`simulation.py` and `clone_simulation.py`) are superseded by this slotted architecture (`cli.py` + `orchestrator.py` + `worker.py`).
 
 ---
 
-## 1. Module Structure
+## 2. Module Structure
 
 ```text
 src/core/physics/
-├── README.md              # This documentation file
-├── engine.py              # Stateless, reusable core physics simulation helper functions
-├── simulation.py          # Entrypoint for standard clean trajectories (uses engine.py)
-└── clone_simulation.py    # Entrypoint for batch cloned corridor flights (uses engine.py)
+├── README.md                      ← Module technical specification (this file)
+├── __init__.py                    ← Package initialization
+├── cli.py                         ← Main CLI entrypoint (parses args & invokes orchestrator)
+├── orchestrator.py                ← Day-by-day loop coordinator & ERA5 hour-cache manager
+├── engine.py                      ← Pure parallel execution layer (ThreadPoolExecutor dispatch)
+├── worker.py                      ← Single batch execution worker (Slot 3+4 integration & Lake I/O)
+├── clone_simulation.py            ← Legacy unslotted orchestrator (maintained for baseline comparison)
+├── simulation.py                 ← Legacy unslotted orchestrator (maintained for baseline comparison)
+├── loaders/                       ← Slot 3: Trajectory loading implementations
+│   ├── __init__.py                ← Loader factory (`get_loader`)
+│   └── cluster_loader.py          ← Slot 3a: K-Cluster trajectory loader & time-shifter
+├── models/                        ← Slot 4: Physics model builders
+│   ├── __init__.py                ← Model package initialization
+│   └── ps_cocip.py                ← Kerosene PSFlight + CoCiP model builder (`get_model`)
+└── slots/                         ← Slotted pipeline step definitions
+    ├── __init__.py                ← Slots package initialization
+    ├── slot1_task_gen.py          ← Slot 1: Task generation from cohort DataFrames
+    ├── slot2_batcher.py           ← Slot 2: Delta Lake skip-gate filtering & route batching
+    ├── slot5_evaluator.py         ← Slot 5: Batch evaluation & result classification
+    └── utils.py                   ← Pure slot helper utilities (step-down task computation)
 ```
 
 ---
 
-## 2. Function Analysis Solution Tree (FAST)
+## 3. Function Analysis Solution Tree (FAST)
 
 ```text
-Module Objectives
- └── Physical simulation of flight trajectories under CoCiP and PSFlight models (Loop 3b)
-      │
-      ├── Sub-objective 1: Standard trajectory modeling
-      │    └── Solution: run_physics_pipeline() in simulation.py
-      │         ├── Inputs: clean trajectory files/directory, weather cache path, output directory, max contrail age
-      │         └── Outputs: Parquet file(s) containing simulated contrail waypoints (*_simulated.parquet), global_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, simulation.log
-      │
-      ├── Sub-objective 2: Batch clone corridor flight simulation
-      │    └── Solution: run_batch_clone_simulation() in clone_simulation.py
-      │         ├── Inputs: ranks, date ranges, weather cache path, output directory, max contrail age, min_distance, clusters_per_flight
-      │         └── Outputs: Incremental flight-level simulated parquets (*_simulated.parquet), global_corridor_simulation_registry.parquet (with cocip_total, total_contrail_ef, total_fuel_burn), skipped_aircraft.log, clone_simulation.log
-      │
-      ├── Sub-objective 3: Spatial weather downselection
-      │    └── Solution: crop_met_dataset() in engine.py
-      │         ├── Inputs: MetDataset, bounding box [West, South, East, North], coordinate padding
-      │         └── Outputs: Spatially cropped MetDataset (supports descending latitudes)
-      │
-      ├── Sub-objective 4: Thread-safe model creation
-      │    └── Solution: create_simulation_models() in engine.py
-      │         ├── Inputs: cropped met/rad datasets, max age, low-memory flag
-      │         └── Outputs: Instantiated (PSFlight, Cocip) model tuple (with preprocess_lowmem if active)
-      │
-      ├── Sub-objective 5: Vectorized batch simulation with resilient fallback
-      │    └── Solution: simulate_flight_batch() in engine.py
-      │         ├── Inputs: list of Flight objects, met/rad datasets, max age, low-memory flag
-      │         └── Outputs: Tuple of (list of simulated Flights, list of skipped flight_ids and typecodes)
-      │         └── Safety: Falls back to individual flight simulation if vectorized batch evaluation fails
-      │
-      └── Sub-objective 6: Concurrency & execution orchestration
-           └── Solution: simulate_flights_parallel() in engine.py
-                ├── Inputs: list of Flights, met/rad datasets, max age, batch size, max workers, low-memory flag, on_batch_complete_callback
-                └── Outputs: Tuple of (list of simulated Flights, list of skipped flight_ids and typecodes)
-                └── Concurrency: runs batches in ThreadPoolExecutor (or sequentially if low-memory is active)
-                └── Optimization: Streams completed batches to disk and evicts simulated batch memory immediately when callback is provided
+Module Objective: Efficient, Thread-Safe Physics & Contrail Simulation across Flight Cohorts
+│
+├── 1. Command Line Parsing & Execution Dispatch
+│   └── cli.main() / parse_args()
+│       ├── Input: Sys argv flags (--start-date, --end-date, --sim-mode, --low-mem, etc.)
+│       ├── Output: argparse.Namespace
+│       └── Safety/Fallback: Validates date ranges, filters corridors by rank via global_model_registry.parquet, exits on empty/invalid inputs.
+│
+├── 2. Day-by-Day Orchestration & Dynamic ERA5 Windowing
+│   └── orchestrator.run()
+│       ├── Input: Date range, corridors_map, lake_path, weather_cache_dir, execution flags.
+│       ├── Output: None (writes directly to Delta Lake).
+│       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically; handles missing cohort days gracefully.
+│
+├── 3. Slot 1: Task Generation
+│   └── slot1_task_gen.generate_tasks()
+│       ├── Input: Cohort DataFrame (master_flights slice), available_clusters dictionary, default_fl.
+│       ├── Output: List[SimTask]
+│       └── Safety/Fallback: Skips flights without available route clusters; generates unique SimTask per (flight x cluster).
+│
+├── 4. Slot 2: Task Filtering & Batching (Skip-Gate)
+│   └── slot2_batcher.filter_and_batch()
+│       ├── Input: Candidate List[SimTask], sim_mode, lake_path, overwrite flag, max_batch_size.
+│       ├── Output: List[List[SimTask]] (partitioned execution batches).
+│       └── Safety/Fallback: Queries sim_fid_exists() against Delta Lake; bypasses check if overwrite=True; splits large route groups into max_batch_size sub-batches.
+│
+├── 5. Slot 3: Trajectory Loading & Time-Shifting
+│   └── loaders.cluster_loader.load() (via get_loader(sim_mode))
+│       ├── Input: SimTask, corridors_map.
+│       ├── Output: Optional[pycontrails.Flight]
+│       └── Safety/Fallback: Validates aircraft typecode via is_supported_typecode(); shifts timestamps relative to task.firstseen; returns None on missing files or invalid typecodes.
+│
+├── 6. Slot 4: Physics Model Instantiation & Evaluation
+│   └── models.ps_cocip.get_model() / worker.run_batch()
+│       ├── Input: model_config_id ('kerosene'), MetDataset (met), MetDataset (rad), max_age_hours, low_mem.
+│       ├── Output: Tuple[PSFlight, Cocip] / List[WorkerResult]
+│       └── Safety/Fallback: Runs vectorized ps_model.eval() + cocip_model.eval(); on vector exception, falls back to sequential per-flight evaluation; logs unrecoverable failures to skipped_aircraft.log.
+│
+├── 7. Parallel Execution Coordination
+│   └── engine.run_parallel()
+│       ├── Input: List[List[SimTask]], worker_fn (partial run_batch), max_workers.
+│       ├── Output: Iterator[List[WorkerResult]]
+│       └── Safety/Fallback: Spawns ThreadPoolExecutor; catches batch exceptions and yields empty lists; calls gc.collect() after each batch completion.
+│
+├── 8. Slot 5: Batch Evaluation
+│   └── slots.slot5_evaluator.evaluate()
+│       ├── Input: List[WorkerResult], sim_mode, step_size, min_safe_fl.
+│       ├── Output: EvalResult (succeeded, failed, still_todo).
+│       └── Safety/Fallback: For O1, partitions succeeded vs failed and sets still_todo=[]; O2 pass reserved.
+│
+└── 9. Results Persistence & Lake Vacuuming
+    └── worker._write_to_lake() / data_manager.io_utils.vacuum_sim_lake()
+        ├── Input: List[WorkerResult], lake_path, overwrite.
+        ├── Output: Delta Lake storage update.
+        └── Safety/Fallback: Thread lock (_LAKE_WRITE_LOCK) serializes Delta Lake writes; vacuum_sim_lake() cleans unreferenced parquet files post-day.
 ```
 
 ---
 
-## 3. Data Workflow
+## 4. Data Workflow
 
-> [!NOTE]
-> **Visual Rendering Warning**: Flowcharts are generated using Mermaid. If your markdown viewer does not natively support Mermaid rendering, please refer to the step-by-step text description provided directly below each diagram.
-
-### 3.1. Standard Simulation Workflow (`simulation.py`)
+### 4.1 Workflow A — O1 Waterfall Baseline (`cli.py` + `orchestrator.py`)
 
 ```mermaid
-graph TD
-    A["data/trajectories/<corridor>/clean/*_clean_si.parquet"] -->|1. Ingest clean flights| B(simulation.py)
-    C[data/weather/*.nc] -->|2. Crop to EUR_BBOX + WEATHER_PADDING| D[cropped MetDataset & MetDataArray]
-    D -->|3. Load cropped dataset to RAM| E[In-memory weather cache]
-    
-    B -->|4. Pass flights to engine| F(engine.py: simulate_flights_parallel)
-    E -->|Shared weather memory| F
-    
-    F -->|5. Chunk into batches| G[Batch of flights]
-    G -->|6. ThreadPoolExecutor or sequential| H[engine.py: simulate_flight_batch]
-    H -->|7. Filter unsupported types| I[Valid flights]
-    I -->|8. PSFlight eval| J[PSFlight evaluated]
-    J -->|9. CoCiP eval| K[CoCiP evaluated]
-    
-    K -->|10. Return simulated flights| B
-    B -->|11. Save output parquet| L[data/results/test_scenario/*_simulated.parquet]
-    B -->|12. Update global registry with metrics| M[global_simulation_registry.parquet]
+flowchart TD
+    A["CLI Entrypoint (cli.py)"] -->|Parse Args & Filter Ranks| B["Orchestrator (orchestrator.py)"]
+    B -->|Query Cohort Date| C["read_master_flights()"]
+    C -->|Return Cohort DataFrame| D["Slot 1: generate_tasks()"]
+    D -->|Candidate SimTasks| E["Compute Task ERA5 Window"]
+    E -->|Check Cache / Fetch NC| F["_populate_hour_cache()"]
+    F -->|MetDataset (met, rad)| G["Slot 2: filter_and_batch()"]
+    G -->|Query Lake Skip-Gate| H{"Already Simulated?"}
+    H -->|Yes & overwrite=False| I["Skip Task"]
+    H -->|No OR overwrite=True| J["Group Tasks into Batches"]
+    J -->|Partitioned Batches| K["engine.run_parallel()"]
+    K -->|ThreadPool Workers| L["worker.run_batch()"]
+    L -->|List WorkerResult| M["Slot 5: evaluate()"]
+    M -->|EvalResult| N["Log Day Progress"]
+    N -->|Post-Day Cleanup| O["vacuum_sim_lake()"]
+    O -->|Next Day| B
 ```
 
-#### Step-by-Step Description: Standard Simulation
-1. **Trajectory Ingestion**: The standard simulation entrypoint in `simulation.py` reads EKF-cleaned flight trajectories (`*_clean_si.parquet`) from a specified file or folder.
-2. **Weather Timeframe Calculation**: The script dynamically scans the temporal bounds (min/max timestamps) of all flights to establish a weather query window, applying a 1-hour start buffer and a `max_age` (e.g., 48 hours) plus 1-hour end buffer.
-3. **Weather Loading & Spatial Slicing**: Using local cached ERA5 NetCDF files, the script opens the Pressure Level and Surface Level weather variables and crops them to the coordinates in `EUR_BBOX` extended by the `WEATHER_PADDING` using `crop_met_dataset` in `engine.py`.
-4. **RAM Pre-loading**: Unless low-memory mode is active, the cropped datasets are eagerly loaded into system RAM (`.load()`) to speed up subsequent point calculations.
-5. **Parallel Batch Partitioning**: In `engine.py:simulate_flights_parallel`, the cohort is sliced into batch chunks (default: 50 flights) and evaluated in parallel via a `ThreadPoolExecutor`.
-6. **Aircraft Type Verification**: For each batch inside `engine.py:simulate_flight_batch`, aircraft typecodes are checked against the supported PSFlight aircraft list. Unsupported types are skipped and logged to `skipped_aircraft.log`.
-7. **Vectorized Simulation & Fallback**: Valid flights are evaluated together in a vectorized batch using PSFlight (for fuel/emission calculations) and CoCiP (for contrail forecasting). If the vectorized step raises an error, the batch falls back to an exception-safe sequential loop to process valid flights individually.
-8. **Trajectory Serialization**: Simulated flight data containing contrail attributes are serialized to a `*_simulated.parquet` file under the designated output directory.
-9. **Global Registry Update**: The script updates the centralized index registry (`global_simulation_registry.parquet`) mapping each simulated flight ID to its output Parquet file path and metrics (cocip_total, total_contrail_ef, and total_fuel_burn).
+#### Step-by-Step Description:
+
+1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, memory flags) and calls `_build_corridors_map()` to map `(route_id, cluster_id)` pairs to cluster parquet file paths from `GLOBAL_CORRIDOR_MODEL_REGISTRY`. If `--ranks` or `--lower-rank`/`--upper-rank` is provided, the mapping is filtered using `route_summary.parquet`.
+2. **Daily Cohort Query**: For each day in the date range, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC.
+3. **Task Generation (Slot 1)**: `generate_tasks()` converts cohort rows into `SimTask` dataclass items by matching route codes (`dep-arr`) against available cluster trajectories in `corridors_map`.
+4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates exact hourly bounds:
+   $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
+   $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$
+   Stale hours prior to `era5_start` are evicted from `hour_cache`, and missing hours are opened from disk/disk-cache concurrently (pressure level and surface level).
+5. **Weather Slicing**: Hourly ERA5 `MetDataset` blocks are concatenated along the time dimension into complete `met` and `rad` datasets for the day.
+6. **Task Skip-Gate & Batching (Slot 2)**: `filter_and_batch()` checks each task's `SIM_FID` against the Delta Lake via `sim_fid_exists()`. Unless `--overwrite` is enabled, already-simulated tasks are skipped. Remaining tasks are grouped by `(dep, arr, cluster_id)` and chunked into sub-batches of `batch_size` (default 50).
+7. **Parallel Dispatch**: The orchestrator invokes `engine.run_parallel()`, passing the batches to a `ThreadPoolExecutor` running `worker.run_batch()`.
+8. **Batch Evaluation (Slot 5)**: As each worker completes, `evaluate()` partitions worker results into `succeeded` ($\text{status} = \text{"success"}$) and `failed` ($\text{status} = \text{"fail"}$). For O1 runs, `still_todo` is always empty.
+9. **Daily Vacuum & GC**: After all batches for the day finish, `vacuum_sim_lake()` is called to prune stale Delta Lake files, dataset references are deleted, and explicit `gc.collect()` is triggered before advancing to the next day.
 
 ---
 
-### 3.2. Batch Clone Simulation Workflow (`clone_simulation.py`)
+### 4.2 Workflow B — Single Batch Worker (`worker.py`)
 
 ```mermaid
-graph TD
-    A[data/flight_registry/master_flights.parquet] -->|1. Ingest flight schedules| B(clone_simulation.py)
-    C[data/flight_registry/registries/global_corridor_model_registry.parquet] -->|2. Resolve corridor base path| B
-    D[data/weather/*.nc] -->|3. Rolling 3-day window| E[load_and_crop_weather]
-    E -->|4. Crop to EUR_BBOX + WEATHER_PADDING & load to RAM| F[Cached daily MetDatasets]
-    F -->|5. Concatenate days| G[In-memory 3-day weather window]
-    
-    B -->|6. Time-shift baseline path to schedule| H[Cloned Flight list]
-    H -->|7. Pass to engine| I(engine.py: simulate_flights_parallel)
-    G -->|Shared weather memory| I
-    
-    I -->|8. Chunk into batches| J[Batch of flights]
-    J -->|9. ThreadPoolExecutor or sequential| K[engine.py: simulate_flight_batch]
-    K -->|10. Filter unsupported types| L[Valid flights]
-    L -->|11. PSFlight & CoCiP eval| M[Simulated batch]
-    
-    M -->|12. Yield finished batch| I
-    I -->|13. Execute callback on main thread| B
-    B -->|14. Serialize batch to disk| N["data/results/corridor_simulations/<route>_cloned_simulated/*_simulated.parquet"]
-    B -->|15. Evict batch memory & GC| RAM[Free memory]
-    B -->|16. Log skipped aircraft| O[skipped_aircraft.log]
-    B -->|17. Update global registry after run with metrics| P[global_corridor_simulation_registry.parquet]
+flowchart TD
+    A["Batch of SimTasks (Same Route & Cluster)"] --> B["worker.run_batch()"]
+    B --> C["Instantiate Loader & Models"]
+    C -->|get_loader / get_model| D["Phase 1: Load Trajectories"]
+    D --> E{"Validate Task"}
+    E -->|Missing File or Typecode Invalid| F["Record WorkerResult status=fail, EF=0.0"]
+    E -->|Valid| G["Time-Shift Waypoints to firstseen -> pycontrails.Flight"]
+    G --> H["Phase 2: Vectorized Evaluation"]
+    H --> I{"ps_model.eval() + cocip_model.eval()"}
+    I -->|Success| J["Extract EF (np.nansum) -> status=success"]
+    I -->|Exception Caught| K["Sequential Fallback Loop"]
+    K --> L{"Per-Flight Eval"}
+    L -->|Success| M["Extract EF -> status=success"]
+    L -->|Fail| N["Log skipped_aircraft.log -> status=fail, EF=0.0"]
+    J --> O["Phase 3: Delta Lake Writer"]
+    F --> O
+    M --> O
+    N --> O
+    O --> P{"Lock _LAKE_WRITE_LOCK"}
+    P --> Q["append_sim_lake()"]
+    Q --> R["Return List[WorkerResult]"]
 ```
 
-#### Step-by-Step Description: Batch Clone Simulation
-1. **Schedule Database Ingestion**: The batch clone simulation (`clone_simulation.py`) loads the master schedules database (`master_flights.parquet`) and the route summary indices.
-2. **Corridor Base Path Mapping**: The script resolves the file paths of baseline corridor medoid trajectories by querying the corridor model registry (`global_corridor_model_registry.parquet`) via `load_corridor_paths_map()` (populating `valid_corridor_files`).
-3. **Cohort Filtering**: Filters flights by requested ranks, date ranges, minimum route distance (default: 0 km), and bypasses airport loops and already-simulated flights.
-4. **Rolling Weather Management**: Iterates day-by-day over the cohort. For each day, it maintains a rolling 3-day weather window (Day N, Day N+1, Day N+2) in memory to cover potential advection time, evicting expired days and loading new ones.
-5. **Base Path Cloning & Time-shifting**: For each scheduled flight, the base corridor path (`corridor_path` loaded from `valid_corridor_files`) is cloned, and its datetime index is offset to align with the flight's scheduled departure time (`firstseen`).
-6. **Synthetic Track Sampling**: Samples random synthesized tracks according to the requested number of `--clusters-per-flight` to represent corridor alternatives.
-7. **Parallel Engine Simulation**: The time-shifted cloned flights are passed to `engine.py:simulate_flights_parallel` along with a main-thread serialization callback.
-8. **Streaming Serialization & Memory Eviction**: Inside the engine's batch loop, completed batches are immediately passed to the main-thread callback. The callback serializes simulated trajectories to individual Parquet files under corridor-specific folders (e.g., `<origin>-<destination>_cloned_simulated/`) inside the output directory, updates the registry list, and logs any skipped flights. The engine then immediately deletes the batch from memory and forces garbage collection (`gc.collect()`).
-9. **Global Corridor Registry Update**: After the daily simulation cohort completes, the registry list is used to update the centralized registry file (`global_corridor_simulation_registry.parquet`) in a single consolidated write containing the output file paths and flight-level metrics (cocip_total, total_contrail_ef, and total_fuel_burn).
+#### Step-by-Step Description:
+
+1. **Worker Setup**: `worker.run_batch()` receives a batch of `SimTask` items (all sharing the same `dep`, `arr`, and `cluster_id`), the day's `met` and `rad` `MetDataset` objects, and configuration parameters. It initializes the trajectory loader (`cluster_loader.load`) and physics models (`_build_kerosene`).
+2. **Phase 1 (Flight Trajectory Loading)**:
+   - For each task, `cluster_loader.load()` fetches the cluster parquet file from `corridors_map`.
+   - Validates `task.typecode` using `is_supported_typecode()`. If invalid or missing, logs to `data/logs/skipped_aircraft.log` and returns `None`.
+   - Time-shifts trajectory waypoints such that waypoint[0] matches `task.firstseen`.
+   - Returns a `pycontrails.Flight` object with metadata attributes attached (`flight_id`, `aircraft_type`, `icao24`, etc.).
+   - Tasks failing trajectory loading are marked as `WorkerResult(status="fail", ef=0.0)`.
+3. **Phase 2 (Physics Evaluation)**:
+   - **Vectorized Evaluation**: All successfully loaded `Flight` objects are passed as a batch to `ps_model.eval(flights_list)` and subsequently `cocip_model.eval(source=fl_ps)`. Results are parsed, and total Energy Forcing ($\text{EF} = \sum \text{ef}$ in Joules) is calculated via `_extract_ef()`.
+   - **Sequential Fallback**: If the vectorized call raises an exception (e.g., array shape mismatch, local NaN propagation), worker catches the error and executes a sequential loop over individual flights. If a single flight fails sequential evaluation, `log_skipped_aircraft()` writes the error flag to `skipped_aircraft.log`, and the flight is marked `status="fail", ef=0.0`.
+4. **Phase 3 (Delta Lake Persistence)**:
+   - Worker builds a result DataFrame containing columns: `SIM_FID`, `model_config_id`, `route`, `EF`, `FL`.
+   - Acquires `_LAKE_WRITE_LOCK` (a thread-level lock preventing concurrent Delta Lake manifest mutations).
+   - Calls `append_sim_lake()`. In standard mode (`overwrite=False`), performs a MERGE upsert on `(SIM_FID, model_config_id)`. In overwrite mode (`overwrite=True`), deletes matching `SIM_FID` rows before inserting.
+   - Returns `List[WorkerResult]` to `engine.run_parallel()`.
 
 ---
 
-### 3.3. Optimization & Memory Modes
+### 4.3 Optimization & Memory Modes
 
-To support simulation runs across a variety of hardware (from desktops with high RAM/CPU count to laptops with less than 1 GB of free RAM), the engine supports two distinct execution profiles:
+Weather dataset operations (ERA5 loading and slicing) dominate system RAM consumption. The pipeline provides two distinct execution modes governed by the `--low-mem` flag:
 
-#### Standard Mode (High Performance)
-*   **Weather Dataset Loading**: The cropped weather datasets (covering `EUR_BBOX` plus `WEATHER_PADDING`) are fully loaded into RAM using `.load()` at the start of the cohort day. Slicing reduces the global grid down to a lightweight subset (under 400 MB), allowing fast memory access.
-*   **Concurrency**: Batches of flights (default size: 50) are dispatched in parallel using a `ThreadPoolExecutor` (releasing Python's GIL inside NumPy/Pandas C-loops). 
-*   **RAM Safety**: Multiple threads read from the *same shared in-memory weather datasets*, ensuring weather grids are not duplicated in memory.
-*   **Streaming Write Safety**: Under parallel execution, the main thread serializes and evicts completed flight batches dynamically as workers finish them. This keeps peak RAM usage capped at only `max_workers` active batches (~200 flights across 4 threads) plus the weather dataset, regardless of total cohort size.
-
-#### Low-Memory Mode (`--low-mem` flag)
-*   **Weather Dataset Loading**: The cropped weather datasets are kept **lazy** on disk (using Dask). Coordinates are interpolated on-demand.
-*   **CoCiP Parameter Tuning**: Injects `preprocess_lowmem=True` to enforce chunk-by-chunk coordinate lazy interpolation, avoiding massive in-memory array allocations.
-*   **Concurrency**: Forces sequential execution (`max_workers=1`). Evaluating one batch at a time prevents concurrent Dask reading tasks, keeping peak memory allocations within the 1 GB envelope.
+| Feature / Behavior | Standard Mode (`--low-mem` omitted) | Low-Memory Mode (`--low-mem` enabled) |
+|---|---|---|
+| **ERA5 Spatial Crop** | Cropped to `EUR_BBOX` ($[-26^\circ, 30^\circ, 44^\circ, 79^\circ]$) $+ 10^\circ$ padding via `crop_met_dataset()`. | **Skipped entirely**. Dask slices touched chunks lazily without spatial crop overhead. |
+| **ERA5 In-Memory Load** | Executes eager `.load()` call to pull cropped array into uncompressed RAM. | **Skipped eager load**. Data remains in lazy Dask / NetCDF arrays. |
+| **CoCiP Preprocessing** | Standard PyContrails array processing. | Enables `preprocess_lowmem=True` parameter inside `Cocip` model initialization. |
+| **Primary Advantage** | Fastest execution speed per batch; optimal for high-CPU nodes with ample RAM ($\ge 32\text{ GB}$). | **Minimizes peak RAM footprint**; prevents OOM crashes on memory-constrained workers or large temporal windows. |
 
 ---
 
-### 3.4. Logging & Performance Metrics
+## 5. CLI Usage Guide
 
-When executing a batch clone simulation, the engine tracks execution time and logs summaries at both the daily level and the overall run level. The counters distinguish between the number of original schedules and the randomized synthetic trajectory clones.
-
-#### Daily Cohort Summary
-At the end of each simulated day, a summary is logged showing:
-*   **Cohort Scheduled Flights**: The number of unique flight schedules matched from the database.
-*   **Total Trajectories**: The number of simulated synthetic trajectory tracks (Scheduled Flights × `--clusters-per-flight`).
-*   **Success / Skipped / Failure**: Trajectory-level counts of simulated tracks.
-*   **Time Elapsed**: Duration of the daily simulation loop in seconds, including average time per simulated trajectory.
-
-```text
-==================================================
-CLONED SIMULATION DAILY SUMMARY - 2026-06-29 19:30:00
-Period/Date: 2025-12-06
-Cohort Scheduled Flights: 36
-Total Trajectories: 108
-Success (Trajectories): 93
-Skipped (Trajectories): 15
-Failure (Trajectories): 0
-Time Elapsed: 45.20 seconds (0.42s per trajectory)
-==================================================
-```
-
-#### Final Run Performance Summary
-At the very end of the script execution, a consolidated summary prints overall counters, total execution time, and a daily timing breakdown:
-
-```text
-==================================================
-CLONED BATCH RUN PERFORMANCE SUMMARY
-Total Simulation Days: 3
-Total Scheduled Flights: 108
-Total Trajectories: 324
-Overall Success: 279
-Overall Skipped: 45
-Overall Failure: 0
-Total Execution Time: 2m 15.6s (Avg: 45.2s per day)
-
-Breakdown:
-  - 2025-12-06: 36 flights (108 trajectories) in 45.20s
-  - 2025-12-07: 36 flights (108 trajectories) in 44.80s
-  - 2025-12-08: 36 flights (108 trajectories) in 45.00s
-==================================================
-```
-
----
-
-## 4. CLI Usage Guide
-
-### Bash
+### 5.1 Bash Syntax
 
 ```bash
-# 1. Run standard simulation with multithreading and batch optimization
-python -m src.core.physics.simulation \
-    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
-    --out-dir "data/results/test_scenario/" \
-    --weather-cache "data/weather" \
+# Standard O1 Waterfall Simulation run for January 2025 across ranks 1 to 5
+python -m src.core.physics.cli \
+    --start-date 2025-01-01 \
+    --end-date 2025-01-31 \
+    --lower-rank 1 \
+    --upper-rank 5 \
     --max-workers 4 \
-    --batch-size 50
+    --batch-size 50 \
+    --out-dir data/results/corridor_simulations
 
-# 2. Run standard simulation in LOW-MEMORY mode
-python -m src.core.physics.simulation \
-    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" \
-    --out-dir "data/results/test_scenario/" \
-    --weather-cache "data/weather" \
-    --low-mem
+# Low-Memory Mode run for specific cluster ranks with forced overwrite
+python -m src.core.physics.cli \
+    --start-date 2025-01-01 \
+    --end-date 2025-01-07 \
+    --ranks 1,3,5 \
+    --low-mem \
+    --overwrite
 
-# 3. Run cloned batch simulation for specific ranks (Standard Mode)
-python -m src.core.physics.clone_simulation \
-    --ranks 1,3 \
-    --start-date "2025-01-02" \
-    --end-date "2025-01-05" \
-    --weather-cache "data/weather" \
-    --out-dir "data/results/corridor_simulations" \
-    --max-workers 4 \
-    --batch-size 100
-
-# 4. Run cloned batch simulation in LOW-MEMORY mode
-python -m src.core.physics.clone_simulation \
-    --ranks 1,3 \
-    --start-date "2025-01-02" \
-    --end-date "2025-01-05" \
-    --weather-cache "data/weather" \
-    --out-dir "data/results/corridor_simulations" \
-    --low-mem
+# Quick Single-Day Test Mode Run
+python -m src.core.physics.cli --test-mode
 ```
 
-### PowerShell
+### 5.2 PowerShell Syntax
 
 ```powershell
-# Run standard simulation in low-memory mode
-python -m src.core.physics.simulation `
-    --input-file "data/trajectories/ranks_1_strat_fixed_val_2.0_seed_42_format_oneway_ee7a02/clean/LEPA-LEBL_ab1081_clean_si.parquet" `
-    --out-dir "data/results/test_scenario/" `
-    --weather-cache "data/weather" `
-    --low-mem
-
-# Run cloned batch simulation in standard mode with 4 threads
-python -m src.core.physics.clone_simulation `
-    --ranks 1,76,177,205,209,278,288,321,411,508,509,592,633,710,712,727,761,792,848,888,926 `
-    --start-date "2025-12-01" `
-    --end-date "2025-12-05" `
-    --weather-cache "data/weather" `
-    --out-dir "data/results/corridor_simulations" `
+# Standard O1 Waterfall Simulation run for January 2025 across ranks 1 to 5
+python -m src.core.physics.cli `
+    --start-date 2025-01-01 `
+    --end-date 2025-01-31 `
+    --lower-rank 1 `
+    --upper-rank 5 `
     --max-workers 4 `
-    --batch-size 50
+    --batch-size 50 `
+    --out-dir data/results/corridor_simulations
 
-# Run cloned batch simulation in low-memory and test mode
-python -m src.core.physics.clone_simulation --ranks 1,76,177 --test-mode --weather-cache "data/weather" --out-dir "data/results/test_lowmem" --low-mem --overwrite
+# Low-Memory Mode run for specific cluster ranks with forced overwrite
+python -m src.core.physics.cli `
+    --start-date 2025-01-01 `
+    --end-date 2025-01-07 `
+    --ranks "1,3,5" `
+    --low-mem `
+    --overwrite
+
+# Quick Single-Day Test Mode Run
+python -m src.core.physics.cli --test-mode
 ```
+
+### 5.3 Parameter Reference Table
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `--start-date` | `str` | *Required* | First calendar day to process (inclusive, format `YYYY-MM-DD`). |
+| `--end-date` | `str` | *Required* | Last calendar day to process (inclusive, format `YYYY-MM-DD`). |
+| `--ranks` | `str` | `None` | Comma-separated list of route cluster ranks to process (e.g. `'1,3,5'`). Mutually exclusive with `--lower-rank`. |
+| `--lower-rank` | `int` | `None` | Lower bound of corridor cluster rank (inclusive). Requires `--upper-rank`. |
+| `--upper-rank` | `int` | `None` | Upper bound of corridor cluster rank (inclusive). Requires `--lower-rank`. |
+| `--weather-cache` | `str` | `data/weather` | Directory containing hourly ERA5 pressure-level and surface `.nc` cache files. |
+| `--out-dir` | `str` | `data/results/corridor_simulations` | Root directory path for Delta Lake simulation storage. |
+| `--corridors-dir` | `str` | `data/corridor_paths` | Directory containing synthesized cluster parquet trajectory files. |
+| `--max-age`, `--age` | `int` | `48` | Maximum contrail simulation and advection lifetime in hours. |
+| `--clusters-per-flight`, `-x` | `int` | `1` | Number of representative cluster trajectories sampled per flight. |
+| `--default-fl` | `float` | `350.0` | Target flight level in feet assigned to standard tasks when unassigned. |
+| `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
+| `--sim-mode` | `str` | `'O1'` | Simulation mode: `'O1'` (standard waterfall baseline) or `'O2'` (step-down variational pass). |
+| `--model-config-id` | `str` | `'kerosene'` | Fuel/model configuration identifier passed to physics engine (`'kerosene'`). |
+| `--step-size` | `float` | `1000.0` | FL step-down decrement increment in feet (O2 mode only). |
+| `--min-safe-fl` | `float` | `280.0` | Minimum safe flight level in feet below which step-down halts (O2 mode only). |
+| `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |
+| `--batch-size` | `int` | `50` | Maximum number of flight tasks per parallel execution batch. |
+| `--low-mem` | `flag` | `False` | Enables lazy ERA5 loading, skips spatial cropping and eager `.load()`. |
+| `--overwrite` | `flag` | `False` | Bypass Delta Lake skip-gate and overwrite existing `SIM_FID` results. |
+| `--test-mode` | `flag` | `False` | Restricts run to single day (`2025-01-01`) and single cluster per flight. |
 
 ---
 
-### 4.1. Parameter References
+## 6. Prerequisites & Dependencies
 
-#### Common Optimization Parameters (Both Entrypoints)
+### Python Package Dependencies
+- **`pycontrails`**: Contrails and flight performance modeling framework (`PSFlight`, `Cocip`, `MetDataset`, `Flight`, `Fleet`).
+- **`deltalake`**: High-performance Delta Lake transactional table interface for Rust-backed ACID storage.
+- **`xarray` / `dask` / `netCDF4`**: Multi-dimensional meteorological data indexing and lazy array streaming.
+- **`pyarrow`**: Parquet serialization and dataset predicate pushdown engine.
+- **`pandas` / `numpy`**: Vectorized numerical data manipulation.
 
-| CLI Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--low-mem` | `flag` | *False* | Enforces low-RAM operations: keeps datasets lazy on disk (Dask), sets `preprocess_lowmem=True` in CoCiP, and runs flight batches sequentially (`max_workers=1`). |
-| `--batch-size` | `int` | `50` | Size of flight batches passed to `pycontrails` for vectorized execution. Larger sizes speed up array calculations but consume more RAM. |
-| `--max-workers` | `int` | `4` | Number of concurrent worker threads. Ignored if `--low-mem` is specified. |
-
-#### Parameter Reference (`simulation.py`)
-
-| CLI Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--input-file` | `str` | *None* | Path to cleaned SI trajectory Parquet file (`*_clean_si.parquet`) or directory containing multiple cleaned Parquet files. (Required) |
-| `--out-dir` | `str` | *None* | Output directory for simulation results, logs, and skipped aircraft files. (Required) |
-| `--weather-cache` | `str` | *None* | Path to the NetCDF ERA5 weather files directory. (Required) |
-| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
-
-#### Parameter Reference (`clone_simulation.py`)
-
-| CLI Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--ranks` | `str` | *None* | Comma-separated list of route ranks to process (e.g., `"1,3"`). Mutually exclusive with `--lower-rank`. |
-| `--lower-rank` | `int` | *None* | Start of a corridor rank range to simulate. Requires `--upper-rank`. |
-| `--upper-rank` | `int` | *None* | End of a corridor rank range to simulate. Requires `--lower-rank`. |
-| `--start-date` | `str` | *None* | Start date (YYYY-MM-DD) for flight scheduling. (Required unless `--test-mode` is active) |
-| `--end-date` | `str` | *None* | End date (YYYY-MM-DD) for flight scheduling. (Required unless `--test-mode` is active) |
-| `--weather-cache` | `str` | `data/weather` | Path to the NetCDF ERA5 weather files directory. |
-| `--out-dir` | `str` | `data/results/corridor_simulations` | Output directory for simulation results and logs. |
-| `--max-age` / `--age` | `int` | `48` | Maximum contrail simulation/advection age in hours. |
-| `--overwrite` | `flag` | *False* | Forces re-simulation of already simulated flights. |
-| `--test-mode` | `flag` | *False* | Enables test mode: slices the cohort to 1 flight total, sets the start/end date to `2025-01-02` / `2025-01-03`, and disables day-by-day temporal windowing. |
-| `--no-day-by-day` | `flag` | *False* (default is false) | Disables day-by-day temporal weather windowing and runs the entire cohort as a single batch. (By default, day-by-day windowing is active) |
-| `--min-distance` | `float` | `0` | Minimum route distance in kilometers to process. Bypasses corridors that are shorter than the specified distance threshold. Set to `0` to disable. |
-| `--clusters-per-flight` / `-x` | `int` | `1` | Number of randomized synthetic tracks to sample per flight schedule. |
-
-### Logging
-
-All entrypoint scripts initialize logging via `setup_file_logger()` from `src.common.utils`.
-
-| Log file written to `data/logs/` | Writer | Purpose |
-|---|---|---|
-| `simulation.log` | `simulation.py` | Logs batch simulation milestones, thread execution metrics, and PSFlight/CoCiP simulation results. |
-| `clone_simulation.log` | `clone_simulation.py` | Logs rolling weather window changes, scheduled flight cloning, and batch stream serialization progress. |
-| `skipped_aircraft.log` | `simulation.py`, `clone_simulation.py` | Central append-only audit record of skipped unsupported aircraft types. |
-
-## 5. Prerequisites & Dependencies
-
-### Python Libraries
-* `pandas` & `pyarrow` (for data manipulation and Parquet parsing)
-* `numpy` & `scipy` (for math and physics arrays)
-* `pycontrails` (for PSFlight and Cocip contrail physics simulation models)
-* `xarray` & `dask` (for NetCDF grid parsing and lazy-loading)
-
-### Data Requirements
-* **Weather Cache**: Populated weather NetCDF files covering the flight timelines plus advection padding.
-* **Flight Lists**: Standard corridor lists Parquet files matching schedules.
-* **Master Flight Schedules & Routes**: `master_flights.parquet` and `master_flights_route_summary.pkl` located in the `data/flight_registry/` directory.
-* **Corridor Baseline**: Corridor trajectories registered in `global_corridor_model_registry.parquet`.
-
-For naming standards and coordinate reference systems, refer to the centralized **[conventions.md](../../conventions.md)** standards.
+### Pipeline Config & Registries Referenced
+- **`src.common.config`**:
+  - `WEATHER_DIR` (`data/weather`)
+  - `CORRIDOR_SIMULATIONS_DIR` (`data/results/corridor_simulations`)
+  - `CORRIDOR_PATHS_DIR` (`data/corridor_paths`)
+  - `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
+  - `EUR_BBOX` ($[-26, 30, 44, 79]$)
+  - `ERA5_GRID`, `ERA5_PRESSURE_LEVEL_VARIABLES`, `ERA5_SURFACE_VARIABLES`, `ERA5_REQUIRED_PRESSURE_LEVELS`
+  - `is_supported_typecode()` / `UNSUPPORTED_TYPECODE_FLAG`
+- **Logging Destination**: Written to `data/logs/simulation.log` via `setup_file_logger("simulation.log")`. Skipped or unsupported airframes are appended to `data/logs/skipped_aircraft.log`.
