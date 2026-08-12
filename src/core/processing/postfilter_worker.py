@@ -1,9 +1,11 @@
 from __future__ import annotations
 import logging
 import pandas as pd
+from pathlib import Path
 from typing import Any
 
 from src.common.utils import setup_file_logger, resolve_airport_coordinates
+from src.data_manager.io_utils import append_postfilter_batch
 from .filter_result import FilterResult
 from .trajectory_filters import (
     extract_horiz_velocity_metric,
@@ -36,6 +38,7 @@ def _worker_init() -> None:
 def process_batch(
     batch: list[FilterResult],
     filters_to_run: list[str],
+    lake_path: Path,
 ) -> list[FilterResult]:
     """
     Worker task: Processes a batch of flights by loading their trajectory Parquet files (clean or raw),
@@ -83,6 +86,9 @@ def process_batch(
         except Exception as exc:
             logger.error(f"Error processing flight {fr.flight_id} from {fr.file_path}: {exc}")
             # Missing metrics will be caught by FilterResult.__post_init__ or as_dict and safely mapped to pd.NA
+
+    # Append completed batch to Delta Lake crash buffer — lock-free concurrent write
+    append_postfilter_batch(lake_path, batch)
 
     return batch
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import multiprocessing as mp
+import shutil
 from pathlib import Path
-import sqlite3
 from typing import Generator
 
 import pandas as pd
@@ -42,6 +42,7 @@ from src.common.config import (
     GLOBAL_RAW_QUALITY_REGISTRY,
 )
 from src.common.registry_utils import join_flight_registries
+from src.data_manager.io_utils import append_postfilter_batch, merge_postfilter_lake
 from .filter_result import FilterResult
 from .postfilter_worker import _worker_init, process_batch
 
@@ -79,65 +80,6 @@ def _chunks(lst: list, n: int) -> Generator[list, None, None]:
         yield lst[i : i + n]
 
 
-def _init_sqlite_db(db_path: Path) -> None:
-    """Initialize SQLite database table for crash-safe upserts.
-
-    WAL mode is intentionally omitted: all SQLite writes are serialized through
-    the main process (workers return results via futures), so concurrent write
-    access never occurs and WAL's exclusive-lock setup is both unnecessary and
-    fragile on Linux POSIX filesystems.
-    """
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS results (
-                flight_id TEXT PRIMARY KEY,
-                metric_max_horiz_speed_mps REAL,
-                metric_max_vert_speed_mps REAL,
-                metric_max_coord_horiz_speed_mps REAL,
-                metric_max_coord_vert_speed_mps REAL,
-                metric_max_acceleration_mps2 REAL,
-                metric_dep_horiz_dist_m REAL,
-                metric_dep_vert_dist_m REAL,
-                metric_arr_horiz_dist_m REAL,
-                metric_arr_vert_dist_m REAL
-            );
-        """)
-
-
-def _upsert_batch_sqlite(db_path: Path, completed_batch: list[FilterResult]) -> None:
-    """Upsert a completed batch into SQLite in a single transaction (O(batch_size))."""
-    rows = []
-    for fr in completed_batch:
-        d = fr.as_dict()
-        rows.append((
-            d.get("flight_id"),
-            d.get("metric_max_horiz_speed_mps"),
-            d.get("metric_max_vert_speed_mps"),
-            d.get("metric_max_coord_horiz_speed_mps"),
-            d.get("metric_max_coord_vert_speed_mps"),
-            d.get("metric_max_acceleration_mps2"),
-            d.get("metric_dep_horiz_dist_m"),
-            d.get("metric_dep_vert_dist_m"),
-            d.get("metric_arr_horiz_dist_m"),
-            d.get("metric_arr_vert_dist_m"),
-        ))
-    sql = """
-        INSERT OR REPLACE INTO results (
-            flight_id,
-            metric_max_horiz_speed_mps,
-            metric_max_vert_speed_mps,
-            metric_max_coord_horiz_speed_mps,
-            metric_max_coord_vert_speed_mps,
-            metric_max_acceleration_mps2,
-            metric_dep_horiz_dist_m,
-            metric_dep_vert_dist_m,
-            metric_arr_horiz_dist_m,
-            metric_arr_vert_dist_m
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """
-    with sqlite3.connect(db_path) as conn:
-        conn.executemany(sql, rows)
 
 
 def _load_registry(
@@ -233,12 +175,11 @@ def _run_pool(
     df: pd.DataFrame,
     batches: list[list[FilterResult]],
     filters_to_run: list[str],
-    db_path: Path,
+    lake_path: Path,
     n_workers: int,
 ) -> None:
-    """Submit batches to the process pool, upsert results to SQLite db_path, and log progress milestones."""
+    """Submit batches to the process pool; workers append results to the Delta Lake crash buffer."""
     import time
-    _init_sqlite_db(db_path)
     ctx = mp.get_context("spawn")
     total_flights = sum(len(b) for b in batches)
     total_batches = len(batches)
@@ -254,12 +195,14 @@ def _run_pool(
         mp_context=ctx,
         initializer=_worker_init,
     ) as executor:
-        futures = {executor.submit(process_batch, batch, filters_to_run): len(batch) for batch in batches}
+        futures = {
+            executor.submit(process_batch, batch, filters_to_run, lake_path): len(batch)
+            for batch in batches
+        }
         for future in concurrent.futures.as_completed(futures):
             batch_size = futures[future]
             completed_batch = future.result()
             _merge_results(df, completed_batch, filters_to_run)
-            _upsert_batch_sqlite(db_path, completed_batch)
 
             processed_flights += batch_size
             completed_batches += 1
@@ -280,29 +223,16 @@ def _merge_sqlite(
     db_path: Path,
     filters_to_run: list[str],
 ) -> int:
-    """Read all records from SQLite db_path and merge them back into in-memory DataFrame.
+    """Stub retained for backwards compatibility — delegates to merge_postfilter_lake.
 
-    Uses df.update() for vectorized index-aligned merging — only overwrites cells
-    where the SQLite row has a non-NA value, leaving existing metrics intact.
+    Previously read all records from a SQLite .db file and merged them back into
+    the in-memory DataFrame. SQLite has been replaced by Delta Lake; this function
+    now delegates to merge_postfilter_lake which expects a lake directory path
+    derived from db_path by stripping the .db suffix.
     """
-    if not db_path.exists():
-        return 0
-
-    logger.info(f"Merging SQLite database from {db_path}...")
-    with sqlite3.connect(db_path) as conn:
-        dumped_df = pd.read_sql_query("SELECT * FROM results", conn)
-
-    if dumped_df.empty:
-        return 0
-
-    dumped_df.set_index("flight_id", inplace=True)
-
-    # Only update the metric columns relevant to the requested filters
-    cols_to_update = [mc for f in filters_to_run for mc in FILTER_METRIC_MAP[f]]
-    cols_present = [c for c in cols_to_update if c in dumped_df.columns]
-    df.update(dumped_df[cols_present])  # Vectorized; skips NaN; aligns on index
-
-    return int(df.index.isin(dumped_df.index).sum())
+    lake_path = db_path.with_suffix("")
+    metric_cols = [mc for f in filters_to_run for mc in FILTER_METRIC_MAP[f]]
+    return merge_postfilter_lake(lake_path, df, metric_cols)
 
 
 def evaluate_thresholds(
@@ -427,14 +357,16 @@ def run_postfilters(
             quality_registry_path = GLOBAL_CLEAN_QUALITY_REGISTRY
 
     db_path = BASE_DIR / "data" / "temp" / "postfilter_tmp" / f"{quality_registry_path.stem}.db"
+    lake_path = BASE_DIR / "data" / "temp" / "postfilter_tmp" / quality_registry_path.stem
 
     work_list: list[FilterResult] = []
 
     if merge_only:
-        logger.info(f"Running MERGE-ONLY mode — scanning SQLite database: {db_path}")
+        logger.info(f"Running MERGE-ONLY mode — scanning Delta Lake crash buffer: {lake_path}")
         df = _load_registry(registry_path, quality_registry_path, filters_to_run)
-        merged_count = _merge_sqlite(df, db_path, filters_to_run)
-        logger.info(f"Merged {merged_count} flight record(s) from SQLite database.")
+        metric_cols = [mc for f in filters_to_run for mc in FILTER_METRIC_MAP[f]]
+        merged_count = merge_postfilter_lake(lake_path, df, metric_cols)
+        logger.info(f"Merged {merged_count} flight record(s) from Delta Lake crash buffer.")
     elif recheck_flags:
         logger.info(
             f"Running RECHECK-FLAGS mode — registry: {registry_path.name}, "
@@ -460,15 +392,16 @@ def run_postfilters(
             n_workers = max(1, min(max_workers or PROCESSING_DEFAULT_MAX_WORKERS, len(batches)))
 
             try:
-                _run_pool(df, batches, filters_to_run, db_path, n_workers)
+                _run_pool(df, batches, filters_to_run, lake_path, n_workers)
             except Exception as exc:
-                logger.error(f"Orchestrator crashed — SQLite database preserved at: {db_path} ({exc})")
+                logger.error(f"Orchestrator crashed — Delta Lake crash buffer preserved at: {lake_path} ({exc})")
                 raise
         else:
             # No work needed — all metrics already present. Merge any partial
-            # DB left behind by a prior crashed run, if one exists.
-            if db_path.exists():
-                _merge_sqlite(df, db_path, filters_to_run)
+            # lake left behind by a prior crashed run, if one exists.
+            if lake_path.exists():
+                metric_cols = [mc for f in filters_to_run for mc in FILTER_METRIC_MAP[f]]
+                merge_postfilter_lake(lake_path, df, metric_cols)
 
     # 3. Evaluate thresholds and update boolean pass columns vectorized
     evaluate_thresholds(df, filters_to_run, thresholds, target_flight_ids)
@@ -502,13 +435,12 @@ def run_postfilters(
     else:
         logger.info("No rows modified; quality manifest left unchanged.")
 
-    # Clean up SQLite temporary file on successful completion
-    if db_path.exists():
-        for p in (db_path, db_path.with_suffix(".db-wal"), db_path.with_suffix(".db-shm")):
-            try:
-                p.unlink(missing_ok=True)
-            except Exception as e:
-                logger.debug(f"Could not remove temporary file {p}: {e}")
+    # Clean up Delta Lake crash buffer on successful completion
+    if lake_path.exists():
+        try:
+            shutil.rmtree(lake_path)
+        except Exception as e:
+            logger.debug(f"Could not remove Delta Lake crash buffer at {lake_path}: {e}")
 
     _log_summary(df, filters_to_run, target_flight_ids)
 

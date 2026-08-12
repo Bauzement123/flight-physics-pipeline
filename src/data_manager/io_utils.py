@@ -1,15 +1,133 @@
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as ds
 from deltalake import write_deltalake, DeltaTable
 
 from src.data_manager.schemas import MasterFlightQuery, RouteSummaryQuery, SimResultQuery
 from src.common.config import MASTER_FLIGHTS_FILE, ROUTE_SUMMARY_PARQUET
 
+if TYPE_CHECKING:
+    from src.core.processing.filter_result import FilterResult
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Postfilter crash-buffer helpers (Delta Lake)
+# ---------------------------------------------------------------------------
+
+# Canonical schema for the postfilter temp lake — mirrors FilterResult metric fields.
+_POSTFILTER_SCHEMA = pa.schema([
+    pa.field("flight_id",                      pa.string()),
+    pa.field("metric_max_horiz_speed_mps",      pa.float64()),
+    pa.field("metric_max_vert_speed_mps",       pa.float64()),
+    pa.field("metric_max_coord_horiz_speed_mps",pa.float64()),
+    pa.field("metric_max_coord_vert_speed_mps", pa.float64()),
+    pa.field("metric_max_acceleration_mps2",    pa.float64()),
+    pa.field("metric_dep_horiz_dist_m",         pa.float64()),
+    pa.field("metric_dep_vert_dist_m",          pa.float64()),
+    pa.field("metric_arr_horiz_dist_m",         pa.float64()),
+    pa.field("metric_arr_vert_dist_m",          pa.float64()),
+])
+
+
+def append_postfilter_batch(
+    lake_path: Path,
+    batch: "list[FilterResult]",
+) -> None:
+    """Append a completed worker batch to the postfilter Delta Lake crash buffer.
+
+    Called directly from each worker process after processing a batch. Delta Lake
+    uses optimistic concurrency over an atomic JSON transaction log — no fcntl file
+    locks are involved, so concurrent appends from multiple worker processes are
+    safe without any coordination.
+
+    Deduplication by flight_id is deferred to merge time (merge_postfilter_lake).
+    If a worker retries a batch, the duplicate rows are harmless and the last
+    append wins during the merge.
+
+    Parameters
+    ----------
+    lake_path:
+        Path to the Delta Lake directory for this run's crash buffer
+        (e.g. data/temp/postfilter_tmp/global_raw_quality_registry/).
+    batch:
+        Completed FilterResult objects with metric fields populated.
+    """
+    if not batch:
+        return
+
+    rows = [fr.as_dict() for fr in batch]
+    # Drop file_path — not part of the quality schema
+    for r in rows:
+        r.pop("file_path", None)
+
+    table = pa.Table.from_pylist(rows, schema=_POSTFILTER_SCHEMA)
+    write_deltalake(
+        str(lake_path),
+        table,
+        mode="append",
+        schema_mode="merge",
+    )
+
+
+def merge_postfilter_lake(
+    lake_path: Path,
+    df: pd.DataFrame,
+    metric_cols: list[str],
+) -> int:
+    """Read the postfilter Delta Lake crash buffer and merge results into df.
+
+    Used by the merge_only recovery path. Reads all records from the lake,
+    deduplicates by flight_id (keep='last' so the most recent append wins),
+    then calls df.update() which is index-aligned and skips NaN values so
+    existing metrics in df are only overwritten where the lake has a real value.
+
+    Parameters
+    ----------
+    lake_path:
+        Path to the Delta Lake directory.
+    df:
+        In-memory registry DataFrame indexed on flight_id.
+    metric_cols:
+        Metric column names to merge (subset of _POSTFILTER_SCHEMA fields).
+
+    Returns
+    -------
+    int
+        Number of flight_ids from the lake that were found in df's index.
+    """
+    if not lake_path.exists():
+        logger.info("merge_postfilter_lake: no lake at %s — nothing to merge.", lake_path)
+        return 0
+
+    try:
+        dt = DeltaTable(str(lake_path))
+    except Exception as exc:
+        logger.warning("merge_postfilter_lake: could not open lake at %s: %s", lake_path, exc)
+        return 0
+
+    lake_df = dt.to_pandas()
+    if lake_df.empty:
+        logger.info("merge_postfilter_lake: lake at %s is empty — nothing to merge.", lake_path)
+        return 0
+
+    # Dedup: keep last append per flight_id (most recent worker result wins)
+    lake_df = lake_df.drop_duplicates(subset="flight_id", keep="last")
+    lake_df = lake_df.set_index("flight_id")
+
+    cols_present = [c for c in metric_cols if c in lake_df.columns]
+    df.update(lake_df[cols_present])  # index-aligned, skips NaN
+
+    matched = int(df.index.isin(lake_df.index).sum())
+    logger.info(
+        "merge_postfilter_lake: merged %d flight record(s) from %s.",
+        matched, lake_path,
+    )
+    return matched
 
 def read_master_flights(
     query: Optional[MasterFlightQuery] = None,
