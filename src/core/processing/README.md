@@ -161,7 +161,7 @@ Module Objective
 
  Objective 2 (Post-Filtering)
   └── Annotate clean-registry flights with trajectory quality post-filter outcomes
-      (horiz velocity, vert velocity, coord horiz velocity, coord vert velocity, acceleration, distance).
+      (horiz velocity, vert velocity, coord horiz velocity, coord vert velocity, acceleration, dep horiz dist, dep vert dist, arr horiz dist, arr vert dist).
        │
        ├── Sub-objective 1 — CLI & corridor resolution
        │    ├── Input : corridor ranks, routes, or custom source directory, and filters selection
@@ -253,7 +253,7 @@ flowchart TD
 
 ### 4.2 Workflow B — Trajectory Post-Filtering (`postfilter_cli.py`)
 
-This workflow applies physical threshold checks (horizontal velocity, vertical velocity, coordinate-derived horizontal velocity, coordinate-derived vertical velocity, acceleration, and distance) to already-smoothed trajectories (`_clean_si.parquet`), annotating the global registry with boolean outcome columns.
+This workflow applies physical threshold checks (horizontal velocity, vertical velocity, coordinate-derived horizontal velocity, coordinate-derived vertical velocity, acceleration, and terminal distances) to already-smoothed trajectories (`_clean_si.parquet`), annotating the global registry with boolean outcome columns.
 
 ```mermaid
 flowchart TD
@@ -446,7 +446,7 @@ python -m src.core.processing.kalman_filter --routes EDDF-LIRF --time-grid 30 --
 #### Bash
 ```bash
 # Post-filter specific corridor volume ranks, running only horizontal velocity and distance checks
-python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity distance --max-workers 8
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity dep_horiz_dist dep_vert_dist arr_horiz_dist arr_vert_dist --max-workers 8
 
 # Force re-running and overwriting all six post-filters on all clean flights
 python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
@@ -455,7 +455,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 #### PowerShell
 ```powershell
 # Post-filter specific corridor volume ranks, running only horizontal velocity and distance checks
-python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity distance --max-workers 8
+python -m src.core.processing.postfilter_cli --ranks 1 2 3 --filters horiz_velocity vert_velocity dep_horiz_dist dep_vert_dist arr_horiz_dist arr_vert_dist --max-workers 8
 
 # Force re-running and overwriting all six post-filters on all clean flights
 python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
@@ -479,7 +479,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `--max-dep-vert-dist` | `float` | `1000.0` | No | Max departure vertical distance in meters. |
 | `--max-arr-horiz-dist` | `float` | `15000.0` | No | Max arrival horizontal distance in meters. |
 | `--max-arr-vert-dist` | `float` | `1000.0` | No | Max arrival vertical distance in meters. |
-| `--filters` | `str` (list) | all six | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `distance`. |
+| `--filters` | `str` (list) | all nine | No | List of sub-filters to run. Choices: `horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `dep_horiz_dist`, `dep_vert_dist`, `arr_horiz_dist`, `arr_vert_dist`. |
 | `--recheck-flags` | flag | `False` | No | Skip metric extraction entirely. Re-evaluate threshold pass/fail flags vectorized on existing quality metrics. Fast (~30s, no workers). Mutually exclusive with `--overwrite`. |
 | `--merge-only` | flag | `False` | No | Skip metric extraction entirely. Read the preserved Delta Lake crash buffer (`data/temp/postfilter_tmp/<registry_stem>/`) and merge its records into the quality manifest. Use after a crashed run to recover partial results without re-processing. Raw and clean runs use separate lake directories keyed on the quality registry stem. |
 
@@ -523,8 +523,14 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | `POSTFILTER_COL_COORD_VERT_VEL_REASON` | `"coord_vert_velocity_reject_reason"` (str) | Clean-registry column: fail reason or `"PASSED"` for coordinate vertical velocity check |
 | `POSTFILTER_COL_ACCEL_PASS` | `"acceleration_pass"` (str) | Clean-registry column indicating if flight passed the step-to-step 3D acceleration check |
 | `POSTFILTER_COL_ACCEL_REASON` | `"acceleration_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the acceleration check |
-| `POSTFILTER_COL_DISTANCE_PASS` | `"distance_pass"` (str) | Clean-registry column indicating if flight passed origin/destination horizontal and vertical bounds |
-| `POSTFILTER_COL_DISTANCE_REASON` | `"distance_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the distance check |
+| `POSTFILTER_COL_DEP_HORIZ_DIST_PASS` | `"dep_horiz_dist_pass"` (str) | Clean-registry column indicating if flight passed origin horizontal bounds |
+| `POSTFILTER_COL_DEP_HORIZ_DIST_REASON` | `"dep_horiz_dist_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the dep horiz check |
+| `POSTFILTER_COL_DEP_VERT_DIST_PASS` | `"dep_vert_dist_pass"` (str) | Clean-registry column indicating if flight passed origin vertical bounds |
+| `POSTFILTER_COL_DEP_VERT_DIST_REASON` | `"dep_vert_dist_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the dep vert check |
+| `POSTFILTER_COL_ARR_HORIZ_DIST_PASS` | `"arr_horiz_dist_pass"` (str) | Clean-registry column indicating if flight passed destination horizontal bounds |
+| `POSTFILTER_COL_ARR_HORIZ_DIST_REASON` | `"arr_horiz_dist_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the arr horiz check |
+| `POSTFILTER_COL_ARR_VERT_DIST_PASS` | `"arr_vert_dist_pass"` (str) | Clean-registry column indicating if flight passed destination vertical bounds |
+| `POSTFILTER_COL_ARR_VERT_DIST_REASON` | `"arr_vert_dist_reject_reason"` (str) | Clean-registry column containing fail reason or `"PASSED"` for the arr vert check |
 | `METRIC_COL_MAX_HORIZ_VEL` | `"metric_max_horiz_vel"` (str) | Clean-registry column storing the extracted scalar maximum horizontal speed (kt) |
 | `METRIC_COL_MAX_VERT_VEL` | `"metric_max_vert_vel"` (str) | Clean-registry column storing the extracted scalar maximum vertical rate (fpm) |
 | `METRIC_COL_MAX_COORD_HORIZ_VEL` | `"metric_max_coord_horiz_vel"` (str) | Clean-registry column storing the extracted scalar maximum coordinate horizontal speed (kt) |
@@ -537,7 +543,7 @@ python -m src.core.processing.postfilter_cli --overwrite --max-workers 4
 | File | Access | Description |
 | :--- | :--- | :--- |
 | `data/registries/global_clean_registry.parquet` (`GLOBAL_CLEAN_REGISTRY`) | **Written / Read** | Clean flight index: maps `flight_id` to relative clean trajectory `file_path`. |
-| `data/registries/global_clean_quality_registry.parquet` (`GLOBAL_CLEAN_QUALITY_REGISTRY`) | **Written / Read** | Post-filter quality manifest: stores scalar feature metrics (`metric_*`), 4-axis velocity pass/reason flags, acceleration pass/reason, and distance pass/reason indexed by `flight_id`. Updated incrementally with duplicate resolution (`keep='last'`). |
+| `data/registries/global_clean_quality_registry.parquet` (`GLOBAL_CLEAN_QUALITY_REGISTRY`) | **Written / Read** | Post-filter quality manifest: stores scalar feature metrics (`metric_*`), 4-axis velocity pass/reason flags, acceleration pass/reason, and 4-axis distance pass/reason indexed by `flight_id`. Updated incrementally with duplicate resolution (`keep='last'`). |
 | `data/registries/global_ekf_diag_registry.parquet` (`GLOBAL_EKF_DIAG_REGISTRY`) | **Written** | EKF diagnostics index: maps `flight_id`, `diag_file_path`, `ekf_quality_score`, `ekf_mean_nis`, and `ekf_max_trace_p`. |
 | `data/databases/master_flights/master_flights_route_summary.parquet` | **Read** | Looked up by `extract_target_routes()` to map rank indices / corridor strings to raw trajectory directories. |
 | `data/logs/processing.log` | **Written** | All `logging` output from EKF smoothing (`kalman_filter.py`) and post-filtering (`postfilter_cli.py`) runs. |

@@ -247,11 +247,18 @@ POSTFILTER_COL_COORD_HORIZ_VEL_PASS: str   = "coord_horiz_velocity_pass"
 POSTFILTER_COL_COORD_HORIZ_VEL_REASON: str = "coord_horiz_velocity_reject_reason"
 POSTFILTER_COL_COORD_VERT_VEL_PASS: str    = "coord_vert_velocity_pass"
 POSTFILTER_COL_COORD_VERT_VEL_REASON: str  = "coord_vert_velocity_reject_reason"
-# Acceleration and distance filters
-POSTFILTER_COL_ACCEL_PASS: str    = "acceleration_pass"
-POSTFILTER_COL_ACCEL_REASON: str  = "acceleration_reject_reason"
-POSTFILTER_COL_DISTANCE_PASS: str   = "distance_pass"
-POSTFILTER_COL_DISTANCE_REASON: str = "distance_reject_reason"
+# Acceleration filter
+POSTFILTER_COL_ACCEL_PASS: str              = "acceleration_pass"
+POSTFILTER_COL_ACCEL_REASON: str            = "acceleration_reject_reason"
+# Distance filters — one pass/reason pair per distance dimension
+POSTFILTER_COL_DEP_HORIZ_DIST_PASS: str    = "dep_horiz_dist_pass"
+POSTFILTER_COL_DEP_HORIZ_DIST_REASON: str  = "dep_horiz_dist_reject_reason"
+POSTFILTER_COL_DEP_VERT_DIST_PASS: str     = "dep_vert_dist_pass"
+POSTFILTER_COL_DEP_VERT_DIST_REASON: str   = "dep_vert_dist_reject_reason"
+POSTFILTER_COL_ARR_HORIZ_DIST_PASS: str    = "arr_horiz_dist_pass"
+POSTFILTER_COL_ARR_HORIZ_DIST_REASON: str  = "arr_horiz_dist_reject_reason"
+POSTFILTER_COL_ARR_VERT_DIST_PASS: str     = "arr_vert_dist_pass"
+POSTFILTER_COL_ARR_VERT_DIST_REASON: str   = "arr_vert_dist_reject_reason"
 
 # Clean Registry - Scalar Metric Feature Columns
 METRIC_COL_MAX_HORIZ_VEL: str       = "metric_max_horiz_speed_mps"

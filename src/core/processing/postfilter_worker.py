@@ -68,7 +68,7 @@ def process_batch(
             if "acceleration" in filters_to_run:
                 fr.metric_max_acceleration_mps2 = extract_acceleration_metric(df)
 
-            if "distance" in filters_to_run:
+            if any(f in filters_to_run for f in ("dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist")):
                 dep_icao = str(df["estdepartureairport"].iloc[0]).strip().upper() if "estdepartureairport" in df.columns and pd.notna(df["estdepartureairport"].iloc[0]) else None
                 arr_icao = str(df["estarrivalairport"].iloc[0]).strip().upper() if "estarrivalairport" in df.columns and pd.notna(df["estarrivalairport"].iloc[0]) else None
                 icaos = [ic for ic in (dep_icao, arr_icao) if ic]

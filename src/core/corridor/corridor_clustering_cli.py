@@ -46,9 +46,11 @@ def main() -> None:
         "--require-pass",
         type=str,
         nargs="+",
-        choices=["velocity", "coordinate_velocity", "acceleration", "distance"],
-        default=["velocity", "coordinate_velocity", "acceleration", "distance"],
-        help="Post-filter checks that must be True for flights to be included (default: all four).",
+        choices=["velocity", "coordinate_velocity", "acceleration",
+                 "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist"],
+        default=["velocity", "coordinate_velocity", "acceleration",
+                 "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist"],
+        help="Post-filter checks that must be True for flights to be included (default: all seven).",
     )
 
     # Concurrency and runtime options

@@ -48,14 +48,16 @@ def main() -> None:
         choices=[
             "horiz_velocity", "vert_velocity",
             "coord_horiz_velocity", "coord_vert_velocity",
-            "acceleration", "distance",
+            "acceleration",
+            "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist",
         ],
         default=[
             "horiz_velocity", "vert_velocity",
             "coord_horiz_velocity", "coord_vert_velocity",
-            "acceleration", "distance",
+            "acceleration",
+            "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist",
         ],
-        help="Sub-filters to run (default: all six).",
+        help="Sub-filters to run (default: all nine).",
     )
     parser.add_argument("--merge-only", action="store_true", help="Aggregate existing SQLite .db temporary records into the quality manifest without extracting metrics.")
     args = parser.parse_args()

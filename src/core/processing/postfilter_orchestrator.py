@@ -24,8 +24,14 @@ from src.common.config import (
     POSTFILTER_COL_COORD_VERT_VEL_REASON,
     POSTFILTER_COL_ACCEL_PASS,
     POSTFILTER_COL_ACCEL_REASON,
-    POSTFILTER_COL_DISTANCE_PASS,
-    POSTFILTER_COL_DISTANCE_REASON,
+    POSTFILTER_COL_DEP_HORIZ_DIST_PASS,
+    POSTFILTER_COL_DEP_HORIZ_DIST_REASON,
+    POSTFILTER_COL_DEP_VERT_DIST_PASS,
+    POSTFILTER_COL_DEP_VERT_DIST_REASON,
+    POSTFILTER_COL_ARR_HORIZ_DIST_PASS,
+    POSTFILTER_COL_ARR_HORIZ_DIST_REASON,
+    POSTFILTER_COL_ARR_VERT_DIST_PASS,
+    POSTFILTER_COL_ARR_VERT_DIST_REASON,
     METRIC_COL_MAX_HORIZ_VEL,
     METRIC_COL_MAX_VERT_VEL,
     METRIC_COL_MAX_COORD_HORIZ_VEL,
@@ -48,14 +54,17 @@ from .postfilter_worker import _worker_init, process_batch
 
 logger = logging.getLogger(__name__)
 
-# Maps filter name → (pass_column, reason_column) in the clean registry
+# Maps filter name → (pass_column, reason_column) in the clean/raw quality registry
 FILTER_COL_MAP: dict[str, tuple[str, str]] = {
-    "horiz_velocity":       (POSTFILTER_COL_HORIZ_VEL_PASS,       POSTFILTER_COL_HORIZ_VEL_REASON),
-    "vert_velocity":        (POSTFILTER_COL_VERT_VEL_PASS,        POSTFILTER_COL_VERT_VEL_REASON),
-    "coord_horiz_velocity": (POSTFILTER_COL_COORD_HORIZ_VEL_PASS, POSTFILTER_COL_COORD_HORIZ_VEL_REASON),
-    "coord_vert_velocity":  (POSTFILTER_COL_COORD_VERT_VEL_PASS,  POSTFILTER_COL_COORD_VERT_VEL_REASON),
-    "acceleration":         (POSTFILTER_COL_ACCEL_PASS,           POSTFILTER_COL_ACCEL_REASON),
-    "distance":             (POSTFILTER_COL_DISTANCE_PASS,        POSTFILTER_COL_DISTANCE_REASON),
+    "horiz_velocity":       (POSTFILTER_COL_HORIZ_VEL_PASS,          POSTFILTER_COL_HORIZ_VEL_REASON),
+    "vert_velocity":        (POSTFILTER_COL_VERT_VEL_PASS,           POSTFILTER_COL_VERT_VEL_REASON),
+    "coord_horiz_velocity": (POSTFILTER_COL_COORD_HORIZ_VEL_PASS,    POSTFILTER_COL_COORD_HORIZ_VEL_REASON),
+    "coord_vert_velocity":  (POSTFILTER_COL_COORD_VERT_VEL_PASS,     POSTFILTER_COL_COORD_VERT_VEL_REASON),
+    "acceleration":         (POSTFILTER_COL_ACCEL_PASS,              POSTFILTER_COL_ACCEL_REASON),
+    "dep_horiz_dist":       (POSTFILTER_COL_DEP_HORIZ_DIST_PASS,     POSTFILTER_COL_DEP_HORIZ_DIST_REASON),
+    "dep_vert_dist":        (POSTFILTER_COL_DEP_VERT_DIST_PASS,      POSTFILTER_COL_DEP_VERT_DIST_REASON),
+    "arr_horiz_dist":       (POSTFILTER_COL_ARR_HORIZ_DIST_PASS,     POSTFILTER_COL_ARR_HORIZ_DIST_REASON),
+    "arr_vert_dist":        (POSTFILTER_COL_ARR_VERT_DIST_PASS,      POSTFILTER_COL_ARR_VERT_DIST_REASON),
 }
 
 FILTER_METRIC_MAP: dict[str, list[str]] = {
@@ -64,10 +73,10 @@ FILTER_METRIC_MAP: dict[str, list[str]] = {
     "coord_horiz_velocity": [METRIC_COL_MAX_COORD_HORIZ_VEL],
     "coord_vert_velocity":  [METRIC_COL_MAX_COORD_VERT_VEL],
     "acceleration":         [METRIC_COL_MAX_ACCEL],
-    "distance":             [
-        METRIC_COL_DEP_HORIZ_DIST, METRIC_COL_DEP_VERT_DIST,
-        METRIC_COL_ARR_HORIZ_DIST, METRIC_COL_ARR_VERT_DIST
-    ],
+    "dep_horiz_dist":       [METRIC_COL_DEP_HORIZ_DIST],
+    "dep_vert_dist":        [METRIC_COL_DEP_VERT_DIST],
+    "arr_horiz_dist":       [METRIC_COL_ARR_HORIZ_DIST],
+    "arr_vert_dist":        [METRIC_COL_ARR_VERT_DIST],
 }
 
 # ---------------------------------------------------------------------------
@@ -289,19 +298,33 @@ def evaluate_thresholds(
             df.loc[mask, pass_col] = False
             df.loc[mask, reason_col] = "max 3D acceleration > limit"
             
-        elif f == "distance":
-            limits = {
-                METRIC_COL_DEP_HORIZ_DIST: (thresholds.get("max_dep_horiz_dist"), "DEP_HORIZ"),
-                METRIC_COL_DEP_VERT_DIST: (thresholds.get("max_dep_vert_dist"), "DEP_VERT"),
-                METRIC_COL_ARR_HORIZ_DIST: (thresholds.get("max_arr_horiz_dist"), "ARR_HORIZ"),
-                METRIC_COL_ARR_VERT_DIST: (thresholds.get("max_arr_vert_dist"), "ARR_VERT"),
-            }
-            
-            for mcol, (lim, name) in limits.items():
-                if lim is not None:
-                    mask = eval_mask & (df[pass_col] == True) & (df[mcol] > lim)
-                    df.loc[mask, pass_col] = False
-                    df.loc[mask, reason_col] = f"{name}_DIST > limit"
+        elif f == "dep_horiz_dist":
+            limit = thresholds.get("max_dep_horiz_dist")
+            if limit is not None:
+                mask = eval_mask & (df[METRIC_COL_DEP_HORIZ_DIST] > limit)
+                df.loc[mask, pass_col] = False
+                df.loc[mask, reason_col] = "dep horiz dist > limit"
+
+        elif f == "dep_vert_dist":
+            limit = thresholds.get("max_dep_vert_dist")
+            if limit is not None:
+                mask = eval_mask & (df[METRIC_COL_DEP_VERT_DIST] > limit)
+                df.loc[mask, pass_col] = False
+                df.loc[mask, reason_col] = "dep vert dist > limit"
+
+        elif f == "arr_horiz_dist":
+            limit = thresholds.get("max_arr_horiz_dist")
+            if limit is not None:
+                mask = eval_mask & (df[METRIC_COL_ARR_HORIZ_DIST] > limit)
+                df.loc[mask, pass_col] = False
+                df.loc[mask, reason_col] = "arr horiz dist > limit"
+
+        elif f == "arr_vert_dist":
+            limit = thresholds.get("max_arr_vert_dist")
+            if limit is not None:
+                mask = eval_mask & (df[METRIC_COL_ARR_VERT_DIST] > limit)
+                df.loc[mask, pass_col] = False
+                df.loc[mask, reason_col] = "arr vert dist > limit"
 
         for mcol in FILTER_METRIC_MAP[f]:
             mask_na = eval_mask & (df[pass_col] == True) & df[mcol].isna()

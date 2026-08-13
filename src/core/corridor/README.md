@@ -109,7 +109,7 @@ graph TD
 1. **Target Route Resolution**: The orchestrator receives target corridor specifications from the CLI (specific ranks, rank ranges, or explicit `DEP-ARR` route strings) and resolves them to route pairs using traffic volume ranks in `master_flights_route_summary.parquet`.
 2. **Model Registry Check**: If `--overwrite` is `False`, the orchestrator loads `global_corridor_model_registry.parquet` and excludes any routes that have already been processed.
 3. **Clean Registry Load**: The orchestrator loads the central trajectory tracking file `global_clean_registry.parquet` once into memory.
-4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`horiz_velocity_pass`, `vert_velocity_pass`, `coord_horiz_velocity_pass`, `coord_vert_velocity_pass`, `acceleration_pass`, `distance_pass`).
+4. **Cohort Pre-Filtering**: For each target route, the orchestrator filters matching flight rows based on departure/arrival ICAOs and applies the specified post-filter boolean checks (`horiz_velocity_pass`, `vert_velocity_pass`, `coord_horiz_velocity_pass`, `coord_vert_velocity_pass`, `acceleration_pass`, `dep_horiz_dist_pass`, `dep_vert_dist_pass`, `arr_horiz_dist_pass`, `arr_vert_dist_pass`).
 5. **Minimum Cohort Threshold Verification**: The orchestrator counts qualifying flights per cohort. If a route has fewer than `MIN_FLIGHTS_FOR_CLUSTERING` valid flights (threshold value configured in [`src/common/config.py`](file:///g:/Meine%20Ablage/UNI/SS26/PythonPipeline%20-%20Kopie/src/common/config.py#L144)), it is skipped with a warning.
 6. **Worker Pool Dispatching**: The orchestrator initializes a `ProcessPoolExecutor` using the `spawn` context and dispatches eligible route tasks to `corridor_clustering_worker.py: cluster_route`. Each process initializes worker logging to `data/logs/corridor.log` and caps numeric BLAS threads.
 7. **Batch Trajectory Loading**: The worker process groups flight IDs by their respective parquet file paths and reads each parquet file once, minimizing disk I/O overhead.
@@ -189,7 +189,7 @@ python -m src.core.corridor.corridor_clustering_cli \
 # Cluster Rank 1 to 10 corridors using velocity and distance checks
 python -m src.core.corridor.corridor_clustering_cli \
     --rank-range 1 10 \
-    --require-pass velocity distance \
+    --require-pass velocity dep_horiz_dist dep_vert_dist arr_horiz_dist arr_vert_dist \
     --max-workers 4 \
     --overwrite
 
@@ -223,7 +223,7 @@ python -m src.core.corridor.corridor_clustering_cli `
 | `--ranks` | `int list` | *None* | Specific route volume ranks to process (e.g. `--ranks 1 2 5`). |
 | `--rank-range` | `int int` | *None* | Inclusive range of ranks to process (e.g. `--rank-range 1 50`). |
 | `--routes` | `str list` | *None* | Explicit corridor route strings to process (e.g. `--routes LEPA-LEBL EGLL-EGCC`). |
-| `--require-pass` | `str list` | `all four` | Registry check filters that must be True (`velocity`, `coordinate_velocity`, `acceleration`, `distance`). |
+| `--require-pass` | `str list` | `all seven` | Registry check filters that must be True (`velocity`, `coordinate_velocity`, `acceleration`, `dep_horiz_dist`, `dep_vert_dist`, `arr_horiz_dist`, `arr_vert_dist`). |
 | `--threads-per-worker` | `int` | `2` | Number of threads for CPU BLAS operations per process worker. |
 | `--max-workers` | `int` | *None* | Maximum parallel worker processes (defaults to `CPU count // threads_per_worker`). |
 | `--overwrite` | `flag` | `False` | Overwrites existing corridor templates and registry mapping. |
