@@ -1,10 +1,12 @@
 """
 Stage 7: Config Exclusion Verification
-Analyzes the combined PC and VM registries against the active config limits
+Analyzes the input registry against the active config limits
 to ensure Western European corridors are not excessively penalized.
 """
-import pandas as pd
+import argparse
 import logging
+from pathlib import Path
+import pandas as pd
 
 from src.common.config import (
     BASE_DIR,
@@ -24,25 +26,48 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    setup_file_logger("calibration.log")
+    parser = argparse.ArgumentParser(description="Stage 7: Config Exclusion Verification")
+    parser.add_argument("--input-registry", type=str, default=None, help="Path to input merged registry Parquet file")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory for results CSV")
+    parser.add_argument("--log-file", type=str, default="calibration.log", help="Log filename")
+    args = parser.parse_args()
+
+    setup_file_logger(args.log_file)
     logger.info("Starting Stage 7 Config Exclusion Verification")
 
     data_dir = BASE_DIR / "data" / "calibration" / "postfilter_calibration"
-    pc_file = data_dir / "global_clean_quality_registry_PC.parquet"
-    if not pc_file.exists():
-        pc_file = data_dir / "data" / "sources" / "global_clean_quality_registry_PC.parquet"
-    vm_file = data_dir / "global_clean_quality_registry_VM.parquet"
-    if not vm_file.exists():
-        vm_file = data_dir / "data" / "sources" / "global_clean_quality_registry_VM.parquet"
 
     # 1. Load Data
-    logger.info(f"Loading {pc_file.name}...")
-    df_pc = pd.read_parquet(pc_file)
-    logger.info(f"Loading {vm_file.name}...")
-    df_vm = pd.read_parquet(vm_file)
+    if args.input_registry:
+        reg_path = Path(args.input_registry)
+        if not reg_path.exists():
+            logger.error(f"Input registry not found: {reg_path}")
+            return
+        logger.info(f"Loading input registry from {reg_path}...")
+        df = pd.read_parquet(reg_path)
+    else:
+        merged_file = data_dir / "data" / "merged_registry.parquet"
+        if merged_file.exists():
+            logger.info(f"Loading default merged registry from {merged_file}...")
+            df = pd.read_parquet(merged_file)
+        else:
+            pc_file = data_dir / "global_clean_quality_registry_PC.parquet"
+            if not pc_file.exists():
+                pc_file = data_dir / "data" / "sources" / "global_clean_quality_registry_PC.parquet"
+            vm_file = data_dir / "global_clean_quality_registry_VM.parquet"
+            if not vm_file.exists():
+                vm_file = data_dir / "data" / "sources" / "global_clean_quality_registry_VM.parquet"
 
-    df = pd.concat([df_pc, df_vm], ignore_index=True)
-    logger.info(f"Combined total flights: {len(df)}")
+            if pc_file.exists() and vm_file.exists():
+                logger.info(f"Loading {pc_file.name} and {vm_file.name}...")
+                df_pc = pd.read_parquet(pc_file)
+                df_vm = pd.read_parquet(vm_file)
+                df = pd.concat([df_pc, df_vm], ignore_index=True)
+            else:
+                logger.error("No valid input registry found.")
+                return
+
+    logger.info(f"Total flights loaded for evaluation: {len(df)}")
 
     # Extract route from the flight_id (e.g. EDDF-LIRF_20240101_... -> EDDF-LIRF)
     df["route"] = df["flight_id"].apply(lambda fid: str(fid).split("_")[0])
@@ -120,7 +145,7 @@ def main():
     print("="*80)
     
     # Save output
-    out_dir = data_dir / "stage7"
+    out_dir = Path(args.output_dir) if args.output_dir else data_dir / "stage7"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "stage7_config_exclusion_results.csv"
     stats_sorted.to_csv(out_file, index=False)

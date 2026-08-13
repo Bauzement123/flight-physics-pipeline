@@ -82,7 +82,7 @@ python -m src.analysis.postfilter_calibration.stage3_undirected_correlation --in
 python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage5_master_sensitivity
 python -m src.analysis.postfilter_calibration.stage6_prefilter_verification --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
-python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check
+python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 ```
 
 **PowerShell**
@@ -98,13 +98,14 @@ python -m src.analysis.postfilter_calibration.stage3_undirected_correlation --in
 python -m src.analysis.postfilter_calibration.stage4_sensitivity_sweep --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 python -m src.analysis.postfilter_calibration.stage5_master_sensitivity
 python -m src.analysis.postfilter_calibration.stage6_prefilter_verification --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
-python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check
+python -m src.analysis.postfilter_calibration.stage7_config_exclusion_check --input-registry data/calibration/postfilter_calibration/data/merged_registry.parquet
 ```
 
 ### Parameter Reference
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--input-registry` | `str` | `None` (falls back to clean cohort) | Path to the merged registry parquet (used by Stages 1, 3, 4, 6 when run individually). |
+| `--input-registry` | `str` | `None` (falls back to merged/clean cohort) | Path to the merged registry parquet (used by Stages 1, 3, 4, 6, 7 when run individually). |
+| `--output-dir` | `str` | `None` (defaults to stage output folder) | Output directory for stage results. |
 
 ## 6. Prerequisites & Dependencies
 * **Files Read**:

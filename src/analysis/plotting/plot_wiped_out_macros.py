@@ -18,12 +18,41 @@ from src.common.utils import setup_file_logger, split_route_string
 
 logger = logging.getLogger(__name__)
 
+def _normalize_wipeout_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if 'canonical_route' in df.columns and 'Canonical_Route' not in df.columns:
+        df['Canonical_Route'] = df['canonical_route']
+    elif 'route' in df.columns and 'Canonical_Route' not in df.columns:
+        df['Canonical_Route'] = df['route']
+        
+    if 'total_flights' in df.columns and 'Initial_Count' not in df.columns:
+        df['Initial_Count'] = df['total_flights']
+    if 'passed_flights' in df.columns and 'Surviving_Count' not in df.columns:
+        df['Surviving_Count'] = df['passed_flights']
+        
+    if 'Is_Wiped_Out_Now' not in df.columns:
+        if 'exclusion_pct' in df.columns:
+            df['Is_Wiped_Out_Now'] = df['exclusion_pct'] > 0
+        elif 'Surviving_Count' in df.columns:
+            df['Is_Wiped_Out_Now'] = df['Surviving_Count'] == 0
+        else:
+            df['Is_Wiped_Out_Now'] = True
+            
+    if 'Was_Viable' not in df.columns:
+        if 'Initial_Count' in df.columns:
+            df['Was_Viable'] = df['Initial_Count'] > 0
+        else:
+            df['Was_Viable'] = True
+
+    return df
+
 def plot_top_wiped_out_routes(csv_path: Path, output_dir: Path):
     if not csv_path.exists():
         logger.error(f"CSV not found at {csv_path}")
         return
 
     df = pd.read_csv(csv_path)
+    df = _normalize_wipeout_df(df)
     # Filter for wiped out routes that were previously viable
     wiped_out = df[df['Is_Wiped_Out_Now'] & df['Was_Viable']]
     # Sort by initial count (highest impact) and take top 20

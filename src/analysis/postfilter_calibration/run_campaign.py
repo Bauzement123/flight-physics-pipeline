@@ -45,7 +45,7 @@ def main():
         ("src.analysis.postfilter_calibration.stage4_sensitivity_sweep", ["--input-registry", str(merged_registry_path)]),
         ("src.analysis.postfilter_calibration.stage5_master_sensitivity", []),  # Reads raw master DB
         ("src.analysis.postfilter_calibration.stage6_prefilter_verification", ["--input-registry", str(merged_registry_path)]),
-        ("src.analysis.postfilter_calibration.stage7_config_exclusion_check", [])
+        ("src.analysis.postfilter_calibration.stage7_config_exclusion_check", ["--input-registry", str(merged_registry_path)])
     ]
     
     try:
