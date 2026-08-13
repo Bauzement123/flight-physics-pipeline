@@ -41,16 +41,19 @@ def main() -> None:
         help="Explicit corridor route strings to process (e.g. --routes EDDF-LIRF EGLL-BIKF).",
     )
 
-    # Filtering options
     parser.add_argument(
         "--require-pass",
         type=str,
         nargs="+",
-        choices=["velocity", "coordinate_velocity", "acceleration",
+        choices=["horiz_velocity", "vert_velocity",
+                 "coord_horiz_velocity", "coord_vert_velocity",
+                 "acceleration",
                  "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist"],
-        default=["velocity", "coordinate_velocity", "acceleration",
+        default=["horiz_velocity", "vert_velocity",
+                 "coord_horiz_velocity", "coord_vert_velocity",
+                 "acceleration",
                  "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist"],
-        help="Post-filter checks that must be True for flights to be included (default: all seven).",
+        help="Post-filter checks that must be True for flights to be included (default: all nine).",
     )
 
     # Concurrency and runtime options

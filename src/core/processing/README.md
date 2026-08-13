@@ -275,7 +275,7 @@ flowchart TD
 **Step-by-step:**
 
 1. **CLI Ingestion**: `postfilter_cli.py` invokes `setup_file_logger("processing.log")` and parses parameters, including `--filters` list and corridor constraints.
-2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory via `load_clean_cohort(require_metrics=True)` and sets the index to `flight_id` for efficient in-place updates. **Legacy columns** (`velocity_pass`, `velocity_reject_reason`, `coordinate_velocity_pass`, `coordinate_velocity_reject_reason`) are automatically dropped if present, then the 8 new split-axis pass/reason columns and their respective scalar metric columns (`metric_max_horiz_vel`, etc.) are added as `pd.NA` where missing.
+2. **Registry Load & Preparation**: The orchestrator `run_postfilters()` loads the entire `GLOBAL_CLEAN_REGISTRY` into memory via `load_clean_cohort(require_metrics=True)` and sets the index to `flight_id` for efficient in-place updates. `_LEGACY_VELOCITY_COLS` (list[str]: `velocity_pass`, `velocity_reject_reason`, `coordinate_velocity_pass`, `coordinate_velocity_reject_reason`, `distance_pass`, `distance_reject_reason`) are automatically dropped if present, then the 8 new split-axis pass/reason columns and their respective scalar metric columns (`metric_max_horiz_vel`, etc.) are added as `pd.NA` where missing.
 3. **Target Scope & Overwrite Logic**: For each target flight:
    - If `--overwrite` is specified, it is processed unconditionally.
    - If `--overwrite` is not specified, the flight is processed if any required scalar metric columns are `pd.NA`.

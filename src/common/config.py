@@ -270,10 +270,13 @@ METRIC_COL_DEP_HORIZ_DIST: str      = "metric_dep_horiz_dist_m"
 METRIC_COL_DEP_VERT_DIST: str       = "metric_dep_vert_dist_m"
 METRIC_COL_ARR_HORIZ_DIST: str      = "metric_arr_horiz_dist_m"
 METRIC_COL_ARR_VERT_DIST: str       = "metric_arr_vert_dist_m"
-# Legacy column names (written by the old 3-D combined velocity filters — now dropped from registry)
+# Legacy column names dropped from the quality registry on every _load_registry call
 _LEGACY_VELOCITY_COLS: list[str] = [
+    # Old 3-D combined velocity filters (pre-axis-split)
     "velocity_pass", "velocity_reject_reason",
     "coordinate_velocity_pass", "coordinate_velocity_reject_reason",
+    # Old single combined distance filter (superseded by 4 per-axis flags)
+    "distance_pass", "distance_reject_reason",
 ]
 
 # Flag to force a re-computation of airport distance metrics before filtering

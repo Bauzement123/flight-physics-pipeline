@@ -223,7 +223,7 @@ python -m src.core.corridor.corridor_clustering_cli `
 | `--ranks` | `int list` | *None* | Specific route volume ranks to process (e.g. `--ranks 1 2 5`). |
 | `--rank-range` | `int int` | *None* | Inclusive range of ranks to process (e.g. `--rank-range 1 50`). |
 | `--routes` | `str list` | *None* | Explicit corridor route strings to process (e.g. `--routes LEPA-LEBL EGLL-EGCC`). |
-| `--require-pass` | `str list` | `all seven` | Registry check filters that must be True (`velocity`, `coordinate_velocity`, `acceleration`, `dep_horiz_dist`, `dep_vert_dist`, `arr_horiz_dist`, `arr_vert_dist`). |
+| `--require-pass` | `str list` | `all nine` | Registry check filters that must be True (`horiz_velocity`, `vert_velocity`, `coord_horiz_velocity`, `coord_vert_velocity`, `acceleration`, `dep_horiz_dist`, `dep_vert_dist`, `arr_horiz_dist`, `arr_vert_dist`). |
 | `--threads-per-worker` | `int` | `2` | Number of threads for CPU BLAS operations per process worker. |
 | `--max-workers` | `int` | *None* | Maximum parallel worker processes (defaults to `CPU count // threads_per_worker`). |
 | `--overwrite` | `flag` | `False` | Overwrites existing corridor templates and registry mapping. |

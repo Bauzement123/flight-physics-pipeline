@@ -109,7 +109,9 @@ def run_corridor_clustering(
     t_start = time.perf_counter()
 
     if require_pass is None:
-        require_pass = ["velocity", "coordinate_velocity", "acceleration",
+        require_pass = ["horiz_velocity", "vert_velocity",
+                        "coord_horiz_velocity", "coord_vert_velocity",
+                        "acceleration",
                         "dep_horiz_dist", "dep_vert_dist", "arr_horiz_dist", "arr_vert_dist"]
 
     # 1. Load target routes
