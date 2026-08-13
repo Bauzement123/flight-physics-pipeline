@@ -20,7 +20,7 @@ from src.common.exceptions import RetryError
 
 logger = logging.getLogger(__name__)
 
-_ROUTE_ID_RE = re.compile(r'^([A-Z0-9]+)-([A-Z0-9]+)$')
+_ROUTE_ID_RE = re.compile(r'^([A-Z]{4})-([A-Z]{4})$')
 
 
 def to_registry_path(path: "Path | str", base: "Path" = None) -> str:

@@ -69,14 +69,20 @@ def main():
 
     logger.info(f"Total flights loaded for evaluation: {len(df)}")
 
-    # Extract route from the flight_id (e.g. EDDF-LIRF_20240101_... -> EDDF-LIRF)
-    df["route"] = df["flight_id"].apply(lambda fid: str(fid).split("_")[0])
+    # Extract route from flight_id — format is {icao24}_{callsign}_{DEP}-{ARR}_{timestamp}
+    # We scan all underscore-delimited segments to find the one that is a valid DEP-ARR pair.
+    def _extract_route(fid: str) -> str:
+        for part in str(fid).split("_"):
+            dep, arr = split_route_string(part)
+            if dep != "UNK":
+                return part
+        return str(fid)  # fallback: return raw fid (will surface as UNK in groupby)
 
-    # Ensure canonical route exists
-    def _to_canonical(r):
+    def _to_canonical(r: str) -> str:
         dep, arr = split_route_string(r)
         return "-".join(sorted([dep, arr])) if dep != 'UNK' and arr != 'UNK' else r
 
+    df["route"] = df["flight_id"].apply(_extract_route)
     df["canonical_route"] = df["route"].apply(_to_canonical)
 
     # 2. Fetch Active Config Limits
