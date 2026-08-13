@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _ROUTE_ID_RE = re.compile(r'^([A-Z]{4})-([A-Z]{4})$')
 
 
+
 def to_registry_path(path: "Path | str", base: "Path" = None) -> str:
     """
     Computes a portable POSIX relative path from base to path,
@@ -302,6 +303,7 @@ def split_route_string(route_str: str) -> tuple[str, str]:
     if m:
         return m.group(1), m.group(2)
     return 'UNK', 'UNK'
+
 
 
 def extract_route_id_from_path(path) -> str:

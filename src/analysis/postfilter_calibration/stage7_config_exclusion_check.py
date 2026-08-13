@@ -21,6 +21,7 @@ from src.common.config import (
     METRIC_COL_ARR_VERT_DIST
 )
 from src.common.utils import setup_file_logger, split_route_string
+from src.core.fetching.helpers import parse_flight_id_components
 
 logger = logging.getLogger(__name__)
 
@@ -69,22 +70,18 @@ def main():
 
     logger.info(f"Total flights loaded for evaluation: {len(df)}")
 
-    # Extract route from flight_id — format is {icao24}_{callsign}_{DEP}-{ARR}_{timestamp}
-    # We scan all underscore-delimited segments to find the one that is a valid DEP-ARR pair.
+    # Extract route from flight_id using the canonical parser (right-indexed, robust to
+    # callsigns with underscores). Format: {icao24}_{callsign}_{DEP}-{ARR}_{YYYYMMDD}_{HHMM}
     def _extract_route(fid: str) -> str:
-        for part in str(fid).split("_"):
-            dep, arr = split_route_string(part)
-            if dep != "UNK":
-                return part
-        return str(fid)  # fallback: return raw fid (will surface as UNK in groupby)
+        parsed = parse_flight_id_components(fid)
+        if parsed:
+            return f"{parsed['estdepartureairport']}-{parsed['estarrivalairport']}"
+        return str(fid)  # fallback: surfaces as UNK in groupby
 
     def _to_canonical(r: str) -> str:
+        """Bidirectional normalisation: EGLL-EDDF and EDDF-EGLL → EDDF-EGLL."""
         dep, arr = split_route_string(r)
-        if dep != 'UNK' and arr != 'UNK':
-            # Reduce to 2-letter ICAO country/region prefix for macro-level grouping
-            # e.g. EDDF-EGLL → ED-EG, EBBR-LEMD → BE-LE (sorted alphabetically)
-            return "-".join(sorted([dep[:2], arr[:2]]))
-        return r
+        return "-".join(sorted([dep, arr])) if dep != 'UNK' and arr != 'UNK' else r
 
     df["route"] = df["flight_id"].apply(_extract_route)
     df["canonical_route"] = df["route"].apply(_to_canonical)
