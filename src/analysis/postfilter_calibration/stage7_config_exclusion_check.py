@@ -80,7 +80,11 @@ def main():
 
     def _to_canonical(r: str) -> str:
         dep, arr = split_route_string(r)
-        return "-".join(sorted([dep, arr])) if dep != 'UNK' and arr != 'UNK' else r
+        if dep != 'UNK' and arr != 'UNK':
+            # Reduce to 2-letter ICAO country/region prefix for macro-level grouping
+            # e.g. EDDF-EGLL → ED-EG, EBBR-LEMD → BE-LE (sorted alphabetically)
+            return "-".join(sorted([dep[:2], arr[:2]]))
+        return r
 
     df["route"] = df["flight_id"].apply(_extract_route)
     df["canonical_route"] = df["route"].apply(_to_canonical)
