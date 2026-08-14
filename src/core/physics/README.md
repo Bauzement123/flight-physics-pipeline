@@ -116,21 +116,21 @@ Module Objective: Efficient, Thread-Safe Physics & Contrail Simulation across Fl
 
 ```mermaid
 flowchart TD
-    A["CLI Entrypoint (cli.py)"] -->|Parse Args & Filter Ranks| B["Orchestrator (orchestrator.py)"]
-    B -->|Query Cohort Date| C["read_master_flights()"]
-    C -->|Return Cohort DataFrame| D["Slot 1: generate_flightlist()"]
-    D -->|Candidate SimTasks| E["Compute Task ERA5 Window"]
-    E -->|Check Cache / Fetch NC| F["_populate_hour_cache()"]
-    F -->|MetDataset (met, rad)| G["Slot 2: filter_and_batch()"]
-    G -->|Query Lake Skip-Gate| H{"Already Simulated?"}
-    H -->|Yes & overwrite=False| I["Skip Task"]
-    H -->|No OR overwrite=True| J["Group Tasks into Batches"]
-    J -->|Partitioned Batches| K["engine.run_parallel()"]
-    K -->|ThreadPool Workers| L["worker.run_batch()"]
-    L -->|List WorkerResult| M["Slot 5: evaluate()"]
-    M -->|EvalResult| N["Log Day Progress"]
-    N -->|Post-Day Cleanup| O["vacuum_sim_lake()"]
-    O -->|Next Day| B
+    A["CLI Entrypoint (cli.py)"] -->|"Parse Args & Filter Ranks"| B["Orchestrator (orchestrator.py)"]
+    B -->|"Query Cohort Date"| C["read_master_flights()"]
+    C -->|"Return Cohort DataFrame"| D["Slot 1: generate_flightlist()"]
+    D -->|"Candidate SimTasks"| E["Compute Task ERA5 Window"]
+    E -->|"Check Cache / Fetch NC"| F["_populate_hour_cache()"]
+    F -->|"MetDataset (met, rad)"| G["Slot 2: filter_and_batch()"]
+    G -->|"Query Lake Skip-Gate"| H{"Already Simulated?"}
+    H -->|"Yes & overwrite=False"| I["Skip Task"]
+    H -->|"No OR overwrite=True"| J["Group Tasks into Batches"]
+    J -->|"Partitioned Batches"| K["engine.run_parallel()"]
+    K -->|"ThreadPool Workers"| L["worker.run_batch()"]
+    L -->|"List WorkerResult"| M["Slot 5: evaluate()"]
+    M -->|"EvalResult"| N["Log Day Progress"]
+    N -->|"Post-Day Cleanup"| O["vacuum_sim_lake()"]
+    O -->|"Next Day"| B
 ```
 
 #### Step-by-Step Description:
@@ -156,17 +156,17 @@ flowchart TD
 flowchart TD
     A["Batch of SimTasks (Same Route & Cluster)"] --> B["worker.run_batch()"]
     B --> C["Instantiate Loader & Models"]
-    C -->|get_loader / get_model| D["Phase 1: Load Trajectories"]
+    C -->|"get_loader / get_model"| D["Phase 1: Load Trajectories"]
     D --> E{"Validate Task"}
-    E -->|Missing File or Typecode Invalid| F["Record WorkerResult status=fail, EF=0.0"]
-    E -->|Valid| G["Time-Shift Waypoints to firstseen -> pycontrails.Flight"]
+    E -->|"Missing File or Typecode Invalid"| F["Record WorkerResult status=fail, EF=0.0"]
+    E -->|"Valid"| G["Time-Shift Waypoints to firstseen -> pycontrails.Flight"]
     G --> H["Phase 2: Vectorized Evaluation"]
     H --> I{"ps_model.eval() + cocip_model.eval()"}
-    I -->|Success| J["Extract EF (np.nansum) -> status=success"]
-    I -->|Exception Caught| K["Sequential Fallback Loop"]
+    I -->|"Success"| J["Extract EF (np.nansum) -> status=success"]
+    I -->|"Exception Caught"| K["Sequential Fallback Loop"]
     K --> L{"Per-Flight Eval"}
-    L -->|Success| M["Extract EF -> status=success"]
-    L -->|Fail| N["Log skipped_aircraft.log -> status=fail, EF=0.0"]
+    L -->|"Success"| M["Extract EF -> status=success"]
+    L -->|"Fail"| N["Log skipped_aircraft.log -> status=fail, EF=0.0"]
     J --> O["Phase 3: Delta Lake Writer"]
     F --> O
     M --> O
