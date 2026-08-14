@@ -108,7 +108,7 @@ def _build_kerosene(
         "effective_vertical_resolution": 2000.0,
         "filter_sac": True,
         "filter_initially_persistent": True,
-        "min_altitude_m": 6000.0,
+        "min_altitude_m": 5000.0,
         "max_altitude_m": 13000.0,
         "max_seg_length_m": 40000.0,
     }
