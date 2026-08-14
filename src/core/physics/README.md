@@ -5,7 +5,7 @@
 The `src/core/physics` module implements the high-performance, slotted contrail simulation engine for the Flight Physics Pipeline. Built on top of the [`pycontrails`](https://pycontrails.org/) framework (utilising standard `PSFlight` performance models and `Cocip` contrail evolution models), this module evaluates total energy forcing ($\text{EF}$ in Joules) and contrail persistence across thousands of historical commercial flights operating over Europe.
 
 The engine features a **5-Slot architecture** decoupled from data storage, model selection, and execution orchestration:
-1. **Slot 1 (Task Generation)**: Builds uniform `SimTask` dataclass items from raw flight cohorts.
+1. **Slot 1 (Flight List Generation)**: Builds uniform `SimTask` dataclass items from raw flight cohorts.
 2. **Slot 2 (Task Filtering & Batching)**: Filters tasks against Delta Lake execution history (skip-gate) and groups unsimulated tasks by route corridor and cluster trajectory.
 3. **Slot 3 (Trajectory Loading)**: Loads, validates, and time-shifts representative cluster trajectories to match target flight departure timestamps.
 4. **Slot 4 (Model Instantiation & Evaluation)**: Dynamically instantiates PyContrails model pairs (`PSFlight` + `Cocip`) and runs vectorized flight evaluations with sequential per-flight fallbacks.
@@ -38,7 +38,9 @@ src/core/physics/
 │   └── ps_cocip.py                ← Kerosene PSFlight + CoCiP model builder (`get_model`)
 └── slots/                         ← Slotted pipeline step definitions
     ├── __init__.py                ← Slots package initialization
-    ├── slot1_task_gen.py          ← Slot 1: Task generation from cohort DataFrames
+    ├── slot1_flightlist_gen.py    ← Slot 1: Flight list generation from master_flights slices
+    ├── slot1_cohort_enum.py       ← Backward compatibility shim (re-exports slot1_flightlist_gen)
+    ├── slot1_task_gen.py          ← Backward compatibility shim (re-exports slot1_flightlist_gen)
     ├── slot2_batcher.py           ← Slot 2: Delta Lake skip-gate filtering & route batching
     ├── slot5_evaluator.py         ← Slot 5: Batch evaluation & result classification
     └── utils.py                   ← Pure slot helper utilities (step-down task computation)
@@ -63,11 +65,11 @@ Module Objective: Efficient, Thread-Safe Physics & Contrail Simulation across Fl
 │       ├── Output: None (writes directly to Delta Lake).
 │       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically; handles missing cohort days gracefully.
 │
-├── 3. Slot 1: Task Generation
-│   └── slot1_task_gen.generate_tasks()
-│       ├── Input: Cohort DataFrame (master_flights slice), available_clusters dictionary, default_fl.
+├── 3. Slot 1: Flight List Generation
+│   └── slot1_flightlist_gen.generate_flightlist()
+│       ├── Input: Cohort DataFrame (master_flights slice), available_clusters dictionary (CorridorCluster metadata).
 │       ├── Output: List[SimTask]
-│       └── Safety/Fallback: Skips flights without available route clusters; generates unique SimTask per (flight x cluster).
+│       └── Safety/Fallback: Skips flights without available route clusters; checks cluster.fl validity (hard skip on missing/invalid FL); generates unique SimTask per (flight x cluster).
 │
 ├── 4. Slot 2: Task Filtering & Batching (Skip-Gate)
 │   └── slot2_batcher.filter_and_batch()
@@ -116,7 +118,7 @@ Module Objective: Efficient, Thread-Safe Physics & Contrail Simulation across Fl
 flowchart TD
     A["CLI Entrypoint (cli.py)"] -->|Parse Args & Filter Ranks| B["Orchestrator (orchestrator.py)"]
     B -->|Query Cohort Date| C["read_master_flights()"]
-    C -->|Return Cohort DataFrame| D["Slot 1: generate_tasks()"]
+    C -->|Return Cohort DataFrame| D["Slot 1: generate_flightlist()"]
     D -->|Candidate SimTasks| E["Compute Task ERA5 Window"]
     E -->|Check Cache / Fetch NC| F["_populate_hour_cache()"]
     F -->|MetDataset (met, rad)| G["Slot 2: filter_and_batch()"]
@@ -135,7 +137,7 @@ flowchart TD
 
 1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, memory flags) and calls `_build_corridors_map()` to map `(route_id, cluster_id)` pairs to cluster parquet file paths from `GLOBAL_CORRIDOR_MODEL_REGISTRY`. If `--ranks` or `--lower-rank`/`--upper-rank` is provided, the mapping is filtered using `route_summary.parquet`.
 2. **Daily Cohort Query**: For each day in the date range, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC.
-3. **Task Generation (Slot 1)**: `generate_tasks()` converts cohort rows into `SimTask` dataclass items by matching route codes (`dep-arr`) against available cluster trajectories in `corridors_map`.
+3. **Flight List Generation (Slot 1)**: `generate_flightlist()` converts cohort rows into `SimTask` dataclass items by matching route codes (`dep-arr`) against available cluster trajectories in `corridors_map`.
 4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates exact hourly bounds:
    $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
    $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$
@@ -227,11 +229,12 @@ python -m src.core.physics.cli \
     --start-date 2025-01-01 \
     --end-date 2025-01-07 \
     --ranks 1,3,5 \
+    --out-dir data/results/corridor_simulations \
     --low-mem \
     --overwrite
 
 # Quick Single-Day Test Mode Run
-python -m src.core.physics.cli --test-mode
+python -m src.core.physics.cli --out-dir data/temp/test_lake --test-mode
 ```
 
 ### 5.2 PowerShell Syntax
@@ -252,11 +255,12 @@ python -m src.core.physics.cli `
     --start-date 2025-01-01 `
     --end-date 2025-01-07 `
     --ranks "1,3,5" `
+    --out-dir data/results/corridor_simulations `
     --low-mem `
     --overwrite
 
 # Quick Single-Day Test Mode Run
-python -m src.core.physics.cli --test-mode
+python -m src.core.physics.cli --out-dir data/temp/test_lake --test-mode
 ```
 
 ### 5.3 Parameter Reference Table
@@ -269,11 +273,10 @@ python -m src.core.physics.cli --test-mode
 | `--lower-rank` | `int` | `None` | Lower bound of corridor cluster rank (inclusive). Requires `--upper-rank`. |
 | `--upper-rank` | `int` | `None` | Upper bound of corridor cluster rank (inclusive). Requires `--lower-rank`. |
 | `--weather-cache` | `str` | `data/weather` | Directory containing hourly ERA5 pressure-level and surface `.nc` cache files. |
-| `--out-dir` | `str` | `data/results/corridor_simulations` | Root directory path for Delta Lake simulation storage. |
+| `--out-dir` | `str` | *Required* | Root directory path for Delta Lake simulation storage (e.g. `data/results/corridor_simulations`). |
 | `--corridors-dir` | `str` | `data/corridor_paths` | Directory containing synthesized cluster parquet trajectory files. |
 | `--max-age`, `--age` | `int` | `48` | Maximum contrail simulation and advection lifetime in hours. |
 | `--clusters-per-flight`, `-x` | `int` | `1` | Number of representative cluster trajectories sampled per flight. |
-| `--default-fl` | `float` | `350.0` | Target flight level in feet assigned to standard tasks when unassigned. |
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
 | `--sim-mode` | `str` | `'O1'` | Simulation mode: `'O1'` (standard waterfall baseline) or `'O2'` (step-down variational pass). |
 | `--model-config-id` | `str` | `'kerosene'` | Fuel/model configuration identifier passed to physics engine (`'kerosene'`). |

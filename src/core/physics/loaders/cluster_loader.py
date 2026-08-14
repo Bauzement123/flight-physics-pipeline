@@ -14,10 +14,10 @@ Extracted from: clone_simulation.py prepare_cloned_flight() L37-94
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
-from pycontrails import Flight
+from pycontrails import Flight, HydrogenFuel, JetA
 
 from src.common.config import is_supported_typecode
 from src.common.utils import log_skipped_aircraft
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Metadata columns that live in Flight.attrs, not in the waypoint dataframe.
 # Dropping them from the df avoids duplicate-column warnings in pycontrails.
 _METADATA_COLS = [
-    "flight_id", "icao24", "callsign", "typecode",
+    "flight_id", "icao24", "callsign", "typecode", "fuel",
     "firstseen", "lastseen",
     "estdepartureairport", "estarrivalairport",
     "route_class", "cluster_id",
@@ -37,7 +37,9 @@ _METADATA_COLS = [
 
 def load(
     task: SimTask,
-    corridors_map: Dict[Tuple[str, int], Path],
+    corridors_map: Dict[Tuple[str, int], Any],
+    use_hydrogen: bool = False,
+    cap_altitude: bool = False,
 ) -> Optional[Flight]:
     """Load and time-shift a K-cluster trajectory for the given SimTask.
 
@@ -50,9 +52,13 @@ def load(
     task : SimTask
         The simulation task. Uses ``dep``, ``arr``, ``cluster_id``,
         ``firstseen``, ``icao24``, ``callsign``, ``typecode``.
-    corridors_map : Dict[Tuple[str, int], Path]
-        Mapping of ``(route_key, cluster_id)`` to the cluster parquet file path.
+    corridors_map : Dict[Tuple[str, int], Any]
+        Mapping of ``(route_key, cluster_id)`` to ``CorridorCluster(path, fl)``.
         ``route_key = f"{task.dep}-{task.arr}"``.
+    use_hydrogen : bool, optional
+        If True, attach HydrogenFuel() and nvpm_ei_n emission index (default False).
+    cap_altitude : bool, optional
+        If True, clamp trajectory altitude to task.fl ceiling (default False).
 
     Returns
     -------
@@ -66,13 +72,15 @@ def load(
     sim_fid = task.to_sim_fid()
 
     # --- Resolve cluster file path ---
-    corridor_path = corridors_map.get((route_key, task.cluster_id))
-    if corridor_path is None:
+    corridor_entry = corridors_map.get((route_key, task.cluster_id))
+    if corridor_entry is None:
         logger.warning(
             "No cluster file for route=%s cluster_id=%d — skipping %s.",
             route_key, task.cluster_id, sim_fid,
         )
         return None
+
+    corridor_path = corridor_entry.path if hasattr(corridor_entry, "path") else corridor_entry
 
     # --- Load base trajectory ---
     df_base = _read_cluster_parquet(corridor_path, sim_fid)
@@ -89,6 +97,10 @@ def load(
 
     # --- Time-shift waypoints ---
     df_cloned = _time_shift(df_base, task.firstseen)
+
+    # --- Apply altitude cap if requested ---
+    if cap_altitude:
+        df_cloned = _apply_altitude_cap(df_cloned, task.fl)
 
     # --- Build Flight attrs ---
     attrs = {
@@ -108,12 +120,29 @@ def load(
         errors="ignore",
     )
 
-    return Flight(data=df_cloned, drop_duplicated_times=True, crs="EPSG:4326", **attrs)
+    fuel_obj = HydrogenFuel() if use_hydrogen else JetA()
+    nvpm_kwargs = {"nvpm_ei_n": 2.76e13} if use_hydrogen else {}
+
+    flight = Flight(data=df_cloned, fuel=fuel_obj, drop_duplicated_times=True, crs="EPSG:4326", **attrs, **nvpm_kwargs)
+    flight.attrs["fuel"] = "hydrogen" if use_hydrogen else "kerosene"
+    return flight
 
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _apply_altitude_cap(df: pd.DataFrame, fl_ft: float) -> pd.DataFrame:
+    """Clamp trajectory altitude column to the given flight level ceiling.
+
+    Current behaviour: hard clip (constant ceiling).
+    # TODO: replace with smooth profile (e.g. Gaussian descent towards cap)
+    """
+    fl_m = fl_ft * 100 * 0.3048
+    df = df.copy()
+    if "altitude" in df.columns:
+        df["altitude"] = df["altitude"].clip(upper=fl_m)
+    return df
 
 def _read_cluster_parquet(path: Path, sim_fid: str) -> Optional[pd.DataFrame]:
     """Read cluster parquet and return the first flight's DataFrame, or None."""

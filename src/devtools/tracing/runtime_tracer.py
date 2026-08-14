@@ -1,9 +1,9 @@
 """
 Runtime Dynamic Tracer Devtool
 
-Uses sys.settrace to record real-time function calls scoped strictly to
-repository-owned code under src/. External libraries (pandas, numpy, pycontrails, etc.)
-are not traced.
+Uses sys.settrace to record real-time function calls scoped to repository-owned
+code under src/ and physics engine internals in pycontrails. Other external
+libraries (pandas, numpy, scipy, etc.) are not traced.
 
 Features:
   - Each start_tracing() call produces a unique timestamped log file in data/traces/.
@@ -15,7 +15,7 @@ Features:
   - stop_tracing() restores the original ProcessPoolExecutor.__init__ fully.
 
 Usage:
-    from src.devtools.runtime_tracer import start_tracing, stop_tracing
+    from src.devtools.tracing.runtime_tracer import start_tracing, stop_tracing
 
     start_tracing()               # auto log to data/traces/runtime_trace_YYYYMMDD_HHMMSS.log
     start_tracing("my/path.log")  # explicit path
@@ -32,6 +32,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+def _format_path(filename: str) -> str:
+    """Format path relative to current working dir, falling back gracefully across drives."""
+    try:
+        return os.path.relpath(filename)
+    except ValueError:
+        return filename
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +66,9 @@ def _worker_trace_init(session_id: str, log_dir_str: str) -> None:
     def _worker_callback(frame, event, arg):
         code = frame.f_code
         filename = os.path.normpath(code.co_filename)
-        if "src" not in filename or "site-packages" in filename:
+        is_src = "src" in filename and "devtools" not in filename and "site-packages" not in filename
+        is_pycontrails = "pycontrails" in filename
+        if not (is_src or is_pycontrails):
             return _worker_callback
 
         if event == "call":
@@ -75,7 +85,7 @@ def _worker_trace_init(session_id: str, log_dir_str: str) -> None:
             line = (
                 f"[PID={pid}][{ts}] {indent}"
                 f"CALL {code.co_name}({', '.join(arg_parts)})"
-                f" @ {os.path.relpath(filename)}:{frame.f_lineno}\n"
+                f" @ {_format_path(filename)}:{frame.f_lineno}\n"
             )
             frag_handle.write(line)
             frag_handle.flush()
@@ -177,8 +187,10 @@ class RuntimeTracer:
         code = frame.f_code
         filename = os.path.normpath(code.co_filename)
 
-        # Scope filter: only repository code, exclude this devtool itself
-        if "src" not in filename or "site-packages" in filename or "devtools" in filename:
+        # Scope filter: repository code (excluding devtools) and pycontrails internals
+        is_src = "src" in filename and "devtools" not in filename and "site-packages" not in filename
+        is_pycontrails = "pycontrails" in filename
+        if not (is_src or is_pycontrails):
             return self._main_callback
 
         if event == "call":
@@ -195,7 +207,7 @@ class RuntimeTracer:
             line = (
                 f"[MAIN][{ts}] {indent}"
                 f"CALL {code.co_name}({', '.join(arg_parts)})"
-                f" @ {os.path.relpath(filename)}:{frame.f_lineno}"
+                f" @ {_format_path(filename)}:{frame.f_lineno}"
             )
             self._emit(line)
 

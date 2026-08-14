@@ -1,6 +1,18 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional
 import pandas as pd
+
+
+@dataclass
+class CorridorCluster:
+    """Canonical corridor cluster metadata for physics simulation.
+
+    Stores the resolved absolute path to the cluster parquet file and its
+    calibrated flight level (FL) read directly from the corridor model registry.
+    """
+    path: Path
+    fl: float
 
 
 @dataclass
@@ -29,6 +41,7 @@ class SimResultQuery:
     ef_gt: Optional[float] = None
     fl_lte: Optional[float] = None
     model_config_id: Optional[str] = None
+    fuel: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,9 +68,12 @@ class SimTask:
 
     def to_sim_fid(self) -> str:
         """Construct the canonical SIM_FID string from task components."""
-        fs_str = pd.Timestamp(self.firstseen, unit="s", tz="UTC").strftime("%Y%m%d")
+        import re
+        fs_dt = pd.Timestamp(self.firstseen, unit="s", tz="UTC")
+        fs_str = fs_dt.strftime("%Y%m%d_%H%M")
+        clean_cs = re.sub(r"[^A-Z0-9]", "", (self.callsign or "").upper())
         return (
-            f"{self.icao24}_{self.callsign}_{self.dep}-{self.arr}"
+            f"{self.icao24}_{clean_cs}_{self.dep}-{self.arr}"
             f"_{fs_str}_{self.cluster_id}_{int(self.fl)}"
         )
 

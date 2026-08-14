@@ -129,6 +129,7 @@ def merge_postfilter_lake(
     )
     return matched
 
+
 def read_master_flights(
     query: Optional[MasterFlightQuery] = None,
     columns: Optional[List[str]] = None,
@@ -138,8 +139,7 @@ def read_master_flights(
     Column names match the actual master_flights schema:
     - date filtering uses ``firstseen`` (epoch seconds).
     - airport filtering uses ``estdepartureairport`` / ``estarrivalairport``.
-    - route filtering expects a pre-built ``"{dep}-{arr}"`` string column if present,
-      otherwise falls back to individual airport filters.
+    - exact route filtering uses OR-chained (dep == X & arr == Y) expressions.
 
     Returns a pandas DataFrame. Raises FileNotFoundError if MASTER_FLIGHTS_FILE
     does not exist.
@@ -165,12 +165,27 @@ def read_master_flights(
             exprs.append(ds.field("estdepartureairport").isin(query.dep_airports))
         if query.arr_airports:
             exprs.append(ds.field("estarrivalairport").isin(query.arr_airports))
+        if query.routes:
+            pair_exprs = []
+            for r in query.routes:
+                if "-" in r:
+                    dep, arr = r.split("-", 1)
+                    pair_exprs.append(
+                        (ds.field("estdepartureairport") == dep)
+                        & (ds.field("estarrivalairport") == arr)
+                    )
+            if pair_exprs:
+                route_filter = pair_exprs[0]
+                for p_expr in pair_exprs[1:]:
+                    route_filter = route_filter | p_expr
+                exprs.append(route_filter)
 
     combined = exprs[0] if exprs else None
     for e in exprs[1:]:
         combined = combined & e
 
     return dataset.to_table(filter=combined, columns=columns).to_pandas()
+
 
 def read_route_summary(
     query: Optional[RouteSummaryQuery] = None,
@@ -200,31 +215,43 @@ def read_route_summary(
 
     return dataset.to_table(filter=combined, columns=columns).to_pandas()
 
+
+_STR_METADATA_COLS = [
+    "SIM_FID", "model_config_id", "fuel", "route", "icao24", "callsign", "typecode"
+]
+
+
 def read_sim_lake(lake_path: str | Path, query: SimResultQuery) -> pd.DataFrame:
-    """Reads the simulation Delta Lake based on the provided query."""
+    """Reads the simulation Delta Lake based on the provided query.
+
+    Returns full per-waypoint trajectory records. Callers requiring flight-level
+    metadata only may drop duplicates on ``SIM_FID``.
+    """
     path_str = str(lake_path)
     if not Path(path_str).exists():
         raise FileNotFoundError(f"Delta lake not found at {path_str}")
-        
+
     try:
         dt = DeltaTable(path_str)
     except Exception as e:
         raise FileNotFoundError(f"Delta lake not found at {path_str}: {e}")
-        
+
     filters = []
     if query.sim_fids:
         filters.append(ds.field("SIM_FID").isin(query.sim_fids))
     if query.routes:
         filters.append(ds.field("route").isin(query.routes))
     if query.ef_gt is not None:
-        filters.append(ds.field("EF") > query.ef_gt)
+        filters.append(ds.field("EF_total") > query.ef_gt)
     if query.fl_lte is not None:
         filters.append(ds.field("FL") <= query.fl_lte)
     if query.model_config_id is not None:
         filters.append(ds.field("model_config_id") == query.model_config_id)
-        
+    if query.fuel is not None:
+        filters.append(ds.field("fuel") == query.fuel)
+
     pyarrow_ds = dt.to_pyarrow_dataset()
-    
+
     if not filters:
         df = pyarrow_ds.to_table().to_pandas()
     else:
@@ -232,56 +259,75 @@ def read_sim_lake(lake_path: str | Path, query: SimResultQuery) -> pd.DataFrame:
         for f in filters[1:]:
             combined_filter = combined_filter & f
         df = pyarrow_ds.to_table(filter=combined_filter).to_pandas()
-        
+
     return df
 
+
 def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = False) -> None:
-    """Upsert (or overwrite) a DataFrame into the simulation Delta Lake on (SIM_FID, model_config_id).
+    """Upsert (or overwrite) a trajectory DataFrame into the simulation Delta Lake.
 
     Normal mode (overwrite=False)
     ------------------------------
-    MERGE on (SIM_FID, model_config_id):
-    - matched rows are updated in-place
-    - unmatched rows are inserted
-    Guarantees no duplicates for clean lakes.
+    - Deduplicates incoming data on ``(SIM_FID, time)`` with ``keep='last'``.
+    - If incoming DataFrame introduces new physics columns not yet in the Delta schema,
+      falls back to delete-then-append with ``schema_mode='merge'`` to allow schema evolution.
+    - Otherwise, performs atomic MERGE on ``(SIM_FID, model_config_id, time)``.
 
     Overwrite mode (overwrite=True)
     ---------------------------------
-    DELETE all existing rows whose SIM_FID is in the incoming batch, then
-    INSERT the fresh rows via append.  This handles dirty lakes that already
-    contain duplicate SIM_FIDs from a previous failed run.
+    - DELETE all existing rows matching incoming ``SIM_FID``s, then INSERT fresh rows
+      via append with ``schema_mode='merge'`` to guarantee clean trajectory replacement
+      without leaving orphaned waypoints.
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         raise TypeError("df must be a non-empty pandas DataFrame.")
 
+    # 1. Pre-deduplicate on (SIM_FID, time) with keep='last'
+    df = df.drop_duplicates(subset=["SIM_FID", "time"], keep="last")
+
+    # 2. Convert any timedelta64 columns to float seconds (Delta Lake does not support Duration type)
+    for col in df.select_dtypes(include=["timedelta64", "timedelta"]).columns:
+        df[col] = df[col].dt.total_seconds()
+
+    # 3. Strict typecasting for known metadata string columns to avoid string_view issues
+    for col in _STR_METADATA_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
     path_str = str(lake_path)
 
     if not Path(path_str).exists():
-        write_deltalake(path_str, df, mode="overwrite")
-        logger.info("Created Delta Lake with %d row(s) at %s", len(df), lake_path)
+        write_deltalake(path_str, df, mode="overwrite", schema_mode="merge")
+        logger.info("Created Delta Lake with %d waypoint row(s) at %s", len(df), lake_path)
         return
 
     try:
         dt = DeltaTable(path_str)
     except Exception:
-        write_deltalake(path_str, df, mode="overwrite")
-        logger.info("Re-created Delta Lake with %d row(s) at %s", len(df), lake_path)
+        write_deltalake(path_str, df, mode="overwrite", schema_mode="merge")
+        logger.info("Re-created Delta Lake with %d waypoint row(s) at %s", len(df), lake_path)
         return
 
-    if overwrite:
-        # Build an IN-list predicate and delete all matching rows first
-        fids = df["SIM_FID"].tolist()
+    existing_cols = set(dt.schema().to_arrow().names)
+    has_new_cols = bool(set(df.columns) - existing_cols)
+
+    if overwrite or has_new_cols:
+        fids = df["SIM_FID"].unique().tolist()
         quoted = ", ".join(f"'{f}'" for f in fids)
         dt.delete(f"SIM_FID IN ({quoted})")
-        write_deltalake(path_str, df, mode="append")
-        logger.info("Overwrote %d row(s) in Delta Lake at %s", len(df), lake_path)
+        write_deltalake(path_str, df, mode="append", schema_mode="merge")
+        logger.info(
+            "%s %d waypoint row(s) in Delta Lake at %s (schema evolution=%s)",
+            "Overwrote" if overwrite else "Appended", len(df), lake_path, has_new_cols,
+        )
     else:
         (
             dt.merge(
                 source=df,
                 predicate=(
                     "target.SIM_FID = source.SIM_FID "
-                    "AND target.model_config_id = source.model_config_id"
+                    "AND target.model_config_id = source.model_config_id "
+                    "AND target.time = source.time"
                 ),
                 source_alias="source",
                 target_alias="target",
@@ -290,51 +336,62 @@ def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = F
             .when_not_matched_insert_all()
             .execute()
         )
-        logger.info("Upserted %d row(s) into Delta Lake at %s", len(df), lake_path)
+        logger.info("Upserted %d waypoint row(s) into Delta Lake at %s", len(df), lake_path)
 
-def sim_fid_exists(lake_path: str | Path, sim_fid: str) -> bool:
-    """Checks if a SIM_FID exists in the Delta Lake without loading all columns."""
+
+def read_existing_sim_fids(
+    lake_path: str | Path,
+    routes: Optional[List[str]] = None,
+    dep_date: Optional[int] = None,
+) -> frozenset[str]:
+    """Bulk-read existing SIM_FIDs from the Delta Lake for the given routes/dep_date.
+
+    Scans the lake using predicate pushdown and returns a frozenset of unique
+    ``SIM_FID`` strings. Used by Slot 2 to filter out already simulated tasks
+    in O(1) time before batch formation.
+    """
     path_str = str(lake_path)
     if not Path(path_str).exists():
-        return False
-        
+        return frozenset()
+
     try:
         dt = DeltaTable(path_str)
     except Exception:
-        return False
-        
+        return frozenset()
+
+    filters = []
+    if routes:
+        filters.append(ds.field("route").isin(routes))
+    if dep_date is not None:
+        filters.append(ds.field("dep_date") == dep_date)
+
+    combined = None
+    if filters:
+        combined = filters[0]
+        for f in filters[1:]:
+            combined = combined & f
+
     pyarrow_ds = dt.to_pyarrow_dataset()
-    filter_expr = ds.field("SIM_FID") == sim_fid
-    
-    table = pyarrow_ds.to_table(columns=["SIM_FID"], filter=filter_expr)
-    return len(table) > 0
+    try:
+        if combined is not None:
+            table = pyarrow_ds.to_table(columns=["SIM_FID"], filter=combined)
+        else:
+            table = pyarrow_ds.to_table(columns=["SIM_FID"])
+    except Exception as exc:
+        logger.warning("read_existing_sim_fids failed scan for %s: %s", lake_path, exc)
+        return frozenset()
+
+    df = table.to_pandas()
+    if df.empty:
+        return frozenset()
+    return frozenset(df["SIM_FID"].unique())
 
 
 def vacuum_sim_lake(
     lake_path: Path,
     retention_hours: int = 168,
 ) -> None:
-    """Run Delta Lake VACUUM to remove orphaned data files beyond the retention window.
-
-    Should be called once per day after all batches for that day complete,
-    before loading the next day's weather. Without periodic vacuuming, old
-    intermediate parquet files accumulate indefinitely even when no longer
-    referenced by the transaction log.
-
-    Parameters
-    ----------
-    lake_path : Path
-        Path to the simulation Delta Lake directory.
-    retention_hours : int, optional
-        Files older than this many hours are eligible for deletion.
-        Default is 168 (7 days) — the Delta Lake standard retention window.
-
-    Notes
-    -----
-    If the lake does not yet exist this function is a no-op (logs INFO and returns).
-    Any vacuum error is logged at WARNING level and swallowed so that the daily
-    cleanup step never aborts the overall run.
-    """
+    """Run Delta Lake VACUUM to remove orphaned data files beyond the retention window."""
     path_str = str(lake_path)
     if not Path(path_str).exists():
         logger.info("vacuum_sim_lake: lake not yet created at %s — skipping.", lake_path)
@@ -349,3 +406,117 @@ def vacuum_sim_lake(
         )
     except Exception as exc:
         logger.warning("vacuum_sim_lake failed for %s: %s — continuing.", lake_path, exc)
+
+
+def optimize_sim_lake(
+    lake_path: Path,
+    z_order_cols: Optional[List[str]] = None,
+) -> None:
+    """Run Delta Lake compaction and Z-ordering on the simulation lake.
+
+    Parameters
+    ----------
+    lake_path : Path
+        Path to the simulation Delta Lake directory.
+    z_order_cols : list[str], optional
+        Columns to Z-order on. Default is ``["dep_date", "route", "EF_total"]``.
+    """
+    path_str = str(lake_path)
+    if not Path(path_str).exists():
+        return
+
+    if z_order_cols is None:
+        z_order_cols = ["dep_date", "route", "EF_total"]
+
+    try:
+        dt = DeltaTable(path_str)
+        # Step 1: Compact small per-batch parquet files into larger chunks
+        dt.optimize.compact()
+        # Step 2: Z-order data on key query columns for fast skipping
+        dt.optimize.z_order(z_order_cols)
+        logger.info("optimize_sim_lake: compacted and Z-ordered %s on %s", lake_path, z_order_cols)
+    except Exception as exc:
+        logger.warning("optimize_sim_lake failed for %s: %s — continuing.", lake_path, exc)
+
+
+def read_ef_by_base_key(
+    lake_path: Path,
+    base_keys: "set[str]",
+    model_config_id: Optional[str] = None,
+    routes: Optional[List[str]] = None,
+    dep_dates: Optional[List[int]] = None,
+) -> "dict[str, list[tuple[float, float]]]":
+    """Batch-read EF_total and FL for all SIM_FIDs matching the given base keys.
+
+    Parameters
+    ----------
+    lake_path : Path
+        Root directory of the simulation Delta Lake.
+    base_keys : set[str]
+        Set of base key strings to query.
+    model_config_id : str, optional
+        If provided, filter to rows with this model_config_id.
+    routes : list[str], optional
+        Route strings to push down for Z-order scanning.
+    dep_dates : list[int], optional
+        Departure date integers (YYYYMMDD) to push down for Z-order scanning.
+
+    Returns
+    -------
+    dict[str, list[tuple[float, float]]]
+        Mapping of ``base_key → [(fl, ef_total), ...]``.
+    """
+    path_str = str(lake_path)
+    if not Path(path_str).exists():
+        return {}
+
+    try:
+        dt = DeltaTable(path_str)
+    except Exception:
+        return {}
+
+    pyarrow_ds = dt.to_pyarrow_dataset()
+
+    filters = []
+    if model_config_id is not None:
+        filters.append(ds.field("model_config_id") == model_config_id)
+    if routes:
+        filters.append(ds.field("route").isin(routes))
+    if dep_dates:
+        filters.append(ds.field("dep_date").isin(dep_dates))
+
+    combined = None
+    if filters:
+        combined = filters[0]
+        for f in filters[1:]:
+            combined = combined & f
+
+    try:
+        if combined is not None:
+            table = pyarrow_ds.to_table(columns=["SIM_FID", "FL", "EF_total"], filter=combined)
+        else:
+            table = pyarrow_ds.to_table(columns=["SIM_FID", "FL", "EF_total"])
+    except Exception as exc:
+        logger.warning("read_ef_by_base_key failed to scan %s: %s", lake_path, exc)
+        return {}
+
+    df = table.to_pandas()
+    if df.empty:
+        return {}
+
+    # Deduplicate by SIM_FID to obtain 1 row per flight simulation
+    df = df.drop_duplicates(subset=["SIM_FID"])
+
+    # Derive base key from SIM_FID by stripping the last "_<FL>" segment
+    df["base_key"] = df["SIM_FID"].str.rsplit("_", n=1).str[0]
+
+    # Keep only rows whose base_key is in the requested set
+    df = df[df["base_key"].isin(base_keys)]
+
+    result: dict[str, list[tuple[float, float]]] = {}
+    for row in df.itertuples(index=False):
+        key = row.base_key
+        result.setdefault(key, []).append((float(row.FL), float(row.EF_total)))
+
+    return result
+

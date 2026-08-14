@@ -18,7 +18,7 @@ setup_file_logger() is called once in the orchestrator entrypoint only.
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,7 +29,7 @@ from src.common.utils import log_skipped_aircraft
 from src.core.physics.loaders import get_loader
 from src.core.physics.models.ps_cocip import get_model
 from src.data_manager.io_utils import append_sim_lake
-from src.data_manager.schemas import SimTask, WorkerResult
+from src.data_manager.schemas import CorridorCluster, SimTask, WorkerResult
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +41,15 @@ _LAKE_WRITE_LOCK = threading.Lock()
 
 def run_batch(
     batch: List[SimTask],
-    corridors_map: Dict[Tuple[str, int], Path],
+    corridors_map: Dict[Tuple[str, int], Any],
     model_config_id: str,
     sim_mode: str,
     lake_path: Path,
     met: MetDataset,
     rad: MetDataset,
     max_age_hours: int,
+    fuel: str = "kerosene",
+    cap_altitude: bool = False,
     low_mem: bool = False,
     overwrite: bool = False,
 ) -> List[WorkerResult]:
@@ -57,12 +59,12 @@ def run_batch(
     ----------
     batch : List[SimTask]
         Tasks to simulate — all share the same (route, cluster_id) group key.
-    corridors_map : Dict[Tuple[str, int], Path]
-        ``(route_key, cluster_id)`` → cluster parquet path.
+    corridors_map : Dict[Tuple[str, int], CorridorCluster]
+        ``(route_key, cluster_id)`` → CorridorCluster(path, fl).
     model_config_id : str
         Fuel/model config flag, e.g. ``'kerosene'``.
     sim_mode : str
-        Execution mode flag: ``'O1'`` or ``'O2'``.
+        Execution mode flag: ``'standard'`` or ``'variational'``.
     lake_path : Path
         Delta Lake directory to append results to.
     met : MetDataset
@@ -71,6 +73,10 @@ def run_batch(
         Surface-level ERA5 dataset for this day's window.
     max_age_hours : int
         Maximum contrail age in hours.
+    fuel : str, optional
+        Fuel type for trajectory preparation (default 'kerosene').
+    cap_altitude : bool, optional
+        Clamp trajectory altitude ceiling to task.fl (default False).
     low_mem : bool, optional
         Enable CoCiP low-memory preprocessing (default False).
 
@@ -82,7 +88,7 @@ def run_batch(
     """
     # Thread workers inherit parent log handlers — no setup_file_logger() needed.
     # (setup_file_logger is called once in orchestrator.__main__ block only.)
-    loader     = get_loader(sim_mode)
+    loader     = get_loader(sim_mode=sim_mode, fuel=fuel, cap_altitude=cap_altitude)
     ps_model, cocip_model = get_model(model_config_id, met, rad, max_age_hours, low_mem)
 
     # ------------------------------------------------------------------ #
@@ -108,7 +114,6 @@ def run_batch(
         loaded.append((task, flight))
 
     if not loaded:
-        _write_to_lake(results, batch, lake_path, overwrite)
         return results
 
     tasks_list, flights_list = zip(*loaded)
@@ -118,6 +123,8 @@ def run_batch(
     # Phase 2: Vectorized eval → sequential fallback                       #
     # ------------------------------------------------------------------ #
     eval_results: List[WorkerResult] = []
+    successful_pairs: List[Tuple[SimTask, Flight]] = []
+
     try:
         logger.info(
             "Vectorized eval: %d flights, model=%s, sim_mode=%s.",
@@ -142,6 +149,8 @@ def run_batch(
                 model_config_id=model_config_id,
                 status="success",
             ))
+            if task:
+                successful_pairs.append((task, fl))
 
         # Any loaded flight that didn't appear in output → mark failed
         returned_fids = {r.sim_fid for r in eval_results}
@@ -167,6 +176,7 @@ def run_batch(
                     sim_fid=sim_fid, ef=ef, fl=task.fl,
                     model_config_id=model_config_id, status="success",
                 ))
+                successful_pairs.append((task, fl_sim))
             except Exception as seq_err:
                 logger.error("Sequential eval failed for %s: %s", sim_fid, seq_err)
                 tc = flight.attrs.get("aircraft_type")
@@ -182,9 +192,9 @@ def run_batch(
     results.extend(eval_results)
 
     # ------------------------------------------------------------------ #
-    # Phase 3: Persist to Delta Lake                                       #
+    # Phase 3: Persist trajectories to Delta Lake                          #
     # ------------------------------------------------------------------ #
-    _write_to_lake(results, batch, lake_path, overwrite)
+    _write_to_lake(successful_pairs, model_config_id, fuel, lake_path, overwrite)
     return results
 
 
@@ -200,31 +210,46 @@ def _extract_ef(flight: Flight) -> float:
 
 
 def _write_to_lake(
-    results: List[WorkerResult],
-    batch: List[SimTask],
+    successful: List[Tuple[SimTask, Flight]],
+    model_config_id: str,
+    fuel: str,
     lake_path: Path,
     overwrite: bool = False,
 ) -> None:
-    """Build the results DataFrame and append to the Delta Lake."""
-    if not results:
+    """Build the trajectory DataFrames with metadata and append to the Delta Lake."""
+    if not successful:
         return
 
-    # Build a sim_fid → route lookup from the original batch tasks
-    fid_to_route = {t.to_sim_fid(): f"{t.dep}-{t.arr}" for t in batch}
+    all_dfs: List[pd.DataFrame] = []
+    for task, flight in successful:
+        df = flight.to_dataframe()
+        firstseen = df["time"].min()
+        lastseen = df["time"].max()
+        dep_date = int(firstseen.strftime("%Y%m%d"))
+        ef_total = float(np.nansum(flight["ef"])) if "ef" in flight.data else 0.0
+        fuel_burn = float(flight.attrs.get("total_fuel_burn", 0.0))
 
-    records = []
-    for r in results:
-        records.append({
-            "SIM_FID":          r.sim_fid,
-            "model_config_id":  r.model_config_id,
-            "route":            fid_to_route.get(r.sim_fid, "UNK"),
-            "EF":               r.ef,
-            "FL":               r.fl,
-        })
+        # Inject 14 fixed metadata columns
+        df["SIM_FID"] = task.to_sim_fid()
+        df["model_config_id"] = model_config_id
+        df["fuel"] = fuel
+        df["route"] = f"{task.dep}-{task.arr}"
+        df["icao24"] = task.icao24
+        df["callsign"] = task.callsign
+        df["typecode"] = task.typecode
+        df["cluster_id"] = task.cluster_id
+        df["FL"] = task.fl
+        df["dep_date"] = dep_date
+        df["firstseen"] = firstseen
+        df["lastseen"] = lastseen
+        df["EF_total"] = ef_total
+        df["total_fuel_burn"] = fuel_burn
 
-    df = pd.DataFrame(records)
+        all_dfs.append(df)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
     try:
         with _LAKE_WRITE_LOCK:
-            append_sim_lake(lake_path, df, overwrite=overwrite)
+            append_sim_lake(lake_path, combined, overwrite=overwrite)
     except Exception as exc:
-        logger.error("Failed to append results to Delta Lake: %s", exc)
+        logger.error("Failed to append trajectories to Delta Lake: %s", exc)

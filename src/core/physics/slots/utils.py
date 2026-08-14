@@ -6,20 +6,22 @@ by any slot module. Utilities accumulate here rather than in scattered
 single-function files.
 """
 
+import dataclasses
 from typing import Optional
 
+from src.common.config import MIN_SAFE_FL
 from src.data_manager.schemas import SimTask
 
 
 def compute_stepdown_task(
     task: SimTask,
     ef: float,
-    step_size: float,
-    min_safe_fl: float,
+    step_size: float = 10.0,
+    min_safe_fl: float = MIN_SAFE_FL,
 ) -> Optional[SimTask]:
     """Return a new step-down SimTask if conditions are met, else None.
 
-    Both Slot 2 (initial O2 campaign setup) and Slot 5 (dynamic loop
+    Both Slot 2 (initial variational campaign setup) and Slot 5 (dynamic loop
     injection) call this function. It is the single source of truth for
     the step-down decision.
 
@@ -39,14 +41,13 @@ def compute_stepdown_task(
     -------
     Optional[SimTask]
         New SimTask at ``task.fl - step_size`` if ``ef > 0`` and
-        ``task.fl > min_safe_fl``, otherwise ``None``.
-
-    # TODO: second pass — implement variational logic here.
-    # This stub is a placeholder so both Slot 2 and Slot 5 can import
-    # a real callable. The actual decision logic will be completed once
-    # the O1 (Waterfall 1) baseline run is verified end-to-end.
+        ``task.fl - step_size >= min_safe_fl``, otherwise ``None``.
     """
-    raise NotImplementedError(
-        "compute_stepdown_task is reserved for the variational (O2) second pass. "
-        "Do not call this function in O1 (Waterfall 1) runs."
-    )
+    if ef <= 0:
+        return None                         # already suppressed or neutral
+
+    next_fl = task.fl - step_size
+    if next_fl < min_safe_fl:
+        return None                         # at or below operational floor
+
+    return dataclasses.replace(task, fl=next_fl)

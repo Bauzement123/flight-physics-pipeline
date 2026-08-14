@@ -18,10 +18,10 @@ is ever loaded twice.
 
 Slot ordering per day
 ---------------------
-1  generate_tasks()      — build SimTask list from cohort
+1  enumerate_cohort()    — build SimTask list from cohort
 2  filter_and_batch()    — skip-gate (Delta Lake) + group into batches
    engine.run_parallel() — ThreadPoolExecutor dispatch → yields WorkerResult
-5  evaluate()            — partition results; O1 still_todo always []
+5  evaluate()            — partition results; standard still_todo always []
    vacuum_sim_lake()     — clean up stale Delta Lake files
 """
 
@@ -44,16 +44,17 @@ from src.common.config import (
     ERA5_PRESSURE_LEVEL_VARIABLES,
     ERA5_REQUIRED_PRESSURE_LEVELS,
     ERA5_SURFACE_VARIABLES,
+    MIN_SAFE_FL,
     WEATHER_IO_WORKERS,
     WEATHER_PADDING,
 )
 from src.core.physics.engine import crop_met_dataset, run_parallel
-from src.core.physics.slots.slot1_task_gen import generate_tasks
+from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_flightlist
 from src.core.physics.slots.slot2_batcher import filter_and_batch
 from src.core.physics.slots.slot5_evaluator import evaluate
 from src.core.physics.worker import run_batch
-from src.data_manager.io_utils import read_master_flights, vacuum_sim_lake
-from src.data_manager.schemas import MasterFlightQuery, SimTask
+from src.data_manager.io_utils import optimize_sim_lake, read_master_flights, vacuum_sim_lake
+from src.data_manager.schemas import CorridorCluster, MasterFlightQuery, SimTask
 
 logger = logging.getLogger(__name__)
 
@@ -231,16 +232,18 @@ def run(
     date_range: List[date],
     sim_mode: str,
     model_config_id: str,
-    corridors_map: Dict[Tuple[str, int], Path],
     lake_path: Path,
     weather_cache_dir: Path,
+    ranks: Optional[List[int]] = None,
+    corridors_dir: Optional[Path] = None,
+    fuel: str = "kerosene",
+    cap_altitude: bool = False,
     max_age_hours: int = 48,
     max_workers: int = 4,
-    step_size: float = 1000.0,
-    min_safe_fl: float = 280.0,
+    step_size: float = 10.0,
+    min_safe_fl: float = MIN_SAFE_FL,
     low_mem: bool = False,
     clusters_per_flight: int = 1,
-    default_fl: float = 350.0,
     min_distance_km: float = 0.0,
     overwrite: bool = False,
     batch_size: int = 50,
@@ -253,47 +256,66 @@ def run(
     date_range : List[date]
         Ordered list of calendar days to process (inclusive, no duplicates).
     sim_mode : str
-        ``'O1'`` (standard) or ``'O2'`` (step-down variational — second pass).
+        ``'standard'`` (baseline) or ``'variational'`` (step-down second pass).
     model_config_id : str
         Fuel/model config flag passed to ``get_model()``, e.g. ``'kerosene'``.
-    corridors_map : Dict[Tuple[str, int], Path]
-        ``(route_key, cluster_id)`` → cluster parquet path.
     lake_path : Path
         Delta Lake root directory for simulation results.
     weather_cache_dir : Path
         Directory containing hourly ERA5 ``.nc`` cache files.
+    ranks : List[int], optional
+        List of corridor ranks to simulate (default None = all in registry).
+    corridors_dir : Path, optional
+        Custom directory for corridor trajectory parquets.
+    fuel : str
+        Fuel type attached to Flight in Slot 3 (default 'kerosene').
+    cap_altitude : bool
+        Apply FL altitude ceiling cap in Slot 3 (default False).
     max_age_hours : int
         Maximum contrail age in hours (default 48).
     max_workers : int
         Thread pool size for ``run_parallel`` (default 4).
     step_size : float
-        FL step-down increment in feet for O2 (default 1000.0).
+        FL step-down increment in feet for variational mode (default 1000.0).
     min_safe_fl : float
         Minimum FL below which step-down is halted (default 280.0).
     low_mem : bool
         Lazy-load ERA5 datasets; skip eager ``.load()`` call (default False).
     clusters_per_flight : int
         Number of cluster trajectories to generate per flight (default 1).
-    default_fl : float
-        Fallback flight level when registry lookup yields no value (default 350.0).
     min_distance_km : float
         Pre-filter: skip routes shorter than this distance in km (default 0).
     overwrite : bool
         If True, bypass the Delta Lake skip-gate in Slot 2 and re-simulate
         all tasks regardless of prior results (default False).
+    batch_size : int
+        Max flights per parallel batch.
     bbox : list
         ``[west, south, east, north]`` spatial crop applied to ERA5 data.
     """
+    # ── Slot 1: Build corridor cluster mapping from model registry ───── #
+    corridors_map = build_corridors_map(ranks=ranks, corridors_dir=corridors_dir)
+    if not corridors_map:
+        logger.error("No corridor files found for ranks %s — nothing to do.", ranks)
+        return
+
+    allowed_routes = list({route_id for (route_id, _) in corridors_map.keys()})
+    logger.info("Orchestrator: target route(s) across clusters: %s", allowed_routes)
+
     # Per-hour ERA5 cache: pd.Timestamp (UTC, hourly) → (met_h, rad_h)
     hour_cache: Dict[pd.Timestamp, Tuple[MetDataset, MetDataset]] = {}
 
     for day_idx, day in enumerate(date_range):
         logger.info("=== Day %s  (%d / %d) ===", day, day_idx + 1, len(date_range))
 
-        # ── Slot 1: read cohort + generate tasks ────────────────────────── #
+        # ── Slot 1: read cohort with exact route predicate pushdown ─────── #
         day_start = pd.Timestamp(day, tz="UTC")
         day_end   = day_start + pd.Timedelta(hours=23, minutes=59, seconds=59)
-        query     = MasterFlightQuery(dep_date_start=day_start, dep_date_end=day_end)
+        query     = MasterFlightQuery(
+            dep_date_start=day_start,
+            dep_date_end=day_end,
+            routes=allowed_routes,
+        )
 
         try:
             cohort_df = read_master_flights(query)
@@ -314,11 +336,10 @@ def run(
                 )
                 continue
 
-        tasks: List[SimTask] = generate_tasks(
+        tasks: List[SimTask] = generate_flightlist(
             cohort_df=cohort_df,
             available_clusters=corridors_map,
             clusters_per_flight=clusters_per_flight,
-            default_fl=default_fl,
         )
         if not tasks:
             logger.info("No tasks generated for day %s — skipping.", day)
@@ -395,18 +416,46 @@ def run(
             met=met,
             rad=rad,
             max_age_hours=max_age_hours,
+            fuel=fuel,
+            cap_altitude=cap_altitude,
             low_mem=low_mem,
             overwrite=overwrite,
         )
 
         day_succeeded = day_failed = 0
+        pending: list = list(batches)  # start with Slot-2 batches
 
-        for worker_results in run_parallel(batches, worker_fn, max_workers):
-            eval_result = evaluate(worker_results, sim_mode, step_size, min_safe_fl)
-            day_succeeded += len(eval_result.succeeded)
-            day_failed    += len(eval_result.failed)
-            # O1: eval_result.still_todo is always [] — no re-queuing.
-            # TODO (second pass / O2): re-queue eval_result.still_todo
+        while pending:
+            next_pending: list = []
+
+            for worker_results in run_parallel(pending, worker_fn, max_workers):
+                # Build task lookup for Slot 5 variational step-down
+                task_by_fid = {
+                    t.to_sim_fid(): t
+                    for batch in pending
+                    for t in batch
+                }
+                eval_result = evaluate(
+                    worker_results, task_by_fid, sim_mode, step_size, min_safe_fl
+                )
+                day_succeeded += len(eval_result.succeeded)
+                day_failed    += len(eval_result.failed)
+
+                if eval_result.still_todo:
+                    # Re-batch step-down tasks through Slot 2 for grouping + skip-gate
+                    requeue_batches = filter_and_batch(
+                        tasks=eval_result.still_todo,
+                        sim_mode=sim_mode,
+                        lake_path=lake_path,
+                        step_size=step_size,
+                        min_safe_fl=min_safe_fl,
+                        max_batch_size=batch_size,
+                        overwrite=overwrite,
+                        model_config_id=model_config_id,
+                    )
+                    next_pending.extend(requeue_batches)
+
+            pending = next_pending
 
         logger.info(
             "Day %s: %d succeeded, %d failed.", day, day_succeeded, day_failed
@@ -414,9 +463,11 @@ def run(
 
         # ── Post-day cleanup ─────────────────────────────────────────────── #
         vacuum_sim_lake(lake_path)
+        optimize_sim_lake(lake_path, z_order_cols=["dep_date", "route", "EF_total"])
         del met, rad
         gc.collect()
 
     logger.info(
         "Orchestrator run complete — %d day(s) processed.", len(date_range)
     )
+

@@ -2,26 +2,24 @@
 cli.py — CLI entrypoint for the Physics Simulation Pipeline
 
 Preserves all flags from clone_simulation.py argparse with their original
-objectives. New flags added for sim_mode, model config, and step-down params.
+objectives. Pure CLI argument parsing layer — no file I/O, no registry reads.
 
 Invoked via:
-    python -m src.core.physics.cli --start-date 2025-01-01 --end-date 2025-01-31
+    python -m src.core.physics.cli --start-date 2025-01-01 --end-date 2025-01-31 --out-dir data/results/corridor_simulations
 """
 
 import argparse
 import logging
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List
 
 from src.common.config import (
     CORRIDOR_PATHS_DIR,
-    CORRIDOR_SIMULATIONS_DIR,
     EUR_BBOX,
-    GLOBAL_CORRIDOR_MODEL_REGISTRY,
+    MIN_SAFE_FL,
     WEATHER_DIR,
-    BASE_DIR,
 )
 from src.common.utils import setup_file_logger
 from src.core.physics import orchestrator
@@ -32,49 +30,51 @@ logger = logging.getLogger(__name__)
 def _build_date_range(start_date: str, end_date: str) -> List[date]:
     """Build an inclusive list of calendar dates from YYYY-MM-DD strings."""
     from pandas import date_range as pd_date_range
-    import pandas as pd
     dates = pd_date_range(start=start_date, end=end_date, freq="D")
     return [d.date() for d in dates]
 
 
-def _build_corridors_map(
-    registry_path: Path = None,
-) -> Dict[Tuple[str, int], Path]:
-    """Build corridors_map from GLOBAL_CORRIDOR_MODEL_REGISTRY.
-
-    Reads the ``file_path`` and ``cluster_id`` columns from the registry
-    to construct the ``(route_id, cluster_id) -> absolute Path`` mapping.
-    This is the canonical source — do not scan the corridor directory directly.
-    """
-    import pandas as pd
-    reg = registry_path or GLOBAL_CORRIDOR_MODEL_REGISTRY
-    corridors_map: Dict[Tuple[str, int], Path] = {}
-
-    if not Path(reg).exists():
-        logger.warning("GLOBAL_CORRIDOR_MODEL_REGISTRY not found: %s", reg)
-        return corridors_map
-
-    df = pd.read_parquet(reg)
-    for _, row in df.iterrows():
-        route_id   = row["route_id"]
-        cluster_id = int(row["cluster_id"])
-        rel_path   = row["file_path"]
-        abs_path   = BASE_DIR / rel_path
-        if abs_path.exists():
-            corridors_map[(route_id, cluster_id)] = abs_path
-        else:
-            logger.warning("Corridor file missing for %s c%d: %s", route_id, cluster_id, abs_path)
-
-    logger.info("corridors_map: %d entry/entries loaded from registry.", len(corridors_map))
-    return corridors_map
-
-
 def parse_args(argv=None) -> argparse.Namespace:
-    """Parse CLI arguments.  Flags preserve original clone_simulation.py objectives."""
+    """Parse CLI arguments. Flags preserve original clone_simulation.py objectives."""
     parser = argparse.ArgumentParser(
         prog="python -m src.core.physics.cli",
         description="Run the Delta-Lake physics simulation pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # ── Simulation mode (O1 vs O2) ───────────────────────────────────────── #
+    parser.add_argument(
+        "--sim-mode",
+        choices=["standard", "variational"],
+        default="standard",
+        dest="sim_mode",
+        help="Simulation campaign mode: 'standard' (nominal FL baseline) or 'variational' (step-down optimization).",
+    )
+
+    # ── Physics model config identifier ─────────────────────────────────── #
+    parser.add_argument(
+        "--model-config-id",
+        type=str,
+        default="kerosene",
+        dest="model_config_id",
+        help="Identifier for the physics model configuration (e.g. 'kerosene', 'hydrogen').",
+    )
+
+    # ── Fuel type (Slot 3 injection) ────────────────────────────────────── #
+    parser.add_argument(
+        "--fuel",
+        choices=["kerosene", "hydrogen"],
+        default="kerosene",
+        dest="fuel",
+        help="Fuel type to attach to pycontrails Flight object in Slot 3 (default 'kerosene').",
+    )
+
+    # ── Altitude capping flag (Slot 3 trajectory transform) ─────────────── #
+    parser.add_argument(
+        "--cap-altitude",
+        action="store_true",
+        dest="cap_altitude",
+        help="Apply FL altitude ceiling cap to trajectory waypoints in Slot 3.",
     )
 
     # ── Date range ──────────────────────────────────────────────────────── #
@@ -126,9 +126,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--out-dir",
-        default=str(CORRIDOR_SIMULATIONS_DIR),
+        required=True,
         metavar="DIR",
-        help="Delta Lake root directory for simulation results.",
+        help="Delta Lake root directory for simulation results (e.g. 'data/results/corridor_simulations').",
     )
     parser.add_argument(
         "--corridors-dir",
@@ -137,30 +137,42 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Directory containing cluster parquet trajectory files.",
     )
 
-    # ── Physics parameters ───────────────────────────────────────────────── #
+    # ── Physics model parameters ─────────────────────────────────────────── #
     parser.add_argument(
-        "--max-age", "--age",
+        "--max-age",
         type=int,
         default=48,
         dest="max_age",
         metavar="HOURS",
-        help="Maximum contrail simulation/advection age in hours.",
+        help="Max contrail segment age in hours passed to CoCiP (default 48).",
+    )
+
+    # ── Variational campaign parameters (used when --sim-mode variational) ─ #
+    parser.add_argument(
+        "--step-size",
+        type=float,
+        default=10.0,
+        dest="step_size",
+        metavar="FL",
+        help="FL decrement step size in FL units (default 10.0 = 1000 ft).",
     )
     parser.add_argument(
-        "--clusters-per-flight", "-x",
+        "--min-safe-fl",
+        type=float,
+        default=MIN_SAFE_FL,
+        dest="min_safe_fl",
+        metavar="FL",
+        help=f"Minimum safe flight level for variational step-down (default {MIN_SAFE_FL}).",
+    )
+
+    # ── Flight sampling ─────────────────────────────────────────────────── #
+    parser.add_argument(
+        "--clusters-per-flight",
         type=int,
         default=1,
         dest="clusters_per_flight",
-        metavar="N",
-        help="Number of cluster trajectories to simulate per flight.",
-    )
-    parser.add_argument(
-        "--default-fl",
-        type=float,
-        default=350.0,
-        dest="default_fl",
-        metavar="FL",
-        help="Default flight level (feet) when registry lookup returns no value.",
+        metavar="K",
+        help="Number of clusters to sample per flight from available set (default 1).",
     )
     parser.add_argument(
         "--min-distance",
@@ -168,42 +180,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=0.0,
         dest="min_distance",
         metavar="KM",
-        help="Minimum route distance in km; shorter routes are skipped.",
+        help="Minimum great-circle flight distance in km (default 0).",
     )
 
-    # ── Simulation mode ──────────────────────────────────────────────────── #
-    parser.add_argument(
-        "--sim-mode",
-        default="O1",
-        choices=["O1", "O2"],
-        dest="sim_mode",
-        help="Simulation mode: O1 standard or O2 step-down variational.",
-    )
-    parser.add_argument(
-        "--model-config-id",
-        default="kerosene",
-        dest="model_config_id",
-        metavar="ID",
-        help="Fuel/model configuration identifier.",
-    )
-    parser.add_argument(
-        "--step-size",
-        type=float,
-        default=1000.0,
-        dest="step_size",
-        metavar="FT",
-        help="FL step-down increment in feet (O2 mode only).",
-    )
-    parser.add_argument(
-        "--min-safe-fl",
-        type=float,
-        default=280.0,
-        dest="min_safe_fl",
-        metavar="FL",
-        help="Minimum FL below which step-down is halted (O2 mode only).",
-    )
-
-    # ── Execution control ────────────────────────────────────────────────── #
+    # ── Execution options ────────────────────────────────────────────────── #
     parser.add_argument(
         "--max-workers",
         type=int,
@@ -263,10 +243,7 @@ def main(argv=None) -> None:
         args.start_date, args.end_date, len(date_range),
     )
 
-    # Build corridors map from GLOBAL_CORRIDOR_MODEL_REGISTRY
-    corridors_map = _build_corridors_map()
-
-    # ── Rank filtering (mirrors clone_simulation.py behaviour) ──────────── #
+    # Parse rank parameters (pure argument processing)
     ranks_to_process = None
     if args.ranks:
         try:
@@ -280,34 +257,22 @@ def main(argv=None) -> None:
             sys.exit(1)
         ranks_to_process = list(range(args.lower_rank, args.upper_rank + 1))
 
-    if ranks_to_process is not None:
-        from src.common.utils import load_route_summary
-        df_summary = load_route_summary()
-        # route_summary uses 'LEPA -> LEBL' format; corridor registry uses 'LEPA-LEBL'
-        allowed = df_summary[df_summary["rank"].isin(ranks_to_process)]["route"]
-        allowed_ids = set(r.replace(" -> ", "-") for r in allowed)
-        before = len(corridors_map)
-        corridors_map = {k: v for k, v in corridors_map.items() if k[0] in allowed_ids}
-        logger.info(
-            "Ranks %s → %d corridor(s) after filtering (was %d).",
-            ranks_to_process, len(corridors_map), before,
-        )
-        if not corridors_map:
-            logger.error("No corridor files found for ranks %s — nothing to do.", ranks_to_process)
-            sys.exit(1)
-
     # Resolve paths
     lake_path         = Path(args.out_dir)
     weather_cache_dir = Path(args.weather_cache)
+    corridors_dir     = Path(args.corridors_dir)
 
     # Delegate to orchestrator
     orchestrator.run(
         date_range=date_range,
         sim_mode=args.sim_mode,
         model_config_id=args.model_config_id,
-        corridors_map=corridors_map,
+        ranks=ranks_to_process,
         lake_path=lake_path,
         weather_cache_dir=weather_cache_dir,
+        corridors_dir=corridors_dir,
+        fuel=args.fuel,
+        cap_altitude=args.cap_altitude,
         max_age_hours=args.max_age,
         max_workers=args.max_workers,
         batch_size=args.batch_size,
@@ -315,7 +280,6 @@ def main(argv=None) -> None:
         min_safe_fl=args.min_safe_fl,
         low_mem=args.low_mem,
         clusters_per_flight=args.clusters_per_flight,
-        default_fl=args.default_fl,
         min_distance_km=args.min_distance,
         overwrite=args.overwrite,
         bbox=EUR_BBOX,

@@ -241,6 +241,57 @@ Two simulation modes are available via `--sim-mode`:
 
 ERA5 hourly NetCDF files are managed via a per-hour in-memory cache with lazy eviction — overlapping weather windows across consecutive days are never re-loaded. The `clone_simulation.py` legacy orchestrator is retained for backward compatibility and benchmarking.
 
+#### Hydrogen Fuel Simulation
+
+The pipeline natively supports `HydrogenFuel` from `pycontrails.core.fuel` as an alternative to the default `JetA`. To switch a simulation to hydrogen mode, pass `fuel` and `nvpm_ei_n` when constructing the `Flight` object:
+
+```python
+from pycontrails.core.fuel import HydrogenFuel
+
+flight = Flight(
+    data=waypoints_df,
+    attrs={"flight_id": sim_fid, "aircraft_type": typecode},
+    fuel=HydrogenFuel(),
+    nvpm_ei_n=2.76e13,   # near-zero soot proxy; bypasses ICAO EDB lookup
+)
+```
+
+PSFlight automatically computes a lower fuel mass flow from the higher hydrogen LHV (122.80 MJ/kg vs 43.13 MJ/kg for Jet-A). The `nvpm_ei_n=2.76e13` override instructs CoCiP to skip the ICAO EDB soot model and use the user-supplied value directly as the initial ice crystal number concentration, which is appropriate for near-zero soot hydrogen combustion.
+
+##### `model_config_id` — Delta Lake fuel-variant column
+
+The Delta Lake table (`data/results/corridor_simulations/`) stores both `kerosene` and `hydrogen` variants of the same `SIM_FID` (flight ID) in the same partition. The two variants are differentiated by the **`model_config_id`** string column, and the composite primary key of the table is:
+
+```
+(SIM_FID, model_config_id, time)
+```
+
+The skip-gate in Slot 2 checks this composite key, so re-running a hydrogen simulation for an already-committed kerosene flight will not collide or be skipped.
+
+##### Temp parquet output
+
+Before committing results to the Delta Lake, hydrogen simulation output can be written to a temporary Parquet file for inspection:
+
+```
+data/temp/hydrogen_sim_<ROUTE>_c<N>.parquet
+```
+
+This file contains the full waypoint-level outputs (fuel flow, thrust, engine efficiency, RHi, temperature, `nvpm_ei_n`, EF, etc.) and is useful for bit-for-bit reproducibility checks against a fresh simulation run.
+
+##### Validated results — EBMB-LEMD corridor, cluster 0
+
+The following results have been validated for flight `347453_IBE06HH_EBMB-LEMD_20250101_0613_0_350` (FL350, 2025-01-01):
+
+| Metric | Hydrogen | Kerosene | Δ |
+|---|---|---|---|
+| Total fuel burn | **1 107.95 kg** | 3 255.09 kg | −65.96 % |
+| Mean fuel flow | **0.1759 kg/s** | — | — |
+| EF_total | **2.695 × 10¹¹ J** | — | — |
+| Persistent contrail waypoints | **10** | — | — |
+| Active CoCiP segments | **6** | — | — |
+
+All PSFlight/CoCiP physics outputs (thrust, engine efficiency, RHi, temperature, `nvpm_ei_n`) reproduce identically between the Delta Lake entry and a fresh simulation run.
+
 ---
 
 ## 2. Quickstart & Environment Setup
@@ -443,7 +494,7 @@ The `src/devtools/` directory contains operational and developer utilities:
 
 Consult the project Wiki for open research TODOs and extension modules:
 
-- **Hydrogen Propulsion Simulation** (`hydrogen_simulation.py`): Ideally via inserting a custom Engine UID into PSFlight, or forcing PSFlight and CoCiP to use hydrogen fuel with a custom `nvpm_ei`.
+- **Hydrogen Propulsion Simulation** ✅ *Implemented*: The pipeline now natively supports `HydrogenFuel` from `pycontrails.core.fuel`. Construct the `Flight` object with `fuel=HydrogenFuel()` and `nvpm_ei_n=2.76e13` to switch to hydrogen mode. Results are differentiated in the Delta Lake via the `model_config_id` column (`kerosene` vs `hydrogen`). See the [Hydrogen Fuel Simulation](#hydrogen-fuel-simulation) sub-section in Step 8 for full details and validated numerical results.
 - **Variational Contrail Simulation Engine** *(partially implemented via `--sim-mode O2`)*: Reads flights with positive total RF impact from the simulation registry and runs a step-down variational campaign over Flight Level. The `O2` slot architecture is in place; remaining work is automating the FL selection strategy and result aggregation.
 - **Fleet Eco-Efficiency Campaign Analysis**: Quantitative trade-off analysis between fuel burn penalty ($\Delta \text{Fuel}$) vs. Radiative Forcing reduction ($\Delta \text{RF}$) per corridor and per aircraft typecode family.
 - **Optional GPU K-Medoids Acceleration** (Low Priority): PyTorch/CUDA tensor acceleration for corridor clustering with CPU multiprocessing fallback.
