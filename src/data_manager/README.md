@@ -172,6 +172,7 @@ Passed to `read_route_summary()`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `routes` | `Optional[List[str]]` | `None` | List of target route string keys. |
+| `ranks` | `Optional[List[int]]` | `None` | List of route popularity rank integers (1-indexed). |
 | `dep_airports` | `Optional[List[str]]` | `None` | List of departure airport codes. |
 | `arr_airports` | `Optional[List[str]]` | `None` | List of arrival airport codes. |
 

@@ -211,6 +211,8 @@ def read_route_summary(
     if query is not None:
         if query.routes:
             exprs.append(ds.field("route").isin(query.routes))
+        if query.ranks:
+            exprs.append(ds.field("rank").isin(query.ranks))
         if query.dep_airports:
             exprs.append(ds.field("dep").isin(query.dep_airports))
         if query.arr_airports:
@@ -283,10 +285,11 @@ def read_corridors_map(
 
     # Filter by rank if requested
     if ranks is not None:
-        if not ROUTE_SUMMARY_PARQUET.exists():
-            raise FileNotFoundError(f"Route summary not found at {ROUTE_SUMMARY_PARQUET}")
-        df_summary = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
-        allowed = df_summary[df_summary["rank"].isin(ranks)]["route"]
+        df_summary = read_route_summary(
+            query=RouteSummaryQuery(ranks=ranks),
+            columns=["rank", "route"],
+        )
+        allowed = df_summary["route"]
         allowed_ids = set(r.replace(" -> ", "-") for r in allowed)
         route_col = "route_id" if "route_id" in df.columns else "route"
         df = df[df[route_col].isin(allowed_ids)]

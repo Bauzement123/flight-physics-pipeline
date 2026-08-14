@@ -29,6 +29,8 @@ from src.common.config import (
     WEATHER_IO_WORKERS
 )
 from src.common.utils import load_route_summary, split_route_string, to_registry_path, update_global_registry, setup_file_logger, log_skipped_aircraft
+from src.data_manager.io_utils import read_route_summary
+from src.data_manager.schemas import RouteSummaryQuery
 from src.common.adapters import read_flights_from_parquet, write_flights_to_parquet
 from src.core.physics.engine import crop_met_dataset, simulate_flights_parallel, create_simulation_models
 
@@ -429,7 +431,8 @@ def run_batch_clone_simulation(
     dates = pd.date_range(start=start_date, end=end_date, freq='D')
     logger.info(f"Targeting date range: {start_date} to {end_date} ({len(dates)} days)")
     
-    df_summary = load_route_summary(None)
+    query = RouteSummaryQuery(ranks=ranks) if ranks else None
+    df_summary = read_route_summary(query=query)
     if df_summary.empty:
         logger.error("RouteSummary is empty or missing.")
         return
@@ -447,7 +450,7 @@ def run_batch_clone_simulation(
     #logger.info(f"Loaded RouteSummary with {len(df_summary)} entries. Valid synthesized routes: {len(valid_routes_set)}")
 
     # Pre-resolve target route keys for descriptive log output
-    df_ranks = df_summary[df_summary['rank'].isin(ranks)].copy() if ranks else df_summary.copy()
+    df_ranks = df_summary.copy()
     #logger.info(f"target routes before filtering: {df_ranks['route'].tolist()}")
     if min_distance is not None:
         df_ranks = df_ranks[df_ranks['distance_m'] >= min_distance * 1000.0]

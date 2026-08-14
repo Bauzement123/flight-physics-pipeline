@@ -62,6 +62,7 @@ class MasterFlightQuery:
 @dataclass
 class RouteSummaryQuery:
     routes: Optional[List[str]] = None
+    ranks: Optional[List[int]] = None
     dep_airports: Optional[List[str]] = None
     arr_airports: Optional[List[str]] = None
 
