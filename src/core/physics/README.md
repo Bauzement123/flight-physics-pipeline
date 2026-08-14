@@ -237,7 +237,7 @@ flowchart TD
 ### 5.1 Bash Syntax
 
 ```bash
-# Standard Simulation run for January 2025 across ranks 1 to 5 (Kerosene)
+# Standard Simulation run for January 2025 across ranks 1 to 5 (Jet-A / Kerosene)
 python -m src.core.physics.cli \
     --start-date 2025-01-01 \
     --end-date 2025-01-31 \
@@ -248,7 +248,7 @@ python -m src.core.physics.cli \
     --model-config-id kerosene \
     --max-workers 4 \
     --batch-size 50 \
-    --out-dir data/results/corridor_simulations
+    --out-dir data/results/corridor_simulations_kerosene
 
 # Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
 python -m src.core.physics.cli \
@@ -261,7 +261,7 @@ python -m src.core.physics.cli \
     --model-config-id kerosene \
     --step-size 10.0 \
     --min-safe-fl 190.0 \
-    --out-dir data/results/corridor_simulations \
+    --out-dir data/results/corridor_simulations_hydrogen \
     --low-mem \
     --max-age 1
 ```
@@ -269,7 +269,7 @@ python -m src.core.physics.cli \
 ### 5.2 PowerShell Syntax
 
 ```powershell
-# Standard Simulation run for January 2025 across ranks 1 to 5 (Kerosene)
+# Standard Simulation run for January 2025 across ranks 1 to 5 (Jet-A / Kerosene)
 python -m src.core.physics.cli `
     --start-date 2025-01-01 `
     --end-date 2025-01-31 `
@@ -280,7 +280,7 @@ python -m src.core.physics.cli `
     --model-config-id kerosene `
     --max-workers 4 `
     --batch-size 50 `
-    --out-dir data/results/corridor_simulations
+    --out-dir data/results/corridor_simulations_kerosene
 
 # Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
 python -m src.core.physics.cli `
@@ -293,7 +293,7 @@ python -m src.core.physics.cli `
     --model-config-id kerosene `
     --step-size 10.0 `
     --min-safe-fl 190.0 `
-    --out-dir data/results/corridor_simulations `
+    --out-dir data/results/corridor_simulations_hydrogen `
     --low-mem `
     --max-age 1
 ```
@@ -311,7 +311,7 @@ python -m src.core.physics.cli `
 | `--ranks` | `str` | `None` | Comma-separated list of route cluster ranks to process (e.g. `'1,3,5'`). Mutually exclusive with `--lower-rank`. |
 | `--lower-rank` | `int` | `None` | Lower bound of corridor cluster rank (inclusive). Requires `--upper-rank`. |
 | `--upper-rank` | `int` | `None` | Upper bound of corridor cluster rank (inclusive). Requires `--lower-rank`. |
-| `--out-dir` | `str` | *Required* | Root directory path for Delta Lake simulation storage (e.g. `data/results/corridor_simulations`). |
+| `--out-dir` | `str` | *Required* | Root directory path for Delta Lake simulation storage. Suggested copy-paste targets: `data/results/corridor_simulations_kerosene` (Jet-A/Kerosene) or `data/results/corridor_simulations_hydrogen` (Hydrogen). |
 | `--weather-cache` | `str` | `data/weather` | Directory containing hourly ERA5 pressure-level and surface `.nc` cache files. |
 | `--corridors-dir` | `str` | `data/corridor_paths` | Directory containing cluster parquet trajectory files. |
 | `--max-age`, `--age` | `int` | `48` | Maximum contrail segment age in hours passed to CoCiP. |

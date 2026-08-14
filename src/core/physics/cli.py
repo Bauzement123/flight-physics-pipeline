@@ -129,7 +129,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--out-dir",
         required=True,
         metavar="DIR",
-        help="Delta Lake root directory for simulation results (e.g. 'data/results/corridor_simulations').",
+        help=(
+            "Delta Lake root directory for simulation results. Suggested targets: "
+            "'data/results/corridor_simulations_kerosene' (Jet-A/kerosene) or "
+            "'data/results/corridor_simulations_hydrogen' (hydrogen)."
+        ),
     )
     parser.add_argument(
         "--corridors-dir",
