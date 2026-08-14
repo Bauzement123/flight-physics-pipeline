@@ -15,6 +15,7 @@ src/analysis/verification/
 ├── flight_level_analysis.py       # CLI execution script for cruise Flight Level distribution boxplots
 ├── matlab_prepare.py              # CLI script for MATLAB verification data exports
 ├── plot_corridor_clusters.py      # CLI script for dual-panel cluster, medoid, & altitude visualizations
+├── plot_country_trajectories.py   # CLI script for high-res country-level inbound/outbound trajectory & medoid maps
 ├── plot_r2_distance_errors.py     # CLI script for endpoint distance statistical analysis and plots
 ├── route_class_analysis.py        # CLI execution script for route class distribution histogram
 ├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
@@ -130,10 +131,65 @@ graph TD
 
 ---
 
+### 3.3 Workflow C — Country-Level Trajectory & Medoid Visualization (`plot_country_trajectories.py`)
+
+```mermaid
+graph TD
+    %% Inputs
+    Map[("data/registries/global_flight_cluster_map.parquet")]
+    Reg[("data/registries/global_clean_registry.parquet")]
+    MapCache["EuropeanMapCache (NaturalEarth)"]
+    
+    %% Processing Nodes
+    P1["Enrich Flight Cluster Map with dep_country & arr_country"]
+    P2["Derive Unique 2-Letter Country ICAOs"]
+    P3["Filter Flights TO and FROM Target Country"]
+    P4["Resolve Filepaths via PyArrow dataset pushdown (read_flight_filepaths)"]
+    P5["Batch-load Clean Trajectories into Memory"]
+    P6["Vectorized LineCollections (Regular Flights: Inbound / Outbound / Domestic)"]
+    P7["Highlight Medoid Trajectories (Distinct Inbound vs Outbound Colors & Markers)"]
+    P8["Render over PlateCarree Basemap & Export High-Res PNG"]
+    P9["Explicit Garbage Collection (gc.collect)"]
+    
+    %% Outputs
+    OutImg["data/analysis/plots/country_maps/trajectories_{country_code}.png"]
+    
+    %% Connections
+    Map --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    Reg -->|Pushdown isin filter| P4
+    P4 --> P5
+    P5 --> P6
+    P5 --> P7
+    MapCache --> P8
+    P6 --> P8
+    P7 --> P8
+    P8 --> OutImg
+    P8 --> P9
+```
+
+> [!NOTE]
+> Visual rendering warning: Mermaid flowcharts require a compatible markdown viewer or renderer. If viewing in a raw text environment, refer to the step-by-step description below.
+
+**Step-by-step:**
+1. **Cluster Map Ingestion & Country Extraction**: The script reads `GLOBAL_FLIGHT_CLUSTER_MAP` (`data/registries/global_flight_cluster_map.parquet`), parses departure and arrival airport ICAOs from `route_id` strings, and derives `dep_country` and `arr_country` columns using the first two letters of each ICAO airport designator.
+2. **Country Derivation**: Computes the unique set of 2-letter country prefixes present across all routes (or filters to user-specified `--country` codes).
+3. **Inbound/Outbound Partitioning**: For each country, isolates candidate flights into inbound (`arr_country == country`), outbound (`dep_country == country`), and domestic (`dep_country == arr_country`) categories.
+4. **Fast Registry Indexing**: Pre-loads the flight ID to relative file path mapping from `GLOBAL_CLEAN_REGISTRY` once into memory (~15 MB).
+5. **Multi-Threaded Segment Streaming**: Groups flights by target parquet file and streams them in multi-threaded batches (`ThreadPoolExecutor`, default 8 threads). Only float32 coordinate arrays are kept in memory (< 250 MB peak RAM even on 30k+ flight cohorts). Parquet DataFrames are discarded and garbage collected per batch.
+6. **Vectorized Basemap Rendering**: Renders thousands of regular flight paths in a single draw call using Matplotlib `LineCollection` with Cartopy `PlateCarree` transformations over `EuropeanMapCache` NaturalEarth layers. Overlays inbound medoids (Deep Blue line), outbound medoids (Vivid Crimson Red line), and domestic medoids (Dark Violet-Purple line). No airport markers or endpoint scatter points are drawn.
+7. **Fixed Extent Export & Garbage Collection**: Enforces a strict European Bounding Box + 5° margin (`[EUR_LON_MIN - 5, EUR_LON_MAX + 5, EUR_LAT_MIN - 5, EUR_LAT_MAX + 5]`), saves a 300 DPI PNG under `data/analysis/plots/country_maps/`, closes the figure, and explicitly executes `gc.collect()` to guarantee clean memory boundaries before the next country iteration.
+
+---
+
 ## 4. CLI Usage Guide
 
-### Bash Syntax Example
+### Bash Syntax Examples
+
 ```bash
+# Flight Distance vs. Height Analysis
 python -m src.analysis.verification.flight_analysis \
   --registry data/flight_registry/registries/global_trajectory_registry.parquet \
   --corridor-registry data/flight_registry/registries/global_model_registry.parquet \
@@ -141,11 +197,25 @@ python -m src.analysis.verification.flight_analysis \
   --output-dir data/analysis/plots \
   --min-distance 500 \
   --max-distance 1500 \
-  --no-corridor
+  --no-corridor \
+  --top-k-percent 10
+
+# Country-Level Clean Trajectory & Medoid Visualization
+python -m src.analysis.verification.plot_country_trajectories \
+  --country ED LF EG \
+  --dpi 300
+
+# Country-Level Medoids-Only Mode
+python -m src.analysis.verification.plot_country_trajectories \
+  --country ED LF EG \
+  --medoids-only \
+  --dpi 300
 ```
 
-### PowerShell Syntax Example
+### PowerShell Syntax Examples
+
 ```powershell
+# Flight Distance vs. Height Analysis
 python -m src.analysis.verification.flight_analysis `
   --registry data/flight_registry/registries/global_trajectory_registry.parquet `
   --corridor-registry data/flight_registry/registries/global_model_registry.parquet `
@@ -155,6 +225,17 @@ python -m src.analysis.verification.flight_analysis `
   --max-distance 1500 `
   --no-corridor `
   --top-k-percent 10
+
+# Country-Level Clean Trajectory & Medoid Visualization
+python -m src.analysis.verification.plot_country_trajectories `
+  --country ED LF EG `
+  --dpi 300
+
+# Country-Level Medoids-Only Mode
+python -m src.analysis.verification.plot_country_trajectories `
+  --country ED LF EG `
+  --medoids-only `
+  --dpi 300
 ```
 
 ### CLI Parameters Reference
@@ -196,6 +277,15 @@ python -m src.analysis.verification.flight_analysis `
 * `--dist-step` (float): Optional airport geodesic distance bin size in km. If omitted, plots route-by-route sorted by distance. Default: `None`.
 * `--output-dir` (string): Destination folder for exported SVG plots. Default: `data/analysis/plots`.
 
+#### Country Trajectory & Medoid Visualization (`plot_country_trajectories.py`)
+* `--country` (strings): One or more 2-letter country ICAO prefixes (e.g. `ED LF EG`). Default: `None` (processes all unique country ICAOs).
+* `--out-dir` (string): Destination directory for exported PNG maps. Default: `data/analysis/plots/country_maps`.
+* `--registry` (string): Parquet registry to resolve flight IDs to disk paths. Default: `data/registries/global_clean_registry.parquet`.
+* `--dpi` (int): Output figure resolution in DPI. Default: `300`.
+* `--threads` (int): Number of concurrent IO threads for batch reading parquet files. Default: `8`.
+* `--batch-size` (int): Number of parquet files to read per garbage-collected batch. Default: `1000`.
+* `--medoids-only` (flag): When specified, loads and renders only corridor medoid trajectories, skipping all regular clean flights.
+
 #### Trajectory Cluster & Medoid Visualization (`plot_corridor_clusters.py`)
 * `--route-id` (string): Target route ID (e.g. `LEPA-LEBL`). Default: `LEPA-LEBL`.
 * `--out-file` (string): Path to save output plot (default: `data/analysis/plots/<route_id>_clusters.svg`).
@@ -234,6 +324,12 @@ python -m src.analysis.verification.flight_analysis `
 ### CLI Syntax Examples (Additional Tools)
 
 ```bash
+# Render high-resolution country trajectory maps for Germany (ED) and France (LF)
+python -m src.analysis.verification.plot_country_trajectories --country ED LF --dpi 300
+
+# Render all countries across the flight cluster map
+python -m src.analysis.verification.plot_country_trajectories --dpi 300
+
 # Evaluate custom prefilter thresholds on Top 5000 routes
 python -m src.analysis.verification.evaluate_custom_filters --top-k-routes 5000 --min-route-flights 50
 
@@ -253,6 +349,7 @@ All entrypoint scripts initialize logging via `setup_file_logger()` from `src.co
 
 | Log file written to `data/logs/` | Writer | Purpose |
 |---|---|---|
+| `verification.log` | `plot_country_trajectories.py` | Logs country filtering, PyArrow filepath queries, batch trajectory memory loads, and PNG generation metrics. |
 | `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlab_prepare.py`, `plot_corridor_clusters.py`, `route_class_analysis.py`, `route_popularity_analysis.py`, `plot_r2_distance_errors.py`, `build_r2_distance_table.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
 | `calibration.log` | `evaluate_custom_filters.py` | Logs custom filter retention evaluations and parameter statistics. |
 | `acquisition.log` | `summarize_population.py` | Logs route summary population inspection and Pareto distribution metrics. |

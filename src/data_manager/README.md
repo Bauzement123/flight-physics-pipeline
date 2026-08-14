@@ -40,10 +40,14 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers & Trajector
 │   │   ├── Input: Optional[RouteSummaryQuery], Optional[List[str]] (columns).
 │   │   ├── Output: pandas.DataFrame
 │   │   └── Safety/Fallback: Applies PyArrow pushdown on route keys, popularity ranks, and departure/arrival airports.
-│   └── io_utils.read_corridors_map()
-│       ├── Input: ranks, registry_path, corridors_dir.
-│       ├── Output: Dict[Tuple[str, int], CorridorCluster]
-│       └── Safety/Fallback: Loads GLOBAL_CORRIDOR_MODEL_REGISTRY, delegates rank filtering to read_route_summary with PyArrow dataset pushdown and column projection, returns calibrated flight levels and absolute paths.
+│   ├── io_utils.read_corridors_map()
+│   │   ├── Input: ranks, registry_path, corridors_dir.
+│   │   ├── Output: Dict[Tuple[str, int], CorridorCluster]
+│   │   └── Safety/Fallback: Loads GLOBAL_CORRIDOR_MODEL_REGISTRY, delegates rank filtering to read_route_summary with PyArrow dataset pushdown and column projection, returns calibrated flight levels and absolute paths.
+│   └── io_utils.read_flight_filepaths()
+│       ├── Input: Optional[List[str] | set[str]] (flight_ids), Optional[Path] (registry_path), Optional[List[str]] (columns).
+│       ├── Output: pandas.DataFrame
+│       └── Safety/Fallback: Scans trajectory or clean registries using PyArrow dataset predicate pushdown (isin filter) for instant O(1) FID-to-filepath resolution.
 │
 ├── 3. Trajectory Delta Lake Query Engine
 │   ├── io_utils.read_sim_lake()

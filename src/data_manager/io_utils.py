@@ -20,6 +20,8 @@ from src.common.config import (
     MASTER_FLIGHTS_FILE,
     ROUTE_SUMMARY_PARQUET,
     GLOBAL_CORRIDOR_MODEL_REGISTRY,
+    GLOBAL_TRAJECTORY_REGISTRY,
+    GLOBAL_CLEAN_REGISTRY,
     DELTA_LAKE_TARGET_FILE_SIZE_BYTES,
 )
 
@@ -631,4 +633,44 @@ def read_ef_by_base_key(
         result.setdefault(key, []).append((float(row.FL), float(row.EF_total)))
 
     return result
+
+
+def read_flight_filepaths(
+    flight_ids: Optional[List[str] | set[str]] = None,
+    registry_path: Optional[Path] = None,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Reads trajectory registry via PyArrow dataset with predicate pushdown to resolve filepaths for FIDs.
+
+    Parameters
+    ----------
+    flight_ids : list or set of str, optional
+        Flight IDs to look up. If None, returns all entries from the registry.
+    registry_path : Path, optional
+        Path to registry parquet. Defaults to GLOBAL_TRAJECTORY_REGISTRY.
+    columns : list of str, optional
+        Columns to load. Defaults to ['flight_id', 'file_path'].
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing resolved flight_id and file_path mappings.
+    """
+    path = registry_path if registry_path is not None else GLOBAL_TRAJECTORY_REGISTRY
+    cols = columns or ["flight_id", "file_path"]
+
+    if not Path(path).exists():
+        logger.warning("read_flight_filepaths: registry not found at %s", path)
+        return pd.DataFrame(columns=cols)
+
+    dataset = ds.dataset(str(path))
+    expr = None
+    if flight_ids is not None:
+        fid_list = list(flight_ids)
+        if not fid_list:
+            return pd.DataFrame(columns=cols)
+        expr = ds.field("flight_id").isin(fid_list)
+
+    table = dataset.to_table(filter=expr, columns=cols)
+    return table.to_pandas()
 
