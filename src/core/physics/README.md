@@ -54,7 +54,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   └── cli.main() / parse_args()
 │       ├── Input: Sys argv flags (--start-date, --end-date, --sim-mode, --fuel, --low-mem, etc.)
 │       ├── Output: argparse.Namespace
-│       └── Safety/Fallback: Validates date ranges, filters corridors by rank via route_summary.parquet, exits on empty/invalid inputs.
+│       └── Safety/Fallback: Validates date ranges, filters corridors by rank via PyArrow predicate pushdown on route_summary.parquet, exits on empty/invalid inputs.
 │
 ├── 2. Day-by-Day Orchestration & Dynamic ERA5 Windowing
 │   └── orchestrator.run()
@@ -140,7 +140,7 @@ flowchart TD
 
 #### Step-by-Step Description:
 
-1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, fuel, simulation mode, memory flags). `read_corridors_map()` loads `(route_id, cluster_id)` corridor metadata and calibrated FLs from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, filtered by `route_summary.parquet` if ranks are specified.
+1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, fuel, simulation mode, memory flags). `read_corridors_map()` loads `(route_id, cluster_id)` corridor metadata and calibrated FLs from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, filtered via PyArrow dataset predicate pushdown on `route_summary.parquet` if ranks are specified.
 2. **Daily Cohort Ingestion**: For each calendar day in `--start-date` to `--end-date`, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC.
 3. **Flight List Generation (Slot 1)**: `generate_flightlist()` converts cohort rows into `SimTask` dataclass items by matching route codes against available cluster trajectories in `corridors_map`.
 4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:

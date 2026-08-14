@@ -39,11 +39,11 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers & Trajector
 │   ├── io_utils.read_route_summary()
 │   │   ├── Input: Optional[RouteSummaryQuery], Optional[List[str]] (columns).
 │   │   ├── Output: pandas.DataFrame
-│   │   └── Safety/Fallback: Applies PyArrow pushdown on route keys and departure/arrival airports.
+│   │   └── Safety/Fallback: Applies PyArrow pushdown on route keys, popularity ranks, and departure/arrival airports.
 │   └── io_utils.read_corridors_map()
 │       ├── Input: ranks, registry_path, corridors_dir.
 │       ├── Output: Dict[Tuple[str, int], CorridorCluster]
-│       └── Safety/Fallback: Loads GLOBAL_CORRIDOR_MODEL_REGISTRY, filters by route ranks if supplied, returns calibrated flight levels and absolute paths.
+│       └── Safety/Fallback: Loads GLOBAL_CORRIDOR_MODEL_REGISTRY, delegates rank filtering to read_route_summary with PyArrow dataset pushdown and column projection, returns calibrated flight levels and absolute paths.
 │
 ├── 3. Trajectory Delta Lake Query Engine
 │   ├── io_utils.read_sim_lake()
