@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from pycontrails import Flight, HydrogenFuel, JetA
 
@@ -133,16 +134,46 @@ def load(
 # ---------------------------------------------------------------------------
 
 def _apply_altitude_cap(df: pd.DataFrame, fl_ft: float) -> pd.DataFrame:
-    """Clamp trajectory altitude column to the given flight level ceiling.
+    """Clamp trajectory altitude to flight level ceiling with smoothed boundary transitions.
 
-    Current behaviour: hard clip (constant ceiling).
-    # TODO: replace with smooth profile (e.g. Gaussian descent towards cap)
+    Replaces the constant-ceiling plateau with smooth 2-point linear interpolation
+    at the climb-to-cap (TOC) and cap-to-descent (TOD) transition edges.
     """
-    fl_m = fl_ft * 100 * 0.3048
-    df = df.copy()
-    if "altitude" in df.columns:
-        df["altitude"] = df["altitude"].clip(upper=fl_m)
-    return df
+    if "altitude" not in df.columns or df.empty:
+        return df
+
+    fl_m = fl_ft * 100.0 * 0.3048
+    alts = df["altitude"].values.copy()
+
+    # Identify waypoints above the target ceiling
+    above_mask = alts > fl_m
+    if not np.any(above_mask):
+        return df
+
+    # Cap all above-ceiling waypoints to the target FL
+    capped = np.minimum(alts, fl_m)
+
+    # Find climb transition (first capped index) and descent transition (last capped index)
+    capped_indices = np.where(above_mask)[0]
+    i_first = capped_indices[0]
+    i_last = capped_indices[-1]
+
+    if i_first == i_last:
+        # Single isolated above-ceiling waypoint: blend between neighbors
+        if i_first > 0 and i_first < len(capped) - 1:
+            capped[i_first] = 0.5 * (alts[i_first - 1] + alts[i_first + 1])
+    else:
+        # Smooth climb entry: blend between preceding climb waypoint and target ceiling
+        if i_first > 0:
+            capped[i_first] = 0.5 * (alts[i_first - 1] + fl_m)
+
+        # Smooth descent exit: blend between target ceiling and subsequent descent waypoint
+        if i_last < len(capped) - 1:
+            capped[i_last] = 0.5 * (fl_m + alts[i_last + 1])
+
+    df_out = df.copy()
+    df_out["altitude"] = capped
+    return df_out
 
 def _read_cluster_parquet(path: Path, sim_fid: str) -> Optional[pd.DataFrame]:
     """Read cluster parquet and return the first flight's DataFrame, or None."""

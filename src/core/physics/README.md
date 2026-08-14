@@ -205,7 +205,7 @@ flowchart TD
    - For each task, `cluster_loader.load()` fetches the cluster parquet file from `corridors_map`.
    - Validates `task.typecode` using `is_supported_typecode()`. If invalid or unsupported, logs to `data/logs/skipped_aircraft.log` and returns `None`.
    - Shifts all waypoints so waypoint[0] matches `task.firstseen`.
-   - If `step_down_method == 'cap'`, clamps waypoint altitudes to the target `task.fl` ceiling ($z \le \text{FL} \times 100 \times 0.3048\text{ m}$).
+   - If `step_down_method == 'cap'`, clamps waypoint altitudes to the target `task.fl` ceiling ($z \le \text{FL} \times 100 \times 0.3048\text{ m}$) with 2-point boundary linear interpolation at Top-of-Climb (TOC) and Top-of-Descent (TOD) transition waypoints to eliminate derivative rate-of-climb/descent ($\text{ROCD}$) discontinuities.
    - Instantiates a `pycontrails.Flight` object, attaches `flight.attrs["fuel"] = "hydrogen"` or `"kerosene"`, and assigns fuel-specific properties.
 3. **Phase 2 (Physics Evaluation & Fallback)**:
    - **Vectorized Evaluation**: All loaded `Flight` objects are evaluated in a single vector call: `ps_model.eval(flights_list)` and `cocip_model.eval(source=fl_ps)`. Total Energy Forcing ($\text{EF}_{\text{total}} = \sum \text{ef}$ in Joules) is computed via `_extract_ef()`, and simulated cruise flight level is extracted via `_extract_actual_fl()`.
