@@ -2,13 +2,14 @@
 
 ## 1. Title & Introduction
 
-The `src/data_manager` module serves as the centralized data interface, schema contract authority, and storage engine for the Flight Physics Pipeline. It provides type-safe schema contracts, high-performance PyArrow dataset readers with predicate pushdown, and ACID-compliant Delta Lake I/O operations.
+The `src/data_manager` module serves as the centralized data interface, schema contract authority, and storage engine for the Flight Physics Pipeline. It provides type-safe schema contracts, high-performance PyArrow dataset readers with predicate pushdown, ACID-compliant Delta Lake I/O operations, and distributed node synchronization across network file systems (Windows SMB / NFS).
 
 Key capabilities include:
 - **Formal Schema Contracts & Runtime Validation**: Centralized PyArrow metadata schemas (`SIM_LAKE_METADATA_SCHEMA`, `_POSTFILTER_SCHEMA`) with pre-write validation gates enforcing 100% contract compliance on incoming telemetry.
 - **Predicate Pushdown Query Engine**: High-speed filtering of multi-gigabyte Parquet datasets (`master_flights.parquet`, `route_summary.parquet`, and corridor model registries) directly at the PyArrow C++ level before loading into Python memory.
 - **Universal Pipeline Dataclasses**: Strongly typed contracts (`SimTask`, `WorkerResult`, `EvalResult`, `SimResultQuery`) passed across pipeline slot boundaries without raw string serializations.
 - **ACID Trajectory Delta Lake Storage**: Transactional persistence of full per-waypoint flight trajectories with dynamic physics columns, composite merging on `(SIM_FID, model_config_id, time)`, and automated post-day vacuuming and multi-dimensional Z-ordering.
+- **Distributed Network Synchronization (`sync_delta_lake.py`)**: High-speed directional synchronization (`upsert` / `downsert`) between compute nodes and shared network storage (e.g. `\\PC182...\...`) using PyArrow C++ chunked anti-joins and atomic Delta commits with zero risk of row duplication.
 
 ---
 
@@ -16,10 +17,11 @@ Key capabilities include:
 
 ```text
 src/data_manager/
-├── README.md        ← Module technical specification (this file)
-├── __init__.py      ← Package initialization
-├── io_utils.py      ← PyArrow & Delta Lake dataset readers, writers, skip-gate, vacuum & optimize utilities
-└── schemas.py       ← Dataclass query definitions, task contracts, and central table schema definitions
+├── README.md            ← Module technical specification (this file)
+├── __init__.py          ← Package initialization
+├── io_utils.py          ← PyArrow & Delta Lake dataset readers, writers, skip-gate, vacuum & optimize utilities
+├── schemas.py           ← Dataclass query definitions, task contracts, and central table schema definitions
+└── sync_delta_lake.py   ← Distributed Delta Lake synchronization & maintenance utility (SMB / NFS)
 ```
 
 ---
@@ -27,7 +29,7 @@ src/data_manager/
 ## 3. Function Analysis Solution Tree (FAST)
 
 ```text
-Module Objective: Type-Safe Data Contracts, High-Performance Readers & Trajectory Delta Lake Storage Interface
+Module Objective: Type-Safe Data Contracts, High-Performance Readers, Delta Lake Storage & Distributed Node Sync
 │
 ├── 1. Master Flights Cohort Retrieval
 │   └── io_utils.read_master_flights()
@@ -73,22 +75,36 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers & Trajector
 │       ├── Output: None
 │       └── Safety/Fallback: Enforces schema validation; converts duration columns to seconds; casts string metadata; performs atomic MERGE on (SIM_FID, model_config_id, time) or clean DELETE-then-append on overwrite/schema evolution.
 │
-└── 5. Table Maintenance & Z-Order Optimization
-    ├── io_utils.vacuum_sim_lake()
-    │   ├── Input: lake_path (Path), retention_hours (int, default 168).
-    │   ├── Output: None
-    │   └── Safety/Fallback: Executes dt.vacuum(retention_hours); catches errors with warning log.
-    └── io_utils.optimize_sim_lake()
-        ├── Input: lake_path (Path), z_order_cols (List[str]).
+├── 5. Table Maintenance & Z-Order Optimization
+│   ├── io_utils.vacuum_sim_lake()
+│   │   ├── Input: lake_path (Path), retention_hours (int, default 168).
+│   │   ├── Output: None
+│   │   └── Safety/Fallback: Executes dt.vacuum(retention_hours); catches errors with warning log.
+│   └── io_utils.optimize_sim_lake()
+│       ├── Input: lake_path (Path), z_order_cols (List[str]).
+│       ├── Output: None
+│       └── Safety/Fallback: Executes dt.optimize.compact() followed by multi-dimensional Z-ordering on ['dep_date', 'route', 'EF_total'].
+│
+└── 6. Distributed Network Lake Synchronization & Maintenance
+    ├── sync_delta_lake.extract_missing_arrow_table()
+    │   ├── Input: src_lake_path (Path), dest_lake_path (Path), key_col (str), batch_size (int).
+    │   ├── Output: Tuple[Optional[pa.Table], int, bool]
+    │   └── Safety/Fallback: Extracts dest SIM_FIDs into contiguous Arrow buffer; streams source batches applying pc.is_in anti-join in C++; returns net-new Table, count, and bootstrap flag.
+    ├── sync_delta_lake.run_sync()
+    │   ├── Input: local_dir (Path), smb_dir (Path), direction (str), key_col (str), batch_size (int), dry_run (bool).
+    │   ├── Output: int (synchronized row count)
+    │   └── Safety/Fallback: Directionally maps paths; verifies corruption gates; writes via atomic append with zero existing file modification.
+    └── sync_delta_lake.run_maintain()
+        ├── Input: lake_dir (Path), target_size_mb (int), z_order_cols (List[str]), vacuum_hours (int), skip_vacuum (bool), force (bool).
         ├── Output: None
-        └── Safety/Fallback: Executes dt.optimize.compact() followed by multi-dimensional Z-ordering on ['dep_date', 'route', 'EF_total'].
+        └── Safety/Fallback: Bin-packs append fragments into 512 MiB chunks; applies Z-ordering; requires dry-run preview and confirmation before vacuum purge.
 ```
 
 ---
 
 ## 4. Data Workflow
 
-The following Mermaid flowchart illustrates how the physics pipeline interacts with `src/data_manager` across task generation, skip-gate verification, worker execution, and post-day cleanup:
+### 4.1 Workflow A — Trajectory Lake Simulation I/O & Pipeline Maintenance (`io_utils.py`)
 
 ```mermaid
 flowchart TD
@@ -141,8 +157,7 @@ flowchart TD
     D3 -->|Compact, Vacuum & Z-Order| E1
 ```
 
-### Step-by-Step Description:
-
+**Step-by-step Description:**
 1. **Cohort & Metadata Ingestion**: The orchestrator calls `read_corridors_map()` to load calibrated cluster metadata from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, and initializes a `MasterFlightQuery` for the day's departure date range. `read_master_flights()` applies PyArrow filter pushdown to stream matching rows from `master_flights.parquet` into memory.
 2. **Task Generation (Slot 1)**: Cohort rows are converted into `SimTask` dataclass objects. Each task lazily generates its canonical `SIM_FID` identifier via `task.to_sim_fid()`.
 3. **Pre-Batch Skip-Gate Verification (Slot 2)**: Before creating worker batches, Slot 2 invokes `read_existing_sim_fids()` to bulk-query all simulated `SIM_FID`s for the day's routes. Unsimulated tasks are chunked into full batches of `max_batch_size` (e.g. 50), maximizing CPU vectorization without empty slots.
@@ -152,9 +167,157 @@ flowchart TD
 
 ---
 
-## 5. Schema Reference
+### 4.2 Workflow B — Distributed Delta Lake Synchronization (`sync_delta_lake.py sync`)
 
-### 5.1 Pipeline Dataclasses (`schemas.py`)
+```mermaid
+flowchart TD
+    Start(["CLI: sync_delta_lake sync"]) --> Resolve["Resolve Direction:\n• upsert (Local -> SMB)\n• downsert (SMB -> Local)"]
+    
+    Resolve --> CheckDest{"Destination Lake\n_delta_log exists?"}
+    
+    CheckDest -- No (Bootstrap) --> LoadSource["Stream Source Table via PyArrow"]
+    LoadSource --> WriteBootstrap["write_deltalake(mode='overwrite')"]
+    WriteBootstrap --> DoneBootstrap(["Sync Complete: Bootstrapped Lake"])
+    
+    CheckDest -- Yes --> ExtractKeys["Extract Dest SIM_FID Column\n(combine_chunks -> pc.unique -> contiguous Array)"]
+    ExtractKeys --> StreamBatches["Stream Source in Batches\n(chunk_size = 200,000 rows)"]
+    StreamBatches --> ComputeMask["pc.invert(pc.is_in(batch['SIM_FID'], dest_keys))"]
+    ComputeMask --> FilterRows{"Net-new rows\nin batch?"}
+    FilterRows -- Yes --> Accumulate["Accumulate Net-New Batches"]
+    FilterRows -- No --> NextBatch{"More Batches?"}
+    Accumulate --> NextBatch
+    NextBatch -- Yes --> StreamBatches
+    
+    NextBatch -- No --> CheckNewTotal{"Total net-new\nrows > 0?"}
+    CheckNewTotal -- No --> AlreadySynced(["[OK] Lake 100% in sync (0 bytes transferred)"])
+    CheckNewTotal -- Yes --> CheckDryRun{"--dry-run\nflag set?"}
+    CheckDryRun -- Yes --> LogDryRun(["[DRY-RUN] Report N rows, M MB"])
+    CheckDryRun -- No --> CommitAppend["write_deltalake(mode='append', schema_mode='merge')\n• Write new Parquet chunks\n• Single atomic _delta_log JSON commit\n• Existing 512MiB files UNTOUCHED"]
+    CommitAppend --> DoneSync(["[OK] Successfully synchronized N rows"])
+```
+
+**Step-by-step Description:**
+1. **Direction Mapping**: Evaluates `--direction`: in `upsert` mode, `local-dir` is source and `smb-dir` is destination; in `downsert` mode, paths are reversed.
+2. **Corruption & Bootstrap Gate**: Checks if destination contains `_delta_log/`. If missing, bootstraps via `mode="overwrite"`. If present but unparseable, raises an explicit `RuntimeError` to prevent silent overwrites.
+3. **Contiguous Key Projection**: Reads only the destination's `SIM_FID` column using PyArrow dataset pushdown, combines chunks, and extracts unique keys into a contiguous C++ Arrow array buffer.
+4. **Streamed Anti-Join**: Streams source Delta Lake records in constant-memory batches (default 200k rows) and executes `pc.is_in()` to extract strictly net-new records without allocating CPython string objects.
+5. **Atomic Append Transaction**: If net-new rows exist and `--dry-run` is false, writes newly identified rows via `write_deltalake(mode="append")`. Destination 512 MiB files remain untouched, and a single JSON commit updates the transaction log.
+
+---
+
+### 4.3 Workflow C — Distributed Delta Lake Maintenance & Z-Ordering (`sync_delta_lake.py maintain`)
+
+```mermaid
+flowchart TD
+    StartMaint(["CLI: sync_delta_lake maintain"]) --> OpenTable["Open Target DeltaTable"]
+    OpenTable --> Compact["Step 1: dt.optimize.compact(target_size=512MB)\nConsolidate small append fragments"]
+    Compact --> ZOrder["Step 2: dt.optimize.z_order(['dep_date', 'route'])\nMulti-dimensional spatial-temporal clustering"]
+    ZOrder --> CheckSkipVacuum{"--no-vacuum\nflag passed?"}
+    CheckSkipVacuum -- Yes --> CompleteMaint(["[OK] Maintenance Complete (Compacted & Z-Ordered)"])
+    CheckSkipVacuum -- No --> VacuumDry["Step 3: dt.vacuum(dry_run=True)\nIdentify unreferenced files older than retention"]
+    VacuumDry --> ConfirmPrompt{"--force passed OR\ninteractive user confirms?"}
+    ConfirmPrompt -- No --> AbortVacuum(["Maintenance Complete (Orphan files preserved)"])
+    ConfirmPrompt -- Yes --> VacuumExec["dt.vacuum(dry_run=False)\nPurge stale pre-compaction files"]
+    VacuumExec --> DoneFullMaint(["[OK] Maintenance Complete (Compacted, Z-Ordered, Vacuumed)"])
+```
+
+**Step-by-step Description:**
+1. **Lake Verification**: Opens the target Delta Table on the specified network or local path.
+2. **Compaction**: Calls `dt.optimize.compact(target_size=512MB)` to bin-pack small append Parquet files into full 512 MiB chunks (`DELTA_LAKE_TARGET_FILE_SIZE_BYTES`).
+3. **Z-Ordering**: Applies multi-dimensional Z-ordering on active schema dimensions (`['dep_date', 'route']`), grouping related corridor simulation records for maximum downstream file-skipping.
+4. **Vacuum Guard**: If `--no-vacuum` is omitted, conducts a dry-run preview of unreferenced files older than the retention threshold (default 168 hours). Requires `--force` or interactive `[y/N]` confirmation before executing physical file deletion.
+
+---
+
+## 5. CLI Usage Guide (`sync_delta_lake.py`)
+
+### 5.1 Syntax Blocks
+
+#### Bash
+```bash
+# Push new local simulations to SMB share (Upsert)
+python -m src.data_manager.sync_delta_lake sync \
+    --direction upsert \
+    --local-dir data/databases/simulation_lake \
+    --smb-dir "\\PC182.ilr.rwth-aachen.de\studiert_ilr\Kirste\PA_ZeroCloud\PythonPipeline\data\databases\simulation_lake"
+
+# Pull remote simulations from SMB share to local compute node (Downsert)
+python -m src.data_manager.sync_delta_lake sync \
+    --direction downsert \
+    --local-dir data/databases/simulation_lake \
+    --smb-dir "Z:\PythonPipeline\data\databases\simulation_lake"
+
+# Preview sync delta without writing data
+python -m src.data_manager.sync_delta_lake sync \
+    --direction upsert \
+    --local-dir data/databases/simulation_lake \
+    --smb-dir "Z:\PythonPipeline\data\databases\simulation_lake" \
+    --dry-run
+
+# Run maintenance (compaction and Z-ordering) on shared network lake
+python -m src.data_manager.sync_delta_lake maintain \
+    --lake-dir "Z:\PythonPipeline\data\databases\simulation_lake" \
+    --target-size-mb 512 \
+    --z-order-cols "dep_date,route"
+```
+
+#### PowerShell
+```powershell
+# Push new local simulations to SMB share (Upsert)
+python -m src.data_manager.sync_delta_lake sync `
+    --direction upsert `
+    --local-dir data/databases/simulation_lake `
+    --smb-dir "\\PC182.ilr.rwth-aachen.de\studiert_ilr\Kirste\PA_ZeroCloud\PythonPipeline\data\databases\simulation_lake"
+
+# Pull remote simulations from SMB share to local compute node (Downsert)
+python -m src.data_manager.sync_delta_lake sync `
+    --direction downsert `
+    --local-dir data/databases/simulation_lake `
+    --smb-dir "Z:\PythonPipeline\data\databases\simulation_lake"
+
+# Preview sync delta without writing data
+python -m src.data_manager.sync_delta_lake sync `
+    --direction upsert `
+    --local-dir data/databases/simulation_lake `
+    --smb-dir "Z:\PythonPipeline\data\databases\simulation_lake" `
+    --dry-run
+
+# Run maintenance (compaction and Z-ordering) on shared network lake
+python -m src.data_manager.sync_delta_lake maintain `
+    --lake-dir "Z:\PythonPipeline\data\databases\simulation_lake" `
+    --target-size-mb 512 `
+    --z-order-cols "dep_date,route"
+```
+
+### 5.2 Parameter Reference
+
+#### `sync` Subcommand
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `--direction` | `str` | *Required* | Sync direction: `upsert` (Local $\to$ SMB) or `downsert` (SMB $\to$ Local). |
+| `--local-dir` | `Path` | *Required* | Path to local Delta Lake directory (e.g. `data/databases/simulation_lake`). |
+| `--smb-dir` | `Path` | *Required* | Path to network share Delta Lake (UNC path `\\server\...` or drive letter `Z:\...`). |
+| `--key-col` | `str` | `SIM_FID` | Primary key column name used for anti-join deduplication. |
+| `--batch-size` | `int` | `200000` | Number of rows per streaming Arrow batch during scan. |
+| `--dry-run` | `flag` | `False` | Scan and report net-new row counts without modifying destination data. |
+| `--log-file` | `str` | `simulation.log` | Name of log file in `data/logs/` to record execution output. |
+
+#### `maintain` Subcommand
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `--lake-dir` / `--smb-dir` | `Path` | *Required* | Path to target Delta Lake directory to compact and maintain. |
+| `--target-size-mb` | `int` | `512` | Target file size in MiB for compacted Parquet files. |
+| `--z-order-cols` | `str` | `dep_date,route` | Comma-separated list of column names for multi-dimensional Z-ordering. |
+| `--vacuum-hours` | `int` | `168` | Retention threshold in hours before unreferenced files can be purged. |
+| `--no-vacuum` | `flag` | `False` | Skip the vacuum stage entirely (perform compaction & Z-ordering only). |
+| `--force` | `flag` | `False` | Bypass interactive confirmation prompt for vacuum purge. |
+| `--log-file` | `str` | `simulation.log` | Name of log file in `data/logs/` to record execution output. |
+
+---
+
+## 6. Schema Reference
+
+### 6.1 Pipeline Dataclasses (`schemas.py`)
 
 #### `MasterFlightQuery`
 Passed to `read_master_flights()` to construct PyArrow dataset filters.
@@ -212,13 +375,13 @@ Universal task struct passed across all slot boundaries.
 
 ---
 
-### 5.2 Trajectory Delta Lake Schema (`SIM_LAKE_METADATA_SCHEMA`)
+### 6.2 Trajectory Delta Lake Schema (`SIM_LAKE_METADATA_SCHEMA`)
 
 Simulation results written to `data/results/corridor_simulations` persist **full per-waypoint trajectory records** containing all 68+ dynamic physics columns from PyContrails/CoCiP alongside **14 fixed metadata columns**:
 
 | Column Name | PyArrow Type | Description | Key / Index Role |
 |---|---|---|---|
-| `SIM_FID` | `pa.string()` | Unique simulation identifier. | Composite Merge Key |
+| `SIM_FID` | `pa.string()` | Unique simulation identifier. | Composite Merge Key / Anti-Join Key |
 | `model_config_id` | `pa.string()` | Model/physics configuration identifier (e.g. `'kerosene'`). | Composite Merge Key |
 | `fuel` | `pa.string()` | Fuel type: `'kerosene'` or `'hydrogen'`. | Query Dimension |
 | `route` | `pa.string()` | Route corridor key (e.g. `'LIRF-EGKK'`). | Z-Order Dimension |
@@ -235,7 +398,7 @@ Simulation results written to `data/results/corridor_simulations` persist **full
 
 ---
 
-## 6. Delta Lake Upsert & Optimization Contract
+## 7. Delta Lake Upsert & Optimization Contract
 
 To maintain absolute data integrity across parallel execution threads and re-run campaigns, `append_sim_lake()` implements a strict Delta Lake transactional contract based on the composite key `(SIM_FID, model_config_id, time)`.
 
@@ -269,7 +432,7 @@ Post-day maintenance calls `optimize_sim_lake()` which executes:
 
 ---
 
-## 7. Prerequisites & Dependencies
+## 8. Prerequisites & Dependencies
 
 ### Python Package Dependencies
 - **`deltalake`**: Native Rust bindings for Delta Lake transactional reads, writes, merges, deletes, compact, and Z-ordering.
@@ -282,5 +445,7 @@ Post-day maintenance calls `optimize_sim_lake()` which executes:
 - `MASTER_FLIGHTS_FILE` (`data/databases/master_flights/master_flights.parquet`)
 - `ROUTE_SUMMARY_PARQUET` (`data/databases/master_flights/master_flights_route_summary.parquet`)
 - `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
-- `CORRIDOR_SIMULATIONS_DIR` (`data/results/corridor_simulations`)
 - `DELTA_LAKE_TARGET_FILE_SIZE_BYTES` (`536,870,912` = 512 MB)
+
+### Centralized Log Files (`data/logs/`)
+- `simulation.log`: Main log stream for Delta Lake operations, orchestrator execution, and `sync_delta_lake.py` runs.
