@@ -49,7 +49,7 @@ def run_batch(
     rad: MetDataset,
     max_age_hours: int,
     fuel: str = "kerosene",
-    cap_altitude: bool = False,
+    step_down_method: Optional[str] = None,
     low_mem: bool = False,
     overwrite: bool = False,
 ) -> List[WorkerResult]:
@@ -75,8 +75,8 @@ def run_batch(
         Maximum contrail age in hours.
     fuel : str, optional
         Fuel type for trajectory preparation (default 'kerosene').
-    cap_altitude : bool, optional
-        Clamp trajectory altitude ceiling to task.fl (default False).
+    step_down_method : str, optional
+        Step-down altitude method for variational mode (e.g. 'cap').
     low_mem : bool, optional
         Enable CoCiP low-memory preprocessing (default False).
 
@@ -88,7 +88,7 @@ def run_batch(
     """
     # Thread workers inherit parent log handlers — no setup_file_logger() needed.
     # (setup_file_logger is called once in orchestrator.__main__ block only.)
-    loader     = get_loader(sim_mode=sim_mode, fuel=fuel, cap_altitude=cap_altitude)
+    loader     = get_loader(sim_mode=sim_mode, fuel=fuel, step_down_method=step_down_method)
     ps_model, cocip_model = get_model(model_config_id, met, rad, max_age_hours, low_mem)
 
     # ------------------------------------------------------------------ #
@@ -109,6 +109,7 @@ def run_batch(
             results.append(WorkerResult(
                 sim_fid=sim_fid, ef=0.0, fl=task.fl,
                 model_config_id=model_config_id, status="fail",
+                actual_fl=None,
             ))
             continue
         loaded.append((task, flight))
@@ -142,12 +143,14 @@ def run_batch(
             sim_fid = fl.attrs.get("flight_id", "UNK")
             task    = fid_to_task.get(sim_fid)
             ef      = _extract_ef(fl)
+            actual_fl = _extract_actual_fl(fl)
             eval_results.append(WorkerResult(
                 sim_fid=sim_fid,
                 ef=ef,
                 fl=task.fl if task else 0.0,
                 model_config_id=model_config_id,
                 status="success",
+                actual_fl=actual_fl,
             ))
             if task:
                 successful_pairs.append((task, fl))
@@ -160,6 +163,7 @@ def run_batch(
                 eval_results.append(WorkerResult(
                     sim_fid=task.to_sim_fid(), ef=0.0, fl=task.fl,
                     model_config_id=model_config_id, status="fail",
+                    actual_fl=None,
                 ))
 
     except Exception as vec_err:
@@ -172,9 +176,11 @@ def run_batch(
                 fl_ps  = ps_model.eval(flight)
                 fl_sim = cocip_model.eval(source=fl_ps)
                 ef     = _extract_ef(fl_sim)
+                actual_fl = _extract_actual_fl(fl_sim)
                 eval_results.append(WorkerResult(
                     sim_fid=sim_fid, ef=ef, fl=task.fl,
                     model_config_id=model_config_id, status="success",
+                    actual_fl=actual_fl,
                 ))
                 successful_pairs.append((task, fl_sim))
             except Exception as seq_err:
@@ -187,6 +193,7 @@ def run_batch(
                 eval_results.append(WorkerResult(
                     sim_fid=sim_fid, ef=0.0, fl=task.fl,
                     model_config_id=model_config_id, status="fail",
+                    actual_fl=None,
                 ))
 
     results.extend(eval_results)
@@ -207,6 +214,14 @@ def _extract_ef(flight: Flight) -> float:
     if "ef" not in flight.data:
         return 0.0
     return float(np.nansum(flight["ef"]))
+
+
+def _extract_actual_fl(flight: Flight) -> float:
+    """Extract max cruise FL from flight trajectory altitude."""
+    if "altitude" in flight.data and len(flight.data["altitude"]) > 0:
+        max_alt_m = float(np.nanmax(flight["altitude"]))
+        return round(max_alt_m / (100 * 0.3048), 1)
+    return 0.0
 
 
 def _write_to_lake(

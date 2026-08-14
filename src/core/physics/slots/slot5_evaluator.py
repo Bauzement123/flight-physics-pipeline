@@ -78,18 +78,33 @@ def _evaluate_variational(
     EvalResult
         succeeded, failed, and still_todo (step-down SimTasks for next iteration).
     """
-    succeeded  = [r for r in results if r.status == "success"]
-    failed     = [r for r in results if r.status == "fail"]
+    succeeded_raw = [r for r in results if r.status == "success"]
+    failed        = [r for r in results if r.status == "fail"]
+    succeeded: List[WorkerResult] = []
     still_todo: List[SimTask] = []
 
-    for result in succeeded:
+    for result in succeeded_raw:
         task = task_by_fid.get(result.sim_fid)
         if task is None:
             logger.warning(
                 "Slot 5 (variational): no matching task for sim_fid=%s — skipping step-down.",
                 result.sim_fid,
             )
+            succeeded.append(result)
             continue
+
+        # FL Sanity Check: verify that trajectory actually simulated at task.fl (e.g. within 1.5 FL tolerance)
+        if result.actual_fl is not None and abs(result.actual_fl - task.fl) > 1.5:
+            logger.error(
+                "Slot 5 (variational) FL SANITY CHECK FAILED for %s: "
+                "actual_fl=%.1f != task.fl=%.1f (tolerance=1.5 FL). Marking task as failed.",
+                result.sim_fid, result.actual_fl, task.fl,
+            )
+            result.status = "fail"
+            failed.append(result)
+            continue
+
+        succeeded.append(result)
         next_task = compute_stepdown_task(task, result.ef, step_size, min_safe_fl)
         if next_task is not None:
             still_todo.append(next_task)

@@ -15,12 +15,15 @@ from src.data_manager.schemas import SimTask
 from pycontrails import Flight
 
 
+VALID_STEP_DOWN_METHODS = {"cap"}
+
+
 def get_loader(
     sim_mode: str = "standard",
     fuel: str = "kerosene",
-    cap_altitude: bool = False,
+    step_down_method: Optional[str] = None,
 ) -> Callable[[SimTask, Dict[Tuple[str, int], Any]], Optional[Flight]]:
-    """Return a trajectory loader callable configured for fuel type and altitude capping.
+    """Return a trajectory loader callable configured for fuel type and step-down method.
 
     Parameters
     ----------
@@ -28,8 +31,9 @@ def get_loader(
         Execution mode: ``'standard'`` or ``'variational'``.
     fuel : str
         Fuel type: ``'kerosene'`` (default) or ``'hydrogen'``.
-    cap_altitude : bool
-        If True, clamp trajectory altitude to task.fl ceiling (default False).
+    step_down_method : str, optional
+        Step-down altitude method for variational mode (e.g. ``'cap'``).
+        Must be None for ``'standard'`` mode, and non-None for ``'variational'`` mode.
 
     Returns
     -------
@@ -40,7 +44,25 @@ def get_loader(
     if sim_mode not in ("standard", "variational"):
         raise ValueError(f"Unknown sim_mode '{sim_mode}'. Must be 'standard' or 'variational'.")
 
+    # Slot 3 Guard: mutual exclusion of mode and step_down_method
+    if sim_mode == "variational" and step_down_method is None:
+        raise ValueError(
+            "sim_mode='variational' requires a step_down_method. "
+            "Pass --step-down-method cap (or another valid method) at the CLI."
+        )
+    if sim_mode == "standard" and step_down_method is not None:
+        raise ValueError(
+            f"step_down_method='{step_down_method}' is only valid with "
+            "sim_mode='variational'. Do not pass --step-down-method for standard runs."
+        )
+    if step_down_method is not None and step_down_method not in VALID_STEP_DOWN_METHODS:
+        raise ValueError(
+            f"Unknown step_down_method '{step_down_method}'. "
+            f"Valid methods: {sorted(VALID_STEP_DOWN_METHODS)}"
+        )
+
     use_hydrogen = (fuel == "hydrogen")
+    cap_altitude = (step_down_method == "cap")
     return partial(
         cluster_loader.load,
         use_hydrogen=use_hydrogen,

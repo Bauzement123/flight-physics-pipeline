@@ -119,6 +119,7 @@ class WorkerResult:
     fl: float
     model_config_id: str
     status: str        # "success" | "fail"
+    actual_fl: Optional[float] = None
 
 
 @dataclass

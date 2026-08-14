@@ -209,6 +209,7 @@ CORRIDOR_SIMULATIONS_DIR = RESULTS_DIR / "corridor_simulations"
 
 # Physics Simulation Parameters
 MIN_SAFE_FL: float = 190.0  # Minimum safe flight level floor (FL 190 ≈ 5.79 km / ~19,000 ft)
+DELTA_LAKE_TARGET_FILE_SIZE_BYTES: int = 512 * 1024 * 1024  # 512 MB target file size for Delta compaction & Z-ordering
 
 # --- Phase Quality Campaign Filtering Defaults ---
 # Default metadata pre-filter thresholds (None = check is ignored/pass-through unless overridden via CLI)

@@ -69,12 +69,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Fuel type to attach to pycontrails Flight object in Slot 3 (default 'kerosene').",
     )
 
-    # ── Altitude capping flag (Slot 3 trajectory transform) ─────────────── #
+    # ── Step-down altitude method (Slot 3 trajectory transform) ─────────── #
     parser.add_argument(
-        "--cap-altitude",
-        action="store_true",
-        dest="cap_altitude",
-        help="Apply FL altitude ceiling cap to trajectory waypoints in Slot 3.",
+        "--step-down-method",
+        choices=["cap"],
+        default=None,
+        dest="step_down_method",
+        help="Step-down altitude modification method in Slot 3 for variational mode (e.g. 'cap').",
     )
 
     # ── Date range ──────────────────────────────────────────────────────── #
@@ -243,6 +244,14 @@ def main(argv=None) -> None:
         args.start_date, args.end_date, len(date_range),
     )
 
+    # Mutual exclusion guard: --step-down-method ↔ --sim-mode variational
+    if args.step_down_method is not None and args.sim_mode != "variational":
+        logger.error("--step-down-method requires --sim-mode variational")
+        sys.exit(2)
+    if args.sim_mode == "variational" and args.step_down_method is None:
+        logger.error("--sim-mode variational requires --step-down-method (e.g. --step-down-method cap)")
+        sys.exit(2)
+
     # Parse rank parameters (pure argument processing)
     ranks_to_process = None
     if args.ranks:
@@ -272,7 +281,7 @@ def main(argv=None) -> None:
         weather_cache_dir=weather_cache_dir,
         corridors_dir=corridors_dir,
         fuel=args.fuel,
-        cap_altitude=args.cap_altitude,
+        step_down_method=args.step_down_method,
         max_age_hours=args.max_age,
         max_workers=args.max_workers,
         batch_size=args.batch_size,

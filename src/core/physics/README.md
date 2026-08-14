@@ -79,15 +79,15 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │       └── Safety/Fallback: Returns None if ef <= 0 (suppressed) or next_fl < min_safe_fl (floor reached); otherwise returns dataclasses.replace(task, fl=next_fl).
 │
 ├── 5. Slot 3: Trajectory Loading & Time-Shifting
-│   └── loaders.cluster_loader.load() (via get_loader(sim_mode, fuel, cap_altitude))
-│       ├── Input: SimTask, corridors_map, use_hydrogen, cap_altitude.
+│   └── loaders.cluster_loader.load() (via get_loader(sim_mode, fuel, step_down_method))
+│       ├── Input: SimTask, corridors_map, use_hydrogen, step_down_method ('cap').
 │       ├── Output: Optional[pycontrails.Flight]
-│       └── Safety/Fallback: Validates aircraft typecode via is_supported_typecode(); shifts timestamps relative to task.firstseen; attaches flight.attrs['fuel']; returns None on missing files or invalid typecodes.
+│       └── Safety/Fallback: Validates mode-method mutual exclusion; validates aircraft typecode via is_supported_typecode(); shifts timestamps relative to task.firstseen; clamps altitude ceiling if step_down_method=='cap'; returns None on missing files or invalid typecodes.
 │
 ├── 6. Slot 4: Physics Model Instantiation & Evaluation
 │   └── models.ps_cocip.get_model() / worker.run_batch()
-│       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, low_mem, fuel.
-│       ├── Output: Tuple[PSFlight, Cocip] / List[WorkerResult]
+│       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, low_mem, fuel, step_down_method.
+│       ├── Output: Tuple[PSFlight, Cocip] / List[WorkerResult] (with actual_fl populated)
 │       └── Safety/Fallback: Runs vectorized ps_model.eval() + cocip_model.eval(); on vector exception, executes sequential per-flight fallback; logs unrecoverable failures to skipped_aircraft.log.
 │
 ├── 7. Parallel Execution Coordination
@@ -96,11 +96,11 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │       ├── Output: Iterator[List[WorkerResult]]
 │       └── Safety/Fallback: Spawns ThreadPoolExecutor; catches batch exceptions and yields empty lists; calls gc.collect() after each batch completion.
 │
-├── 8. Slot 5: Batch Result Evaluation
+├── 8. Slot 5: Batch Result Evaluation & FL Sanity Check
 │   └── slots.slot5_evaluator.evaluate()
 │       ├── Input: List[WorkerResult], task_by_fid, sim_mode, step_size, min_safe_fl.
 │       ├── Output: EvalResult (succeeded, failed, still_todo).
-│       └── Safety/Fallback: Partitions succeeded vs failed; for variational mode, calls slot2_batcher.compute_stepdown_task() to populate still_todo.
+│       └── Safety/Fallback: Validates actual_fl against task.fl (fails tasks if |actual_fl - task.fl| > 1.5 FL); partitions succeeded vs failed; for variational mode, calls slot2_batcher.compute_stepdown_task() to populate still_todo.
 │
 └── 9. Trajectory Persistence & Post-Day Lake Optimization
     ├── worker._write_to_lake()
@@ -150,7 +150,26 @@ flowchart TD
 5. **Bulk Skip-Gate & Batch Packing (Slot 2)**: In standard mode, `filter_and_batch()` calls `read_existing_sim_fids()` to retrieve all simulated `SIM_FID`s for the day in a single PyArrow scan. Unsimulated tasks are grouped by `(dep, arr, cluster_id)` and packed into full batches of `max_batch_size` (default 50). In variational mode, `read_ef_by_base_key()` retrieves prior FLs and Energy Forcing values.
 6. **Parallel Dispatch**: The orchestrator invokes `engine.run_parallel()`, passing batches to a `ThreadPoolExecutor` running `worker.run_batch()`.
 7. **Batch Evaluation (Slot 5) & Round-Boundary Re-Batching**: As workers complete, `evaluate()` classifies outcomes into `succeeded` and `failed`. In variational mode, flights with positive warming ($\text{EF}_{\text{total}} > 0$) call `slot2_batcher.compute_stepdown_task()` to populate `still_todo`. The orchestrator accumulates all `still_todo` tasks across the round and re-batches them via Slot 2 at the round boundary into full vectorized batches.
-8. **Post-Day Vacuum & Z-Order Optimization**: After all batches and step-downs for the day finish, `vacuum_sim_lake()` prunes stale parquet files and `optimize_sim_lake()` compacts files and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`.
+8. **Post-Day Vacuum & Z-Order Optimization**: After all batches and step-downs for the day finish, `vacuum_sim_lake()` prunes stale parquet files older than 168 hours and `optimize_sim_lake()` compacts small files into optimal **512 MB** Parquet chunks (`DELTA_LAKE_TARGET_FILE_SIZE_BYTES = 536,870,912` bytes from `config.py`) and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`.
+9. **Wall-to-Wall Temporal & Task Emission Metrics**:
+   - Tracks end-to-end wall-clock elapsed time per day and across the entire campaign, calculating effective throughput (`s/task` and `tasks/s`).
+   - Clearly distinguishes between **Total Tasks Committed** (all unique trajectories written to the Delta Lake), **Baseline Cohort Tasks** (initial nominal simulations), and **Step-Downs Emitted** (iterative descent flights).
+   - **Daily Transition Log Format**:
+     ```text
+     Day YYYY-MM-DD completed in 1m 50s (110.3s) — 87 tasks committed to lake (1.27s/task) [24 baseline + 63 step-downs emitted, 0 failed].
+     ```
+   - **Global Campaign Summary Block**:
+     ```text
+     ================================================================================
+     ORCHESTRATOR CAMPAIGN SUMMARY
+     ================================================================================
+     Total Duration:          1m 50s (110.3s) across 1 calendar day(s)
+     Total Tasks Committed:   87 tasks written to Delta Lake (1.27s/task, 0.79 tasks/s)
+       • Baseline Tasks:      24 tasks
+       • Step-Downs Emitted:  63 tasks
+     Failed Simulations:      0
+     ================================================================================
+     ```
 
 ---
 
@@ -186,10 +205,13 @@ flowchart TD
    - For each task, `cluster_loader.load()` fetches the cluster parquet file from `corridors_map`.
    - Validates `task.typecode` using `is_supported_typecode()`. If invalid or unsupported, logs to `data/logs/skipped_aircraft.log` and returns `None`.
    - Shifts all waypoints so waypoint[0] matches `task.firstseen`.
+   - If `step_down_method == 'cap'`, clamps waypoint altitudes to the target `task.fl` ceiling ($z \le \text{FL} \times 100 \times 0.3048\text{ m}$).
    - Instantiates a `pycontrails.Flight` object, attaches `flight.attrs["fuel"] = "hydrogen"` or `"kerosene"`, and assigns fuel-specific properties.
 3. **Phase 2 (Physics Evaluation & Fallback)**:
-   - **Vectorized Evaluation**: All loaded `Flight` objects are evaluated in a single vector call: `ps_model.eval(flights_list)` and `cocip_model.eval(source=fl_ps)`. Total Energy Forcing ($\text{EF}_{\text{total}} = \sum \text{ef}$ in Joules) is computed via `_extract_ef()`.
+   - **Vectorized Evaluation**: All loaded `Flight` objects are evaluated in a single vector call: `ps_model.eval(flights_list)` and `cocip_model.eval(source=fl_ps)`. Total Energy Forcing ($\text{EF}_{\text{total}} = \sum \text{ef}$ in Joules) is computed via `_extract_ef()`, and simulated cruise flight level is extracted via `_extract_actual_fl()`.
+   - **Hydrogen `nvpm_ei_n` Notice**: For hydrogen simulations, PyContrails emits an informational `UserWarning: Found duplicate key nvpm_ei_n in attrs and data`. This occurs because the initial emission index constant ($2.76 \times 10^{13}\text{ kg}^{-1}$) is attached as a flight attribute while CoCiP generates per-waypoint emission series. This warning is expected and has **zero impact on simulation correctness**.
    - **Sequential Fallback**: If vectorized evaluation raises an exception, the worker falls back to sequential single-flight evaluation. Any flight that fails sequential simulation logs to `skipped_aircraft.log` and is marked `status="fail", ef=0.0`.
+   - **Slot 5 FL Sanity Guard**: In Slot 5, `_evaluate_variational` validates `|actual_fl - task.fl| <= 1.5` FL. If a step-down method fails to modify trajectory altitude, the task is immediately reclassified as `failed` and prevented from generating corrupted downstream step-downs.
 4. **Phase 3 (Full Trajectory Delta Lake Persistence)**:
    - For all successful flights, the worker extracts the full per-waypoint DataFrame (`flight.to_dataframe()`) preserving all 68+ dynamic physics columns.
    - Injects the **14 mandatory fixed metadata columns** (`SIM_FID`, `model_config_id`, `fuel`, `route`, `icao24`, `callsign`, `typecode`, `cluster_id`, `FL`, `dep_date`, `firstseen`, `lastseen`, `EF_total`, `total_fuel_burn`).
@@ -228,12 +250,13 @@ python -m src.core.physics.cli \
     --batch-size 50 \
     --out-dir data/results/corridor_simulations
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode
+# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
 python -m src.core.physics.cli \
     --start-date 2025-01-01 \
     --end-date 2025-01-07 \
     --ranks 1,3,5 \
     --sim-mode variational \
+    --step-down-method cap \
     --fuel hydrogen \
     --model-config-id kerosene \
     --step-size 10.0 \
@@ -259,12 +282,13 @@ python -m src.core.physics.cli `
     --batch-size 50 `
     --out-dir data/results/corridor_simulations
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode
+# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
 python -m src.core.physics.cli `
     --start-date 2025-01-01 `
     --end-date 2025-01-07 `
     --ranks "1,3,5" `
     --sim-mode variational `
+    --step-down-method cap `
     --fuel hydrogen `
     --model-config-id kerosene `
     --step-size 10.0 `
@@ -281,6 +305,7 @@ python -m src.core.physics.cli `
 | `--start-date` | `str` | *Required* | First calendar day to process (inclusive, format `YYYY-MM-DD`). |
 | `--end-date` | `str` | *Required* | Last calendar day to process (inclusive, format `YYYY-MM-DD`). |
 | `--sim-mode` | `str` | `'standard'` | Simulation mode: `'standard'` (nominal FL baseline) or `'variational'` (step-down optimization pass). |
+| `--step-down-method` | `str` | `None` | Step-down altitude modification method in Slot 3 (`'cap'`). **Required if and only if `--sim-mode variational` is active**. |
 | `--fuel` | `str` | `'kerosene'` | Fuel type: `'kerosene'` or `'hydrogen'`. Attaches `Flight(fuel=...)` in Slot 3 and sets `fuel` column. |
 | `--model-config-id` | `str` | `'kerosene'` | Model configuration identifier passed to physics engine and composite merge key. |
 | `--ranks` | `str` | `None` | Comma-separated list of route cluster ranks to process (e.g. `'1,3,5'`). Mutually exclusive with `--lower-rank`. |
@@ -294,7 +319,6 @@ python -m src.core.physics.cli `
 | `--min-safe-fl` | `float` | `190.0` | Minimum safe flight level in FL units below which step-down halts (`MIN_SAFE_FL`). |
 | `--clusters-per-flight`, `-x` | `int` | `1` | Number of representative cluster trajectories sampled per flight. |
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
-| `--cap-altitude` | `flag` | `False` | Apply FL altitude ceiling cap to trajectory waypoints in Slot 3. |
 | `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |
 | `--batch-size` | `int` | `50` | Maximum number of flight tasks per parallel execution batch. |
 | `--low-mem` | `flag` | `False` | Enables lazy ERA5 loading, skips spatial cropping and eager `.load()`. |
@@ -318,9 +342,10 @@ python -m src.core.physics.cli `
   - `WEATHER_DIR` (`data/weather`)
   - `CORRIDOR_SIMULATIONS_DIR` (`data/results/corridor_simulations`)
   - `CORRIDOR_PATHS_DIR` (`data/corridor_paths`)
-  - `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_corridor_model_registry.parquet`)
+  - `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
   - `ROUTE_SUMMARY_PARQUET` (`data/databases/master_flights/master_flights_route_summary.parquet`)
   - `EUR_BBOX` ($[-26, 30, 44, 79]$)
   - `MIN_SAFE_FL` (`190.0`)
+  - `DELTA_LAKE_TARGET_FILE_SIZE_BYTES` (`536,870,912` = 512 MB)
   - `is_supported_typecode()` / `UNSUPPORTED_TYPECODE_FLAG`
 - **Logging Destination**: Written to `data/logs/simulation.log` via `setup_file_logger("simulation.log")`. Skipped or unsupported airframes are appended to `data/logs/skipped_aircraft.log`.

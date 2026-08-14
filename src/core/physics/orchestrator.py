@@ -27,6 +27,7 @@ Slot ordering per day
 
 import gc
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from functools import partial
@@ -69,6 +70,17 @@ def _floor_h(ts: pd.Timestamp) -> pd.Timestamp:
 
 def _ceil_h(ts: pd.Timestamp) -> pd.Timestamp:
     return ts.ceil("h")
+
+
+def _format_duration(seconds: float) -> str:
+    """Format duration in seconds into a human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m {s:02d}s ({seconds:.1f}s)"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s ({seconds:.1f}s)"
 
 
 def _open_crop_and_load(era5_obj: ERA5, bbox: list, low_mem: bool) -> MetDataset:
@@ -237,7 +249,7 @@ def run(
     ranks: Optional[List[int]] = None,
     corridors_dir: Optional[Path] = None,
     fuel: str = "kerosene",
-    cap_altitude: bool = False,
+    step_down_method: Optional[str] = None,
     max_age_hours: int = 48,
     max_workers: int = 4,
     step_size: float = 10.0,
@@ -269,8 +281,8 @@ def run(
         Custom directory for corridor trajectory parquets.
     fuel : str
         Fuel type attached to Flight in Slot 3 (default 'kerosene').
-    cap_altitude : bool
-        Apply FL altitude ceiling cap in Slot 3 (default False).
+    step_down_method : str, optional
+        Step-down altitude method in Slot 3 for variational mode (e.g. 'cap').
     max_age_hours : int
         Maximum contrail age in hours (default 48).
     max_workers : int
@@ -302,10 +314,20 @@ def run(
     allowed_routes = list({route_id for (route_id, _) in corridors_map.keys()})
     logger.info("Orchestrator: target route(s) across clusters: %s", allowed_routes)
 
+    # Campaign-wide metrics tracking (wall-to-wall)
+    run_t0 = time.perf_counter()
+    total_cohort_tasks = 0
+    total_committed_tasks = 0
+    total_baseline_tasks = 0
+    total_stepdowns_emitted = 0
+    total_failed_tasks = 0
+    total_skipped_tasks = 0
+
     # Per-hour ERA5 cache: pd.Timestamp (UTC, hourly) → (met_h, rad_h)
     hour_cache: Dict[pd.Timestamp, Tuple[MetDataset, MetDataset]] = {}
 
     for day_idx, day in enumerate(date_range):
+        day_t0 = time.perf_counter()
         logger.info("=== Day %s  (%d / %d) ===", day, day_idx + 1, len(date_range))
 
         # ── Slot 1: read cohort with exact route predicate pushdown ─────── #
@@ -344,6 +366,8 @@ def run(
         if not tasks:
             logger.info("No tasks generated for day %s — skipping.", day)
             continue
+
+        total_cohort_tasks += len(tasks)
 
         # ── Compute exact ERA5 window from task firstseen / lastseen ────── #
         era5_start = _floor_h(
@@ -396,7 +420,12 @@ def run(
         )
 
         if not batches:
-            logger.info("All tasks already in lake for day %s — skipping engine.", day)
+            day_elapsed = time.perf_counter() - day_t0
+            total_skipped_tasks += len(tasks)
+            logger.info(
+                "Day %s completed in %s — 0 tasks committed (all %d cohort tasks skipped via skip-gate), 0 failed.",
+                day, _format_duration(day_elapsed), len(tasks),
+            )
             del met, rad
             gc.collect()
             continue
@@ -417,13 +446,16 @@ def run(
             rad=rad,
             max_age_hours=max_age_hours,
             fuel=fuel,
-            cap_altitude=cap_altitude,
+            step_down_method=step_down_method,
             low_mem=low_mem,
             overwrite=overwrite,
         )
 
         day_succeeded = day_failed = 0
+        day_baseline_succeeded = 0
+        day_stepdown_succeeded = 0
         pending: list = list(batches)  # start with Slot-2 batches
+        round_idx = 0
 
         while pending:
             round_still_todo: List[SimTask] = []
@@ -438,8 +470,14 @@ def run(
                 eval_result = evaluate(
                     worker_results, task_by_fid, sim_mode, step_size, min_safe_fl
                 )
-                day_succeeded += len(eval_result.succeeded)
+                n_succ = len(eval_result.succeeded)
+                day_succeeded += n_succ
                 day_failed    += len(eval_result.failed)
+
+                if round_idx == 0:
+                    day_baseline_succeeded += n_succ
+                else:
+                    day_stepdown_succeeded += n_succ
 
                 if eval_result.still_todo:
                     round_still_todo.extend(eval_result.still_todo)
@@ -456,12 +494,9 @@ def run(
                     overwrite=overwrite,
                     model_config_id=model_config_id,
                 )
+                round_idx += 1
             else:
                 pending = []
-
-        logger.info(
-            "Day %s: %d succeeded, %d failed.", day, day_succeeded, day_failed
-        )
 
         # ── Post-day cleanup ─────────────────────────────────────────────── #
         vacuum_sim_lake(lake_path)
@@ -469,7 +504,48 @@ def run(
         del met, rad
         gc.collect()
 
+        day_elapsed = time.perf_counter() - day_t0
+        total_committed_tasks += day_succeeded
+        total_baseline_tasks += day_baseline_succeeded
+        total_stepdowns_emitted += day_stepdown_succeeded
+        total_failed_tasks += day_failed
+
+        rate_str = f"{day_elapsed / day_succeeded:.2f}s/task" if day_succeeded > 0 else "N/A"
+        if sim_mode == "variational":
+            breakdown_str = f"{day_baseline_succeeded} baseline + {day_stepdown_succeeded} step-downs emitted"
+        else:
+            breakdown_str = f"{day_succeeded} cohort"
+
+        logger.info(
+            "Day %s completed in %s — %d tasks committed to lake (%s) [%s, %d failed].",
+            day, _format_duration(day_elapsed), day_succeeded, rate_str, breakdown_str, day_failed,
+        )
+
+    total_elapsed = time.perf_counter() - run_t0
+    rate_str = f"{total_elapsed / total_committed_tasks:.2f}s/task" if total_committed_tasks > 0 else "N/A"
+    fps_str = f"{total_committed_tasks / total_elapsed:.2f} tasks/s" if total_elapsed > 0 else "N/A"
+
+    if sim_mode == "variational":
+        campaign_breakdown = (
+            f"  • Baseline Tasks:      {total_baseline_tasks} tasks\n"
+            f"  • Step-Downs Emitted:  {total_stepdowns_emitted} tasks\n"
+        )
+    else:
+        campaign_breakdown = f"  • Cohort Tasks:        {total_cohort_tasks} candidate tasks\n"
+
     logger.info(
-        "Orchestrator run complete — %d day(s) processed.", len(date_range)
+        "\n"
+        "================================================================================\n"
+        "ORCHESTRATOR CAMPAIGN SUMMARY\n"
+        "================================================================================\n"
+        "Total Duration:          %s across %d calendar day(s)\n"
+        "Total Tasks Committed:   %d tasks written to Delta Lake (%s, %s)\n"
+        "%s"
+        "Failed Simulations:      %d\n"
+        "================================================================================",
+        _format_duration(total_elapsed), len(date_range),
+        total_committed_tasks, rate_str, fps_str,
+        campaign_breakdown,
+        total_failed_tasks,
     )
 

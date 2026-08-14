@@ -258,10 +258,10 @@ When `--overwrite` is specified on the CLI, `append_sim_lake()` executes a two-s
    ```
 2. **Append Write**: Writes the fresh batch rows directly to the table manifest using `mode="append", schema_mode="merge"`.
 
-### End-of-Day Multi-Dimensional Z-Ordering
+### End-of-Day Compaction & Multi-Dimensional Z-Ordering
 Post-day maintenance calls `optimize_sim_lake()` which executes:
-1. `dt.optimize.compact()` to merge fragmented parquet files into optimal 128MB–1GB row groups.
-2. `dt.optimize.z_order(["dep_date", "route", "EF_total"])` to co-locate spatially and temporally correlated records, accelerating downstream campaign analytics by over 10x.
+1. `dt.optimize.compact(target_size=DELTA_LAKE_TARGET_FILE_SIZE_BYTES)`: Bin-packs small per-batch parquet fragments into consolidated Parquet files targeting **512 MB** (`DELTA_LAKE_TARGET_FILE_SIZE_BYTES = 536,870,912` bytes from `config.py`).
+2. `dt.optimize.z_order(["dep_date", "route", "EF_total"], target_size=DELTA_LAKE_TARGET_FILE_SIZE_BYTES)`: Co-locates spatially and temporally correlated trajectory records, accelerating downstream campaign analytics by over 10x.
 
 ---
 
@@ -277,5 +277,6 @@ Post-day maintenance calls `optimize_sim_lake()` which executes:
 - `BASE_DIR`
 - `MASTER_FLIGHTS_FILE` (`data/databases/master_flights/master_flights.parquet`)
 - `ROUTE_SUMMARY_PARQUET` (`data/databases/master_flights/master_flights_route_summary.parquet`)
-- `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_corridor_model_registry.parquet`)
+- `GLOBAL_CORRIDOR_MODEL_REGISTRY` (`data/registries/global_model_registry.parquet`)
 - `CORRIDOR_SIMULATIONS_DIR` (`data/results/corridor_simulations`)
+- `DELTA_LAKE_TARGET_FILE_SIZE_BYTES` (`536,870,912` = 512 MB)

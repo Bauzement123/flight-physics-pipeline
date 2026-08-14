@@ -15,7 +15,13 @@ from src.data_manager.schemas import (
     SIM_LAKE_FIXED_COLUMNS,
     SIM_LAKE_STR_COLUMNS,
 )
-from src.common.config import BASE_DIR, MASTER_FLIGHTS_FILE, ROUTE_SUMMARY_PARQUET, GLOBAL_CORRIDOR_MODEL_REGISTRY
+from src.common.config import (
+    BASE_DIR,
+    MASTER_FLIGHTS_FILE,
+    ROUTE_SUMMARY_PARQUET,
+    GLOBAL_CORRIDOR_MODEL_REGISTRY,
+    DELTA_LAKE_TARGET_FILE_SIZE_BYTES,
+)
 
 if TYPE_CHECKING:
     from src.core.processing.filter_result import FilterResult
@@ -336,17 +342,17 @@ def read_sim_lake(lake_path: str | Path, query: SimResultQuery) -> pd.DataFrame:
 
     filters = []
     if query.sim_fids:
-        filters.append(ds.field("SIM_FID").isin(query.sim_fids))
+        filters.append(ds.field("SIM_FID").cast(pa.string()).isin(query.sim_fids))
     if query.routes:
-        filters.append(ds.field("route").isin(query.routes))
+        filters.append(ds.field("route").cast(pa.string()).isin(query.routes))
     if query.ef_gt is not None:
         filters.append(ds.field("EF_total") > query.ef_gt)
     if query.fl_lte is not None:
         filters.append(ds.field("FL") <= query.fl_lte)
     if query.model_config_id is not None:
-        filters.append(ds.field("model_config_id") == query.model_config_id)
+        filters.append(ds.field("model_config_id").cast(pa.string()) == query.model_config_id)
     if query.fuel is not None:
-        filters.append(ds.field("fuel") == query.fuel)
+        filters.append(ds.field("fuel").cast(pa.string()) == query.fuel)
 
     pyarrow_ds = dt.to_pyarrow_dataset()
 
@@ -463,7 +469,7 @@ def read_existing_sim_fids(
 
     filters = []
     if routes:
-        filters.append(ds.field("route").isin(routes))
+        filters.append(ds.field("route").cast(pa.string()).isin(routes))
     if dep_date is not None:
         filters.append(ds.field("dep_date") == dep_date)
 
@@ -473,20 +479,17 @@ def read_existing_sim_fids(
         for f in filters[1:]:
             combined = combined & f
 
-    pyarrow_ds = dt.to_pyarrow_dataset()
     try:
+        pyarrow_ds = dt.to_pyarrow_dataset()
         if combined is not None:
             table = pyarrow_ds.to_table(columns=["SIM_FID"], filter=combined)
         else:
             table = pyarrow_ds.to_table(columns=["SIM_FID"])
+        fids = table.column("SIM_FID").to_pylist()
+        return frozenset(fids)
     except Exception as exc:
-        logger.warning("read_existing_sim_fids failed scan for %s: %s", lake_path, exc)
+        logger.warning("read_existing_sim_fids failed to scan %s: %s", lake_path, exc)
         return frozenset()
-
-    df = table.to_pandas()
-    if df.empty:
-        return frozenset()
-    return frozenset(df["SIM_FID"].unique())
 
 
 def vacuum_sim_lake(
@@ -513,6 +516,7 @@ def vacuum_sim_lake(
 def optimize_sim_lake(
     lake_path: Path,
     z_order_cols: Optional[List[str]] = None,
+    target_size: Optional[int] = DELTA_LAKE_TARGET_FILE_SIZE_BYTES,
 ) -> None:
     """Run Delta Lake compaction and Z-ordering on the simulation lake.
 
@@ -522,6 +526,9 @@ def optimize_sim_lake(
         Path to the simulation Delta Lake directory.
     z_order_cols : list[str], optional
         Columns to Z-order on. Default is ``["dep_date", "route", "EF_total"]``.
+    target_size : int, optional
+        Target file size in bytes for bin-packed compaction chunks.
+        Default is ``DELTA_LAKE_TARGET_FILE_SIZE_BYTES`` (512 MB).
     """
     path_str = str(lake_path)
     if not Path(path_str).exists():
@@ -533,10 +540,13 @@ def optimize_sim_lake(
     try:
         dt = DeltaTable(path_str)
         # Step 1: Compact small per-batch parquet files into larger chunks
-        dt.optimize.compact()
+        dt.optimize.compact(target_size=target_size)
         # Step 2: Z-order data on key query columns for fast skipping
-        dt.optimize.z_order(z_order_cols)
-        logger.info("optimize_sim_lake: compacted and Z-ordered %s on %s", lake_path, z_order_cols)
+        dt.optimize.z_order(z_order_cols, target_size=target_size)
+        logger.info(
+            "optimize_sim_lake: compacted and Z-ordered %s on %s (target_size=%d bytes)",
+            lake_path, z_order_cols, target_size or 0,
+        )
     except Exception as exc:
         logger.warning("optimize_sim_lake failed for %s: %s — continuing.", lake_path, exc)
 
@@ -581,9 +591,9 @@ def read_ef_by_base_key(
 
     filters = []
     if model_config_id is not None:
-        filters.append(ds.field("model_config_id") == model_config_id)
+        filters.append(ds.field("model_config_id").cast(pa.string()) == model_config_id)
     if routes:
-        filters.append(ds.field("route").isin(routes))
+        filters.append(ds.field("route").cast(pa.string()).isin(routes))
     if dep_dates:
         filters.append(ds.field("dep_date").isin(dep_dates))
 
