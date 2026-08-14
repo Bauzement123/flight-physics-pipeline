@@ -22,7 +22,7 @@ import logging
 from typing import Callable, Dict, List
 
 from src.common.config import MIN_SAFE_FL
-from src.core.physics.slots.utils import compute_stepdown_task
+from src.core.physics.slots.slot2_batcher import compute_stepdown_task
 from src.data_manager.schemas import EvalResult, SimTask, WorkerResult
 
 logger = logging.getLogger(__name__)

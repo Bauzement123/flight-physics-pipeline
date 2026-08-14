@@ -23,6 +23,7 @@ Extracted from:
 - engine.py L195-L276 (simulate_flights_parallel batch partitioning)
 """
 
+import dataclasses
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -31,7 +32,6 @@ from typing import List, Optional
 import pandas as pd
 
 from src.common.config import MIN_SAFE_FL
-from src.core.physics.slots.utils import compute_stepdown_task
 from src.data_manager.io_utils import read_ef_by_base_key, read_existing_sim_fids
 from src.data_manager.schemas import SimTask
 
@@ -241,7 +241,45 @@ def _filter_and_expand_variational(
     return batches
 
 
+def compute_stepdown_task(
+    task: SimTask,
+    ef: float,
+    step_size: float = 10.0,
+    min_safe_fl: float = MIN_SAFE_FL,
+) -> Optional[SimTask]:
+    """Return a new step-down SimTask if conditions are met, else None.
+
+    Single source of truth for variational step-down task mutation.
+    Owned by Slot 2 and called during both initial lake history evaluation
+    and Slot 5 batch result evaluation.
+
+    Parameters
+    ----------
+    task : SimTask
+        The completed or candidate task whose FL we want to reduce.
+    ef : float
+        Energy Forcing result (J). Positive means contrail warming — step-down attempted.
+    step_size : float
+        FL reduction per step-down iteration (feet).
+    min_safe_fl : float
+        Minimum FL below which no further step-down is attempted.
+
+    Returns
+    -------
+    Optional[SimTask]
+        New SimTask at ``task.fl - step_size`` if ``ef > 0`` and
+        ``task.fl - step_size >= min_safe_fl``, otherwise ``None``.
+    """
+    if ef <= 0:
+        return None
+
+    next_fl = task.fl - step_size
+    if next_fl < min_safe_fl:
+        return None
+
+    return dataclasses.replace(task, fl=next_fl)
+
+
 def _task_at_fl(task: SimTask, fl: float) -> SimTask:
     """Return a copy of task with fl replaced. Pure helper."""
-    import dataclasses
     return dataclasses.replace(task, fl=fl)

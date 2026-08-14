@@ -2,6 +2,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 import pandas as pd
+import pyarrow as pa
+
+
+# ---------------------------------------------------------------------------
+# Simulation Trajectory Delta Lake Schema Contracts
+# ---------------------------------------------------------------------------
+
+# Canonical schema for the 14 fixed metadata columns written across all trajectory waypoints
+SIM_LAKE_METADATA_SCHEMA = pa.schema([
+    pa.field("SIM_FID",          pa.string()),       # Primary simulation ID
+    pa.field("model_config_id",  pa.string()),       # Model config (e.g. 'kerosene')
+    pa.field("fuel",             pa.string()),       # Fuel type ('kerosene' | 'hydrogen')
+    pa.field("route",            pa.string()),       # Route key ('LIRF-EGKK')
+    pa.field("icao24",           pa.string()),       # Aircraft 24-bit hex
+    pa.field("callsign",         pa.string()),       # Sanitized callsign
+    pa.field("typecode",         pa.string()),       # ICAO aircraft type
+    pa.field("cluster_id",       pa.int32()),        # Medoid cluster ID
+    pa.field("FL",               pa.float64()),      # Target flight level (ft)
+    pa.field("dep_date",         pa.int32()),        # Departure date int (YYYYMMDD)
+    pa.field("firstseen",        pa.timestamp("ns")),# Trajectory start time (tz-naive UTC)
+    pa.field("lastseen",         pa.timestamp("ns")),# Trajectory end time (tz-naive UTC)
+    pa.field("EF_total",         pa.float64()),      # Total Energy Forcing (J)
+    pa.field("total_fuel_burn",  pa.float64()),      # Mission fuel burn (kg)
+])
+
+# Complete list of mandatory metadata columns for validation
+SIM_LAKE_FIXED_COLUMNS = [f.name for f in SIM_LAKE_METADATA_SCHEMA]
+
+# String column subset that requires explicit python str coercion for PyArrow kernel safety
+SIM_LAKE_STR_COLUMNS = [
+    f.name for f in SIM_LAKE_METADATA_SCHEMA if pa.types.is_string(f.type)
+]
 
 
 @dataclass

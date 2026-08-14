@@ -21,12 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.common.config import (
-    BASE_DIR,
-    GLOBAL_CORRIDOR_MODEL_REGISTRY,
-)
-from src.common.utils import load_route_summary
 from src.data_manager.schemas import CorridorCluster, SimTask
+from src.data_manager.io_utils import read_corridors_map
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +34,7 @@ def build_corridors_map(
 ) -> Dict[Tuple[str, int], CorridorCluster]:
     """Build the (route_id, cluster_id) -> CorridorCluster map from registry.
 
-    Reads ``file_path``, ``cluster_id``, and ``fl`` from the model registry.
-    If ``ranks`` is supplied, filters routes to those ranks in ``route_summary``.
+    Delegates data retrieval to ``src.data_manager.io_utils.read_corridors_map()``.
 
     Parameters
     ----------
@@ -56,47 +51,11 @@ def build_corridors_map(
     Dict[Tuple[str, int], CorridorCluster]
         Mapping of (route_id, cluster_id) -> CorridorCluster(path, fl).
     """
-    reg = registry_path or GLOBAL_CORRIDOR_MODEL_REGISTRY
-    corridors_map: Dict[Tuple[str, int], CorridorCluster] = {}
-
-    if not Path(reg).exists():
-        logger.warning("GLOBAL_CORRIDOR_MODEL_REGISTRY not found: %s", reg)
-        return corridors_map
-
-    df = pd.read_parquet(reg)
-
-    # Filter by rank if requested
-    if ranks is not None:
-        df_summary = load_route_summary()
-        allowed = df_summary[df_summary["rank"].isin(ranks)]["route"]
-        allowed_ids = set(r.replace(" -> ", "-") for r in allowed)
-        route_col = "route_id" if "route_id" in df.columns else "route"
-        df = df[df[route_col].isin(allowed_ids)]
-        logger.info(
-            "build_corridors_map: filtered by ranks %s → %d route row(s) in registry.",
-            ranks, len(df),
-        )
-
-    for _, row in df.iterrows():
-        route_id   = str(row.get("route_id") or row.get("route", ""))
-        cluster_id = int(row["cluster_id"])
-        rel_path   = row["file_path"]
-        fl_val     = row.get("fl")
-        fl         = float(fl_val) if fl_val is not None and not pd.isna(fl_val) else float("nan")
-
-        if corridors_dir is not None:
-            # If a custom corridors directory was provided, resolve filename inside it
-            abs_path = corridors_dir / Path(rel_path).name
-        else:
-            abs_path = BASE_DIR / rel_path
-
-        if abs_path.exists():
-            corridors_map[(route_id, cluster_id)] = CorridorCluster(path=abs_path, fl=fl)
-        else:
-            logger.warning("Corridor file missing for %s c%d: %s", route_id, cluster_id, abs_path)
-
-    logger.info("corridors_map: %d entry/entries loaded from registry.", len(corridors_map))
-    return corridors_map
+    return read_corridors_map(
+        ranks=ranks,
+        registry_path=registry_path,
+        corridors_dir=corridors_dir,
+    )
 
 
 def generate_flightlist(

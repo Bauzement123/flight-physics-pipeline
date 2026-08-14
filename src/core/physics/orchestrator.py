@@ -426,7 +426,7 @@ def run(
         pending: list = list(batches)  # start with Slot-2 batches
 
         while pending:
-            next_pending: list = []
+            round_still_todo: List[SimTask] = []
 
             for worker_results in run_parallel(pending, worker_fn, max_workers):
                 # Build task lookup for Slot 5 variational step-down
@@ -442,20 +442,22 @@ def run(
                 day_failed    += len(eval_result.failed)
 
                 if eval_result.still_todo:
-                    # Re-batch step-down tasks through Slot 2 for grouping + skip-gate
-                    requeue_batches = filter_and_batch(
-                        tasks=eval_result.still_todo,
-                        sim_mode=sim_mode,
-                        lake_path=lake_path,
-                        step_size=step_size,
-                        min_safe_fl=min_safe_fl,
-                        max_batch_size=batch_size,
-                        overwrite=overwrite,
-                        model_config_id=model_config_id,
-                    )
-                    next_pending.extend(requeue_batches)
+                    round_still_todo.extend(eval_result.still_todo)
 
-            pending = next_pending
+            if round_still_todo:
+                # Re-batch all round step-downs together via Slot 2 to pack full vectorized batches
+                pending = filter_and_batch(
+                    tasks=round_still_todo,
+                    sim_mode=sim_mode,
+                    lake_path=lake_path,
+                    step_size=step_size,
+                    min_safe_fl=min_safe_fl,
+                    max_batch_size=batch_size,
+                    overwrite=overwrite,
+                    model_config_id=model_config_id,
+                )
+            else:
+                pending = []
 
         logger.info(
             "Day %s: %d succeeded, %d failed.", day, day_succeeded, day_failed

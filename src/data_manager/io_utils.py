@@ -1,14 +1,21 @@
 import logging
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
 from deltalake import write_deltalake, DeltaTable
 
-from src.data_manager.schemas import MasterFlightQuery, RouteSummaryQuery, SimResultQuery
-from src.common.config import MASTER_FLIGHTS_FILE, ROUTE_SUMMARY_PARQUET
+from src.data_manager.schemas import (
+    MasterFlightQuery,
+    RouteSummaryQuery,
+    SimResultQuery,
+    CorridorCluster,
+    SIM_LAKE_FIXED_COLUMNS,
+    SIM_LAKE_STR_COLUMNS,
+)
+from src.common.config import BASE_DIR, MASTER_FLIGHTS_FILE, ROUTE_SUMMARY_PARQUET, GLOBAL_CORRIDOR_MODEL_REGISTRY
 
 if TYPE_CHECKING:
     from src.core.processing.filter_result import FilterResult
@@ -216,9 +223,97 @@ def read_route_summary(
     return dataset.to_table(filter=combined, columns=columns).to_pandas()
 
 
-_STR_METADATA_COLS = [
-    "SIM_FID", "model_config_id", "fuel", "route", "icao24", "callsign", "typecode"
-]
+def validate_sim_trajectory_df(df: pd.DataFrame) -> None:
+    """Ensure incoming trajectory DataFrame satisfies the 14-column fixed metadata contract.
+
+    Raises
+    ------
+    ValueError
+        If mandatory metadata columns are missing or primary key columns contain NULLs.
+    """
+    missing = [col for col in SIM_LAKE_FIXED_COLUMNS if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Trajectory DataFrame missing mandatory metadata columns: {missing}"
+        )
+
+    null_cols = [
+        col for col in ["SIM_FID", "model_config_id", "fuel", "route", "dep_date", "FL"]
+        if df[col].isnull().any()
+    ]
+    if null_cols:
+        raise ValueError(
+            f"Trajectory DataFrame contains NULL values in primary metadata columns: {null_cols}"
+        )
+
+
+def read_corridors_map(
+    ranks: Optional[List[int]] = None,
+    registry_path: Optional[Path] = None,
+    corridors_dir: Optional[Path] = None,
+) -> Dict[Tuple[str, int], CorridorCluster]:
+    """Build the (route_id, cluster_id) -> CorridorCluster map from registry.
+
+    Reads ``file_path``, ``cluster_id``, and ``fl`` from the model registry.
+    If ``ranks`` is supplied, filters routes to those ranks in ``route_summary``.
+
+    Parameters
+    ----------
+    ranks : List[int], optional
+        List of route ranks to include (1-indexed). If None, all routes in the
+        registry are included.
+    registry_path : Path, optional
+        Path to the corridor model registry parquet. Defaults to GLOBAL_CORRIDOR_MODEL_REGISTRY.
+    corridors_dir : Path, optional
+        Base directory containing corridor parquet files if overriding default paths.
+
+    Returns
+    -------
+    Dict[Tuple[str, int], CorridorCluster]
+        Mapping of (route_id, cluster_id) -> CorridorCluster(path, fl).
+    """
+    reg = registry_path or GLOBAL_CORRIDOR_MODEL_REGISTRY
+    corridors_map: Dict[Tuple[str, int], CorridorCluster] = {}
+
+    if not Path(reg).exists():
+        logger.warning("GLOBAL_CORRIDOR_MODEL_REGISTRY not found: %s", reg)
+        return corridors_map
+
+    df = pd.read_parquet(reg)
+
+    # Filter by rank if requested
+    if ranks is not None:
+        if not ROUTE_SUMMARY_PARQUET.exists():
+            raise FileNotFoundError(f"Route summary not found at {ROUTE_SUMMARY_PARQUET}")
+        df_summary = pd.read_parquet(ROUTE_SUMMARY_PARQUET)
+        allowed = df_summary[df_summary["rank"].isin(ranks)]["route"]
+        allowed_ids = set(r.replace(" -> ", "-") for r in allowed)
+        route_col = "route_id" if "route_id" in df.columns else "route"
+        df = df[df[route_col].isin(allowed_ids)]
+        logger.info(
+            "read_corridors_map: filtered by ranks %s → %d route row(s) in registry.",
+            ranks, len(df),
+        )
+
+    for _, row in df.iterrows():
+        route_id   = str(row.get("route_id") or row.get("route", ""))
+        cluster_id = int(row["cluster_id"])
+        rel_path   = row["file_path"]
+        fl_val     = row.get("fl")
+        fl         = float(fl_val) if fl_val is not None and not pd.isna(fl_val) else float("nan")
+
+        if corridors_dir is not None:
+            abs_path = corridors_dir / Path(rel_path).name
+        else:
+            abs_path = BASE_DIR / rel_path
+
+        if abs_path.exists():
+            corridors_map[(route_id, cluster_id)] = CorridorCluster(path=abs_path, fl=fl)
+        else:
+            logger.warning("Corridor file missing for %s c%d: %s", route_id, cluster_id, abs_path)
+
+    logger.info("corridors_map: %d entry/entries loaded from registry.", len(corridors_map))
+    return corridors_map
 
 
 def read_sim_lake(lake_path: str | Path, query: SimResultQuery) -> pd.DataFrame:
@@ -269,6 +364,7 @@ def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = F
     Normal mode (overwrite=False)
     ------------------------------
     - Deduplicates incoming data on ``(SIM_FID, time)`` with ``keep='last'``.
+    - Validates mandatory 14-column metadata schema and non-null primary keys.
     - If incoming DataFrame introduces new physics columns not yet in the Delta schema,
       falls back to delete-then-append with ``schema_mode='merge'`` to allow schema evolution.
     - Otherwise, performs atomic MERGE on ``(SIM_FID, model_config_id, time)``.
@@ -282,15 +378,18 @@ def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = F
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         raise TypeError("df must be a non-empty pandas DataFrame.")
 
-    # 1. Pre-deduplicate on (SIM_FID, time) with keep='last'
+    # 1. Enforce strict 14-column metadata contract
+    validate_sim_trajectory_df(df)
+
+    # 2. Pre-deduplicate on (SIM_FID, time) with keep='last'
     df = df.drop_duplicates(subset=["SIM_FID", "time"], keep="last")
 
-    # 2. Convert any timedelta64 columns to float seconds (Delta Lake does not support Duration type)
+    # 3. Convert any timedelta64 columns to float seconds (Delta Lake does not support Duration type)
     for col in df.select_dtypes(include=["timedelta64", "timedelta"]).columns:
         df[col] = df[col].dt.total_seconds()
 
-    # 3. Strict typecasting for known metadata string columns to avoid string_view issues
-    for col in _STR_METADATA_COLS:
+    # 4. Strict typecasting for known metadata string columns to avoid string_view issues
+    for col in SIM_LAKE_STR_COLUMNS:
         if col in df.columns:
             df[col] = df[col].astype(str)
 
