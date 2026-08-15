@@ -69,9 +69,20 @@ DEFAULT_SAMPLE_SIZE: int = 50           # Default fixed sample size per corridor
 PROCESSING_DEFAULT_MAX_WORKERS: int = 4
 PROCESSING_NUMERIC_THREADS_PER_WORKER: int = 1
 PROCESSING_KALMAN_THREADS_PER_WORKER: int = 1
-WEATHER_IO_WORKERS: int = 2
 CORRIDOR_IO_THREADS: int = 4
 CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
+
+# On the VM, netCDF4/HDF5 concurrent file-open calls race at the C-library
+# initialisation layer and cause a SIGSEGV.  Force sequential ERA5 opens
+# (1 worker) when the WEATHER_IO_SEQUENTIAL env var is set to "1" or "true",
+# or when running on the ILR-rocket VM (detected by hostname).  Local dev
+# retains 2 parallel workers for performance.
+import socket as _socket
+_on_vm: bool = (
+    os.environ.get("WEATHER_IO_SEQUENTIAL", "").lower() in ("1", "true")
+    or _socket.gethostname().lower() == "ilr-rocket"
+)
+WEATHER_IO_WORKERS: int = 1 if _on_vm else 2
 
 # Trino retry / timeout parameters (§3.3.1)
 BACKOFF_MAX_RETRIES: int = 10           # Max Trino retry attempts (exponential back-off)

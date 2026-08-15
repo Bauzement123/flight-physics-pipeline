@@ -31,11 +31,15 @@ src/data_manager/
 ```text
 Module Objective: Type-Safe Data Contracts, High-Performance Readers, Delta Lake Storage & Distributed Node Sync
 │
-├── 1. Master Flights Cohort Retrieval
-│   └── io_utils.read_master_flights()
-│       ├── Input: Optional[MasterFlightQuery], Optional[List[str]] (columns).
-│       ├── Output: pandas.DataFrame
-│       └── Safety/Fallback: Raises FileNotFoundError if MASTER_FLIGHTS_FILE is missing; applies PyArrow dataset predicate pushdown for dates, typecodes, icao24s, callsigns, and airports.
+├── 1. Master Flights Cohort Retrieval & Counting
+│   ├── io_utils.read_master_flights()
+│   │   ├── Input: Optional[MasterFlightQuery], Optional[List[str]] (columns), Optional[ds.Dataset] (dataset).
+│   │   ├── Output: pandas.DataFrame
+│   │   └── Safety/Fallback: Raises FileNotFoundError if MASTER_FLIGHTS_FILE is missing; applies PyArrow dataset predicate pushdown for dates, typecodes, icao24s, callsigns, and airports.
+│   └── io_utils.count_master_flights()
+│       ├── Input: Optional[MasterFlightQuery], Optional[ds.Dataset] (dataset).
+│       ├── Output: int (row count)
+│       └── Safety/Fallback: Uses PyArrow dataset scanner count_rows() pushdown without loading table data into RAM.
 │
 ├── 2. Route Summary & Corridor Registry Retrieval
 │   ├── io_utils.read_route_summary()

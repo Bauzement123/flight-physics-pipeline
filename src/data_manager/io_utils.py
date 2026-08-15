@@ -145,24 +145,8 @@ def merge_postfilter_lake(
     return matched
 
 
-def read_master_flights(
-    query: Optional[MasterFlightQuery] = None,
-    columns: Optional[List[str]] = None,
-) -> pd.DataFrame:
-    """Reads master_flights via PyArrow dataset with predicate pushdown.
-
-    Column names match the actual master_flights schema:
-    - date filtering uses ``firstseen`` (epoch seconds).
-    - airport filtering uses ``estdepartureairport`` / ``estarrivalairport``.
-    - exact route filtering uses OR-chained (dep == X & arr == Y) expressions.
-
-    Returns a pandas DataFrame. Raises FileNotFoundError if MASTER_FLIGHTS_FILE
-    does not exist.
-    """
-    if not Path(MASTER_FLIGHTS_FILE).exists():
-        raise FileNotFoundError(f"master_flights file not found: {MASTER_FLIGHTS_FILE}")
-
-    dataset = ds.dataset(str(MASTER_FLIGHTS_FILE))
+def _build_master_flights_filter(query: Optional[MasterFlightQuery] = None):
+    """Build PyArrow expression filter from MasterFlightQuery."""
     exprs = []
 
     if query is not None:
@@ -183,8 +167,9 @@ def read_master_flights(
         if query.routes:
             pair_exprs = []
             for r in query.routes:
-                if "-" in r:
-                    dep, arr = r.split("-", 1)
+                route_str = r.replace(" -> ", "-")
+                if "-" in route_str:
+                    dep, arr = route_str.split("-", 1)
                     pair_exprs.append(
                         (ds.field("estdepartureairport") == dep)
                         & (ds.field("estarrivalairport") == arr)
@@ -198,8 +183,49 @@ def read_master_flights(
     combined = exprs[0] if exprs else None
     for e in exprs[1:]:
         combined = combined & e
+    return combined
 
+
+def read_master_flights(
+    query: Optional[MasterFlightQuery] = None,
+    columns: Optional[List[str]] = None,
+    dataset: Optional[ds.Dataset] = None,
+) -> pd.DataFrame:
+    """Reads master_flights via PyArrow dataset with predicate pushdown.
+
+    Column names match the actual master_flights schema:
+    - date filtering uses ``firstseen`` (epoch seconds).
+    - airport filtering uses ``estdepartureairport`` / ``estarrivalairport``.
+    - exact route filtering uses OR-chained (dep == X & arr == Y) expressions.
+
+    Returns a pandas DataFrame. Raises FileNotFoundError if MASTER_FLIGHTS_FILE
+    does not exist.
+    """
+    if dataset is None:
+        if not Path(MASTER_FLIGHTS_FILE).exists():
+            raise FileNotFoundError(f"master_flights file not found: {MASTER_FLIGHTS_FILE}")
+        dataset = ds.dataset(str(MASTER_FLIGHTS_FILE))
+
+    combined = _build_master_flights_filter(query)
     return dataset.to_table(filter=combined, columns=columns).to_pandas()
+
+
+def count_master_flights(
+    query: Optional[MasterFlightQuery] = None,
+    dataset: Optional[ds.Dataset] = None,
+) -> int:
+    """Counts matching master_flights records without loading table data into memory.
+
+    Uses PyArrow dataset scanner count_rows() metadata pushdown.
+    """
+    if dataset is None:
+        if not Path(MASTER_FLIGHTS_FILE).exists():
+            raise FileNotFoundError(f"master_flights file not found: {MASTER_FLIGHTS_FILE}")
+        dataset = ds.dataset(str(MASTER_FLIGHTS_FILE))
+
+    combined = _build_master_flights_filter(query)
+    return dataset.scanner(filter=combined).count_rows()
+
 
 
 def read_route_summary(

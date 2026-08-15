@@ -16,6 +16,7 @@ src/analysis/verification/
 ├── matlab_prepare.py              # CLI script for MATLAB verification data exports
 ├── plot_corridor_clusters.py      # CLI script for dual-panel cluster, medoid, & altitude visualizations
 ├── plot_country_trajectories.py   # CLI script for high-res country-level inbound/outbound trajectory & medoid maps
+├── plot_daily_flights_histogram.py# Orchestrator CLI script to extract daily flight distribution & render histogram
 ├── plot_r2_distance_errors.py     # CLI script for endpoint distance statistical analysis and plots
 ├── route_class_analysis.py        # CLI execution script for route class distribution histogram
 ├── route_popularity_analysis.py   # CLI execution script for binned route popularity analysis
@@ -40,6 +41,8 @@ Flight Trajectory Analysis (Goal)
 ├── Visualize & Export Outcomes (Objective 4)
 │   ├── plt.scatter() [matplotlib] -> Generates the relation scatter plot
 │   └── savefig() [matplotlib] -> Exports the plot in SVG format to data/analysis/plots/
+├── Daily Flight Distribution (Objective 5)
+│   └── plot_daily_flights_histogram.py -> Orchestrates PyArrow batch streaming from master_flights, caches CSV, and renders SVG
 ```
 
 ---
@@ -184,6 +187,51 @@ graph TD
 
 ---
 
+### 3.4 Workflow D — Daily Flight Distribution (`extract_daily_flight_counts.py` & `plot_daily_flights_histogram.py`)
+
+```mermaid
+graph TD
+    %% Inputs
+    Master[("master_flights.parquet")]
+    
+    %% Processing Nodes
+    P1["Parse filters (typecode, airports)"]
+    P2["Typecode Validation (is_supported_typecode)"]
+    P3["PyArrow Pushdown Filter & Load"]
+    P4["Extract Date (YYYYMMDD int)"]
+    P5["Group by dep_date & Count"]
+    
+    %% Intermediate Output
+    OutCSV[("daily_flights_[filters].csv")]
+    
+    %% Plotting Script
+    P6["Load CSV (plot_daily_flights_histogram.py)"]
+    P7["Render Matplotlib Bar Chart"]
+    
+    %% Outputs
+    OutSVG["plots/daily_distributions/daily_flights_[filters]_histogram.svg"]
+    
+    %% Connections
+    P1 --> P2
+    P2 --> P3
+    Master -->|Read| P3
+    P3 --> P4
+    P4 --> P5
+    P5 --> OutCSV
+    OutCSV --> P6
+    P6 --> P7
+    P7 --> OutSVG
+```
+
+**Step-by-step:**
+1. **Filter Parsing & Validation**: The extraction script reads the CLI filters (`--typecode`, `--departure-airport`, `--arrival-airport`). If `--typecode` is provided, `argparse` strictly validates it against `ALL_TARGET_FAMILIES` using `is_supported_typecode()`.
+2. **Dataset Pushdown Filtering**: PyArrow uses the filters to read only relevant rows from `master_flights.parquet`. If no specific `--typecode` is given, it automatically slices to include only all supported aircraft families.
+3. **Date Extraction & Grouping**: The `firstseen` UTC timestamp is converted to the standard `dep_date` integer format (YYYYMMDD). The dataset is grouped by this date to count total flights per day.
+4. **CSV Export**: The grouped counts are exported to a dynamically named CSV in `data/databases/master_flights/reports/`.
+5. **Plotting**: The plotting script reads the CSV, parses the `dep_date` integer back into a datetime format, and renders a daily distribution bar chart, exporting it as an SVG to `data/analysis/plots/daily_distributions/`.
+
+---
+
 ## 4. CLI Usage Guide
 
 ### Bash Syntax Examples
@@ -236,6 +284,17 @@ python -m src.analysis.verification.plot_country_trajectories `
   --country ED LF EG `
   --medoids-only `
   --dpi 300
+
+# Daily Flight Distribution Extract & Plot (Batch Streaming Orchestrator)
+python -m src.analysis.verification.plot_daily_flights_histogram `
+  --rank-range 1 1000 `
+  --year 2025
+
+# Generate CSV Cache Only
+python -m src.analysis.verification.plot_daily_flights_histogram `
+  --typecode A320 `
+  --departure-airport EDDF `
+  --only-csv
 ```
 
 ### CLI Parameters Reference
@@ -321,6 +380,16 @@ python -m src.analysis.verification.plot_country_trajectories `
 #### Bounding Box Airport Extraction (`extract_bounding_airports.py`)
 * Takes no arguments. Executes coordinate bounds resolution across all registered airports and prints geographic extreme nodes (North, South, East, West).
 
+#### Daily Flight Histogram Orchestrator (`plot_daily_flights_histogram.py`)
+* `--typecode` (string): Slices for specific aircraft typecode. Automatically validated.
+* `--rank-range` (int int): Route rank range (inclusive start and end, e.g., `--rank-range 1 1000`).
+* `--ranks` (int...): Explicit list of route ranks (e.g., `--ranks 1 2 3`).
+* `--departure-airport` (string): Departure airport ICAO filter.
+* `--arrival-airport` (string): Arrival airport ICAO filter.
+* `--year` (int): Target year to analyze (default: 2025).
+* `--only-csv` (flag): Generates and caches the CSV file without plotting.
+* `--log-file` (string): Log filename in `data/logs/` (default: `analysis.log`).
+
 ### CLI Syntax Examples (Additional Tools)
 
 ```bash
@@ -350,7 +419,7 @@ All entrypoint scripts initialize logging via `setup_file_logger()` from `src.co
 | Log file written to `data/logs/` | Writer | Purpose |
 |---|---|---|
 | `verification.log` | `plot_country_trajectories.py` | Logs country filtering, PyArrow filepath queries, batch trajectory memory loads, and PNG generation metrics. |
-| `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlab_prepare.py`, `plot_corridor_clusters.py`, `route_class_analysis.py`, `route_popularity_analysis.py`, `plot_r2_distance_errors.py`, `build_r2_distance_table.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
+| `analysis.log` | `flight_analysis.py`, `flight_level_analysis.py`, `matlab_prepare.py`, `plot_corridor_clusters.py`, `route_class_analysis.py`, `route_popularity_analysis.py`, `plot_r2_distance_errors.py`, `build_r2_distance_table.py`, `extract_daily_flight_counts.py`, `plot_daily_flights_histogram.py` | Logs execution milestones, trajectory processing details, and plot generation metrics. |
 | `calibration.log` | `evaluate_custom_filters.py` | Logs custom filter retention evaluations and parameter statistics. |
 | `acquisition.log` | `summarize_population.py` | Logs route summary population inspection and Pareto distribution metrics. |
 
