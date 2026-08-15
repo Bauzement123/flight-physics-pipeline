@@ -82,6 +82,23 @@ class SimResultQuery:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class FlightCandidate:
+    """Intermediate base task carrying flight metadata and available valid clusters."""
+    icao24: str
+    callsign: str
+    dep: str
+    arr: str
+    firstseen: int
+    lastseen: int
+    typecode: str
+    valid_cluster_ids: List[int]
+
+    @property
+    def route_key(self) -> str:
+        return f"{self.dep}-{self.arr}"
+
+
+@dataclass
 class SimTask:
     """Universal task struct passed between all slot modules.
 

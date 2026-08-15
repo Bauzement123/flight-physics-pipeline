@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.data_manager.schemas import CorridorCluster, SimTask
+from src.data_manager.schemas import CorridorCluster, SimTask, FlightCandidate
 from src.data_manager.io_utils import read_corridors_map
 
 logger = logging.getLogger(__name__)
@@ -58,38 +58,28 @@ def build_corridors_map(
     )
 
 
-def generate_flightlist(
+def generate_base_flightlist(
     cohort_df: pd.DataFrame,
-    available_clusters: Dict[Tuple[str, int], Any],
-    clusters_per_flight: int = 1,
-) -> List[SimTask]:
-    """Generate candidate SimTask objects from a daily flight cohort DataFrame.
+    available_clusters: Dict[Tuple[str, int], CorridorCluster],
+) -> List[FlightCandidate]:
+    """Pure flightlist generation mapping cohort rows to available cluster IDs.
 
-    One baseline SimTask is produced per (flight row × sampled cluster_id) pair.
-    The flight level (FL) is obtained strictly from the CorridorCluster metadata
-    calibrated in the corridor model registry. If a cluster has missing or
-    invalid FL data, the flight is skipped and logged with an error rather than
-    filled with an arbitrary default.
+    Filters flights based on available clusters for their route. Does not sample;
+    returns all valid available cluster IDs for each flight row.
 
     Parameters
     ----------
     cohort_df : pd.DataFrame
-        One day's slice of master_flights. Required columns:
-        ``icao24, callsign, firstseen, lastseen,
-        estdepartureairport, estarrivalairport, typecode``.
+        One day's slice of master_flights.
     available_clusters : Dict[Tuple[str, int], CorridorCluster]
         Mapping of ``(route_key, cluster_id)`` to ``CorridorCluster(path, fl)``.
-        Produced by build_corridors_map().
-    clusters_per_flight : int, optional
-        Number of clusters to sample per flight (default 1).
 
     Returns
     -------
-    List[SimTask]
-        Flat list of SimTask objects, one per (flight, cluster) pair.
-        Empty if no clusters are available for any flight in the cohort.
+    List[FlightCandidate]
+        List of candidate objects for flights with at least one valid cluster.
     """
-    tasks: List[SimTask] = []
+    candidate_pool = []
     allowed_routes = {r for (r, _) in available_clusters}
 
     for _, row in cohort_df.iterrows():
@@ -100,17 +90,8 @@ def generate_flightlist(
         icao24 = row["icao24"]
         callsign = row.get("callsign", "UNK") or "UNK"
 
-        # firstseen / lastseen are expected as epoch integers (seconds UTC).
-        firstseen = int(row["firstseen"].timestamp()
-                        if hasattr(row["firstseen"], "timestamp")
-                        else row["firstseen"])
-        lastseen = int(row["lastseen"].timestamp()
-                       if hasattr(row["lastseen"], "timestamp")
-                       else row["lastseen"])
-
-        available = [cid for (r, cid) in available_clusters if r == route_key]
-        if not available:
-            # Only warn if this flight was on an explicitly requested/allowed route
+        available_cids = [cid for (r, cid) in available_clusters if r == route_key]
+        if not available_cids:
             if route_key in allowed_routes:
                 logger.warning(
                     "No synthesized base paths for route %s — skipping flight %s/%s.",
@@ -118,28 +99,28 @@ def generate_flightlist(
                 )
             continue
 
-        sample_size = min(clusters_per_flight, len(available))
-        sampled = np.random.choice(available, size=sample_size, replace=False)
-
-        for cluster_id in sampled:
+        valid_cids = []
+        for cluster_id in available_cids:
             cluster_entry = available_clusters.get((route_key, cluster_id))
-            if cluster_entry is None:
-                logger.warning(
-                    "Cluster entry (%s, %d) not found in available_clusters — skipping flight %s/%s.",
-                    route_key, cluster_id, icao24, callsign,
-                )
-                continue
-
             fl = getattr(cluster_entry, "fl", None)
             if fl is None or np.isnan(fl) or fl <= 0:
                 logger.error(
-                    "Cluster (%s, %d) has missing or invalid FL (%s) — skipping flight %s/%s. "
+                    "Cluster (%s, %d) has missing or invalid FL (%s) — skipping for flight %s/%s. "
                     "Verify GLOBAL_CORRIDOR_MODEL_REGISTRY before running.",
                     route_key, cluster_id, fl, icao24, callsign,
                 )
                 continue
+            valid_cids.append(cluster_id)
 
-            tasks.append(SimTask(
+        if valid_cids:
+            firstseen = int(row["firstseen"].timestamp()
+                            if hasattr(row["firstseen"], "timestamp")
+                            else row["firstseen"])
+            lastseen = int(row["lastseen"].timestamp()
+                           if hasattr(row["lastseen"], "timestamp")
+                           else row["lastseen"])
+                           
+            candidate_pool.append(FlightCandidate(
                 icao24=icao24,
                 callsign=callsign,
                 dep=dep,
@@ -147,15 +128,80 @@ def generate_flightlist(
                 firstseen=firstseen,
                 lastseen=lastseen,
                 typecode=str(row.get("typecode", "") or ""),
+                valid_cluster_ids=valid_cids
+            ))
+
+    return candidate_pool
+
+
+def select_clusters(
+    candidate_pool: List[FlightCandidate],
+    available_clusters: Dict[Tuple[str, int], CorridorCluster],
+    strategy: str = "random",
+    **kwargs: Any
+) -> List[SimTask]:
+    """Select clusters for each candidate flight using a specific strategy.
+
+    Parameters
+    ----------
+    candidate_pool : List[FlightCandidate]
+        List of valid flight candidates.
+    available_clusters : Dict[Tuple[str, int], CorridorCluster]
+        Mapping of ``(route_key, cluster_id)`` to ``CorridorCluster(path, fl)``.
+    strategy : str
+        The selection strategy to use (e.g. 'random').
+    **kwargs
+        Strategy-specific arguments (e.g. ``clusters_per_flight``).
+
+    Returns
+    -------
+    List[SimTask]
+        Flat list of SimTask objects.
+    """
+    tasks: List[SimTask] = []
+
+    if strategy not in ("random",):
+        logger.warning("Strategy '%s' not fully implemented or recognized. Defaulting to 'random'.", strategy)
+        strategy = "random"
+
+    for candidate in candidate_pool:
+
+        sampled_cids = []
+        if strategy == "random":
+            clusters_per_flight = kwargs.get("clusters_per_flight", 1)
+            sample_size = min(clusters_per_flight, len(candidate.valid_cluster_ids))
+            sampled_cids = np.random.choice(candidate.valid_cluster_ids, size=sample_size, replace=False).tolist()
+
+        for cluster_id in sampled_cids:
+            cluster_entry = available_clusters[(candidate.route_key, cluster_id)]
+
+            tasks.append(SimTask(
+                icao24=candidate.icao24,
+                callsign=candidate.callsign,
+                dep=candidate.dep,
+                arr=candidate.arr,
+                firstseen=candidate.firstseen,
+                lastseen=candidate.lastseen,
+                typecode=candidate.typecode,
                 cluster_id=int(cluster_id),
-                fl=float(fl),
+                fl=float(cluster_entry.fl),
             ))
 
     logger.info(
-        "Slot 1 (Flight List Generation) generated %d tasks from %d cohort rows.",
-        len(tasks), len(cohort_df),
+        "Slot 1 (Flight List Generation) generated %d tasks from %d candidate pool rows.",
+        len(tasks), len(candidate_pool),
     )
     return tasks
+
+
+def generate_flightlist(
+    cohort_df: pd.DataFrame,
+    available_clusters: Dict[Tuple[str, int], Any],
+    clusters_per_flight: int = 1,
+) -> List[SimTask]:
+    """Backward-compatible wrapper for generating SimTask objects."""
+    pool = generate_base_flightlist(cohort_df, available_clusters)
+    return select_clusters(pool, available_clusters, strategy="random", clusters_per_flight=clusters_per_flight)
 
 
 # Backward compatibility aliases

@@ -48,9 +48,10 @@ from src.common.config import (
     MIN_SAFE_FL,
     WEATHER_IO_WORKERS,
     WEATHER_PADDING,
+    ALL_TARGET_FAMILIES,
 )
 from src.core.physics.engine import crop_met_dataset, run_parallel
-from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_flightlist
+from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_base_flightlist, select_clusters
 from src.core.physics.slots.slot2_batcher import filter_and_batch
 from src.core.physics.slots.slot5_evaluator import evaluate
 from src.core.physics.worker import run_batch
@@ -255,6 +256,7 @@ def run(
     step_size: float = 10.0,
     min_safe_fl: float = MIN_SAFE_FL,
     low_mem: bool = False,
+    cluster_selection: str = "random",
     clusters_per_flight: int = 1,
     min_distance_km: float = 0.0,
     overwrite: bool = False,
@@ -337,6 +339,7 @@ def run(
             dep_date_start=day_start,
             dep_date_end=day_end,
             routes=allowed_routes,
+            typecodes=ALL_TARGET_FAMILIES,
         )
 
         try:
@@ -358,9 +361,14 @@ def run(
                 )
                 continue
 
-        tasks: List[SimTask] = generate_flightlist(
+        candidate_pool = generate_base_flightlist(
             cohort_df=cohort_df,
             available_clusters=corridors_map,
+        )
+        tasks: List[SimTask] = select_clusters(
+            candidate_pool=candidate_pool,
+            available_clusters=corridors_map,
+            strategy=cluster_selection,
             clusters_per_flight=clusters_per_flight,
         )
         if not tasks:

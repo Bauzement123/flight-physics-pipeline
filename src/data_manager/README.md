@@ -7,7 +7,7 @@ The `src/data_manager` module serves as the centralized data interface, schema c
 Key capabilities include:
 - **Formal Schema Contracts & Runtime Validation**: Centralized PyArrow metadata schemas (`SIM_LAKE_METADATA_SCHEMA`, `_POSTFILTER_SCHEMA`) with pre-write validation gates enforcing 100% contract compliance on incoming telemetry.
 - **Predicate Pushdown Query Engine**: High-speed filtering of multi-gigabyte Parquet datasets (`master_flights.parquet`, `route_summary.parquet`, and corridor model registries) directly at the PyArrow C++ level before loading into Python memory.
-- **Universal Pipeline Dataclasses**: Strongly typed contracts (`SimTask`, `WorkerResult`, `EvalResult`, `SimResultQuery`) passed across pipeline slot boundaries without raw string serializations.
+- **Universal Pipeline Dataclasses**: Strongly typed contracts (`FlightCandidate`, `SimTask`, `WorkerResult`, `EvalResult`, `SimResultQuery`) passed across pipeline slot boundaries without raw string serializations.
 - **ACID Trajectory Delta Lake Storage**: Transactional persistence of full per-waypoint flight trajectories with dynamic physics columns, composite merging on `(SIM_FID, model_config_id, time)`, and automated post-day vacuuming and multi-dimensional Z-ordering.
 - **Distributed Network Synchronization (`sync_delta_lake.py`)**: High-speed directional synchronization (`upsert` / `downsert`) between compute nodes and shared network storage (e.g. `\\PC182...\...`) using PyArrow C++ chunked anti-joins and atomic Delta commits with zero risk of row duplication.
 

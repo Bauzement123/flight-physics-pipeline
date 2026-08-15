@@ -62,11 +62,15 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │       ├── Output: None (writes directly to Delta Lake).
 │       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically; re-batches step-down tasks at round boundaries.
 │
-├── 3. Slot 1: Flight List Generation
-│   └── slot1_flightlist_gen.generate_flightlist()
-│       ├── Input: Cohort DataFrame (master_flights slice), corridors_map (from data_manager.read_corridors_map).
+├── 3. Slot 1: Flight List Generation & Selection
+│   ├── slot1_flightlist_gen.generate_base_flightlist()
+│   │   ├── Input: Cohort DataFrame (master_flights slice), corridors_map (from data_manager.read_corridors_map).
+│   │   ├── Output: List[FlightCandidate]
+│   │   └── Safety/Fallback: Pure transform; maps flights to all valid available route clusters; checks cluster.fl validity (hard skip on missing/invalid FL).
+│   └── slot1_flightlist_gen.select_clusters()
+│       ├── Input: candidate_pool (List[FlightCandidate]), available_clusters, strategy ('random'), clusters_per_flight.
 │       ├── Output: List[SimTask]
-│       └── Safety/Fallback: Pure transform; skips flights without available route clusters; checks cluster.fl validity (hard skip on missing/invalid FL); generates unique SimTask per (flight x cluster).
+│       └── Safety/Fallback: Samples cluster IDs from candidate valid pool and materializes strongly typed SimTask instances.
 │
 ├── 4. Slot 2: Task Filtering, Mutation & Batching
 │   ├── slot2_batcher.filter_and_batch()
@@ -318,6 +322,7 @@ python -m src.core.physics.cli `
 | `--max-age`, `--age` | `int` | `48` | Maximum contrail segment age in hours passed to CoCiP. |
 | `--step-size` | `float` | `10.0` | FL decrement step size in FL units (default `10.0` = 1,000 ft, used in variational mode). |
 | `--min-safe-fl` | `float` | `190.0` | Minimum safe flight level in FL units below which step-down halts (`MIN_SAFE_FL`). |
+| `--cluster-selection` | `str` | `'random'` | Strategy for cluster selection (e.g. `'random'`). Controls how available cluster IDs in candidate pool are sampled. |
 | `--clusters-per-flight`, `-x` | `int` | `1` | Number of representative cluster trajectories sampled per flight. |
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
 | `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |

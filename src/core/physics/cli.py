@@ -172,12 +172,19 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Flight sampling ─────────────────────────────────────────────────── #
     parser.add_argument(
+        "--cluster-selection",
+        type=str,
+        default="random",
+        dest="cluster_selection",
+        help="Strategy for cluster selection (default 'random'). Controls how available clusters are sampled.",
+    )
+    parser.add_argument(
         "--clusters-per-flight",
         type=int,
         default=1,
         dest="clusters_per_flight",
         metavar="K",
-        help="Number of clusters to sample per flight from available set (default 1).",
+        help="Number of clusters to sample per flight (used by 'random' strategy).",
     )
     parser.add_argument(
         "--min-distance",
@@ -292,6 +299,7 @@ def main(argv=None) -> None:
         step_size=args.step_size,
         min_safe_fl=args.min_safe_fl,
         low_mem=args.low_mem,
+        cluster_selection=args.cluster_selection,
         clusters_per_flight=args.clusters_per_flight,
         min_distance_km=args.min_distance,
         overwrite=args.overwrite,
