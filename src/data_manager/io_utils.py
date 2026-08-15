@@ -145,40 +145,43 @@ def merge_postfilter_lake(
     return matched
 
 
-def _build_master_flights_filter(query: Optional[MasterFlightQuery] = None):
+def _build_master_flights_filter(
+    query: Optional[MasterFlightQuery] = None,
+    schema_names: Optional[List[str]] = None,
+):
     """Build PyArrow expression filter from MasterFlightQuery."""
-    exprs = []
+    if query is None:
+        return None
 
-    if query is not None:
-        if query.dep_date_start is not None:
-            exprs.append(ds.field("firstseen") >= query.dep_date_start)
-        if query.dep_date_end is not None:
-            exprs.append(ds.field("firstseen") <= query.dep_date_end)
-        if query.typecodes:
-            exprs.append(ds.field("typecode").isin(query.typecodes))
-        if query.icao24s:
-            exprs.append(ds.field("icao24").isin(query.icao24s))
-        if query.callsigns:
-            exprs.append(ds.field("callsign").isin(query.callsigns))
-        if query.dep_airports:
-            exprs.append(ds.field("estdepartureairport").isin(query.dep_airports))
-        if query.arr_airports:
-            exprs.append(ds.field("estarrivalairport").isin(query.arr_airports))
-        if query.routes:
-            pair_exprs = []
-            for r in query.routes:
-                route_str = r.replace(" -> ", "-")
-                if "-" in route_str:
-                    dep, arr = route_str.split("-", 1)
-                    pair_exprs.append(
-                        (ds.field("estdepartureairport") == dep)
-                        & (ds.field("estarrivalairport") == arr)
-                    )
-            if pair_exprs:
-                route_filter = pair_exprs[0]
-                for p_expr in pair_exprs[1:]:
-                    route_filter = route_filter | p_expr
-                exprs.append(route_filter)
+    exprs = []
+    if query.dep_date_start is not None:
+        exprs.append(ds.field("firstseen") >= query.dep_date_start)
+    if query.dep_date_end is not None:
+        exprs.append(ds.field("firstseen") <= query.dep_date_end)
+    if query.typecodes:
+        exprs.append(ds.field("typecode").isin(query.typecodes))
+    if query.icao24s:
+        exprs.append(ds.field("icao24").isin(query.icao24s))
+    if query.callsigns:
+        exprs.append(ds.field("callsign").isin(query.callsigns))
+    if query.dep_airports:
+        exprs.append(ds.field("estdepartureairport").isin(query.dep_airports))
+    if query.arr_airports:
+        exprs.append(ds.field("estarrivalairport").isin(query.arr_airports))
+
+    if query.routes:
+        normalized_routes = [r.replace(" -> ", "-") for r in query.routes]
+        if schema_names is not None and "route" in schema_names:
+            # Fast path: native single-column C++ Parquet predicate pushdown
+            exprs.append(ds.field("route").cast(pa.string()).isin(normalized_routes))
+        else:
+            # Safe fallback: push down airport sets to Acero
+            dep_from_routes = list({r.split("-", 1)[0] for r in normalized_routes if "-" in r})
+            arr_from_routes = list({r.split("-", 1)[1] for r in normalized_routes if "-" in r})
+            if dep_from_routes and not query.dep_airports:
+                exprs.append(ds.field("estdepartureairport").isin(dep_from_routes))
+            if arr_from_routes and not query.arr_airports:
+                exprs.append(ds.field("estarrivalairport").isin(arr_from_routes))
 
     combined = exprs[0] if exprs else None
     for e in exprs[1:]:
@@ -194,9 +197,10 @@ def read_master_flights(
     """Reads master_flights via PyArrow dataset with predicate pushdown.
 
     Column names match the actual master_flights schema:
-    - date filtering uses ``firstseen`` (epoch seconds).
+    - date filtering uses ``firstseen`` (epoch seconds / timestamp).
     - airport filtering uses ``estdepartureairport`` / ``estarrivalairport``.
-    - exact route filtering uses OR-chained (dep == X & arr == Y) expressions.
+    - route filtering dynamically checks if precomputed ``route`` column exists
+      for O(1) single-column pushdown, otherwise falls back to safe 2-phase set filtering.
 
     Returns a pandas DataFrame. Raises FileNotFoundError if MASTER_FLIGHTS_FILE
     does not exist.
@@ -206,8 +210,30 @@ def read_master_flights(
             raise FileNotFoundError(f"master_flights file not found: {MASTER_FLIGHTS_FILE}")
         dataset = ds.dataset(str(MASTER_FLIGHTS_FILE))
 
-    combined = _build_master_flights_filter(query)
-    return dataset.to_table(filter=combined, columns=columns).to_pandas()
+    scan_columns = list(columns) if columns is not None else None
+    has_route = "route" in dataset.schema.names
+    needs_legacy_filter = query is not None and bool(query.routes) and not has_route
+
+    if needs_legacy_filter and scan_columns is not None:
+        for col in ("estdepartureairport", "estarrivalairport"):
+            if col not in scan_columns:
+                scan_columns.append(col)
+
+    combined = _build_master_flights_filter(query, schema_names=dataset.schema.names)
+    df = dataset.to_table(filter=combined, columns=scan_columns).to_pandas()
+
+    if needs_legacy_filter and not df.empty:
+        routes_series = (
+            df["estdepartureairport"].fillna("").astype(str).str.strip()
+            + "-"
+            + df["estarrivalairport"].fillna("").astype(str).str.strip()
+        )
+        target_routes = {r.replace(" -> ", "-") for r in query.routes}
+        df = df[routes_series.isin(target_routes)].reset_index(drop=True)
+        if columns is not None:
+            df = df[[c for c in columns if c in df.columns]]
+
+    return df
 
 
 def count_master_flights(
@@ -223,9 +249,14 @@ def count_master_flights(
             raise FileNotFoundError(f"master_flights file not found: {MASTER_FLIGHTS_FILE}")
         dataset = ds.dataset(str(MASTER_FLIGHTS_FILE))
 
-    combined = _build_master_flights_filter(query)
-    return dataset.scanner(filter=combined).count_rows()
+    has_route = "route" in dataset.schema.names
+    if query is not None and query.routes and not has_route:
+        # Legacy schema fallback: read matched keys and count
+        df = read_master_flights(query=query, columns=["firstseen"], dataset=dataset)
+        return len(df)
 
+    combined = _build_master_flights_filter(query, schema_names=dataset.schema.names)
+    return dataset.scanner(filter=combined).count_rows()
 
 
 def read_route_summary(
@@ -699,4 +730,3 @@ def read_flight_filepaths(
 
     table = dataset.to_table(filter=expr, columns=cols)
     return table.to_pandas()
-

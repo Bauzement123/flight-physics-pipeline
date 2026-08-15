@@ -140,6 +140,18 @@ def main():
         lon_max=args.lon_max,
     )
 
+    # 4.1 Materialize canonical route string ('DEP-ARR') for native PyArrow pushdown
+    if "estdepartureairport" in df_filtered.columns and "estarrivalairport" in df_filtered.columns:
+        dep_clean = df_filtered["estdepartureairport"].fillna("").astype(str).str.strip()
+        arr_clean = df_filtered["estarrivalairport"].fillna("").astype(str).str.strip()
+        df_filtered["route"] = dep_clean + "-" + arr_clean
+        mask_incomplete = (
+            df_filtered["estdepartureairport"].isna()
+            | df_filtered["estarrivalairport"].isna()
+            | (df_filtered["route"] == "-")
+        )
+        df_filtered.loc[mask_incomplete, "route"] = None
+
     # 5. Save Output
     out_path.parent.mkdir(parents=True, exist_ok=True)
     logging.info(f"Saving filtered flights ({len(df_filtered):,} rows) to {out_path}...")

@@ -66,7 +66,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   ├── slot1_flightlist_gen.generate_base_flightlist()
 │   │   ├── Input: Cohort DataFrame (master_flights slice), corridors_map (from data_manager.read_corridors_map).
 │   │   ├── Output: List[FlightCandidate]
-│   │   └── Safety/Fallback: Pure transform; maps flights to all valid available route clusters; checks cluster.fl validity (hard skip on missing/invalid FL).
+│   │   └── Safety/Fallback: Pure transform; maps flights to all valid available route clusters; checks cluster.fl validity (hard skip on missing/invalid FL); safely sanitizes nullable callsign and typecode fields using pd.notna to guard against boolean evaluation errors on pandas.NA.
 │   └── slot1_flightlist_gen.select_clusters()
 │       ├── Input: candidate_pool (List[FlightCandidate]), available_clusters, strategy ('random'), clusters_per_flight.
 │       ├── Output: List[SimTask]
@@ -149,8 +149,8 @@ flowchart TD
 #### Step-by-Step Description:
 
 1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, fuel, simulation mode, memory flags). `read_corridors_map()` loads `(route_id, cluster_id)` corridor metadata and calibrated FLs from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, filtered via PyArrow dataset predicate pushdown on `route_summary.parquet` if ranks are specified.
-2. **Daily Cohort Ingestion**: For each calendar day in `--start-date` to `--end-date`, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC.
-3. **Flight List Generation (Slot 1)**: `generate_flightlist()` converts cohort rows into `SimTask` dataclass items by matching route codes against available cluster trajectories in `corridors_map`.
+2. **Daily Cohort Ingestion**: For each calendar day in `--start-date` to `--end-date`, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC, leveraging single-column predicate pushdown on precomputed `route` fields.
+3. **Flight List Generation (Slot 1)**: `generate_base_flightlist()` converts cohort rows into `FlightCandidate` items by matching route codes against available cluster trajectories in `corridors_map`, safely handling missing `callsign` and `typecode` fields with `pd.notna` guards. `select_clusters()` then samples and materializes strongly typed `SimTask` dataclass items.
 4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:
    $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
    $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$

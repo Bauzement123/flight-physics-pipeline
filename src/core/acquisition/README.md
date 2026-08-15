@@ -127,7 +127,7 @@ graph TD
 2. **Track B (Fleet Preparation)**: `fleet_builder.py` streams OpenAirframes and OpenSky DBs in chunks, filters target typecodes, renames columns, performs an outer merge with cell-level coalescing, validates typecodes via `is_supported_typecode()`, and exports `*_Enriched_Fleet.parquet`.
 3. **Merger Stage**: `master_merger.py` joins population and fleet records on `icao24`, drops unsupported airframes logging them to `skipped_aircraft.log` via `log_skipped_aircraft()`, and saves `ParentPopulation_*_target_AirFrames.parquet`.
 4. **Airport Metadata Labeling**: `airport_extractor.py` scans raw and fleet parquets for unique departure and arrival ICAOs, delegates coordinate resolution to `resolve_airport_coordinates()` from `src.common.utils`, evaluates metadata flags (`is_icao_schema`, `has_target_airframe`, `survived_bbox`), and writes `airport_coordinates.json` via `write_json_dataclass()`.
-5. **Geographic Filtering**: `apply_bounds_and_filters.py` extracts unique ICAOs, resolves coordinates using `resolve_airport_coordinates()`, enforces the `EUR_BBOX` from `config.py`, drops out-of-bounds flights, and writes the canonical `master_flights.parquet`.
+5. **Geographic Filtering & Route Materialization**: `apply_bounds_and_filters.py` extracts unique ICAOs, resolves coordinates using `resolve_airport_coordinates()`, enforces the `EUR_BBOX` from `config.py`, drops out-of-bounds flights, computes the canonical `route` string (`dep-arr`), and writes the canonical `master_flights.parquet`.
 
 ---
 

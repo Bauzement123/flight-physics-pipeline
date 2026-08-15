@@ -35,11 +35,11 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers, Delta Lake
 │   ├── io_utils.read_master_flights()
 │   │   ├── Input: Optional[MasterFlightQuery], Optional[List[str]] (columns), Optional[ds.Dataset] (dataset).
 │   │   ├── Output: pandas.DataFrame
-│   │   └── Safety/Fallback: Raises FileNotFoundError if MASTER_FLIGHTS_FILE is missing; applies PyArrow dataset predicate pushdown for dates, typecodes, icao24s, callsigns, and airports.
+│   │   └── Safety/Fallback: Raises FileNotFoundError if MASTER_FLIGHTS_FILE is missing; dynamically detects schema to apply single-column O(1) PyArrow predicate pushdown on 'route' (or 2-phase airport-set pushdown with vectorized in-memory route filtering on legacy schemas without 'route'), dates, typecodes, icao24s, callsigns, and airports.
 │   └── io_utils.count_master_flights()
 │       ├── Input: Optional[MasterFlightQuery], Optional[ds.Dataset] (dataset).
 │       ├── Output: int (row count)
-│       └── Safety/Fallback: Uses PyArrow dataset scanner count_rows() pushdown without loading table data into RAM.
+│       └── Safety/Fallback: Uses PyArrow dataset scanner count_rows() metadata pushdown with native single-column route filtering without loading table data into RAM.
 │
 ├── 2. Route Summary & Corridor Registry Retrieval
 │   ├── io_utils.read_route_summary()
@@ -162,7 +162,7 @@ flowchart TD
 ```
 
 **Step-by-step Description:**
-1. **Cohort & Metadata Ingestion**: The orchestrator calls `read_corridors_map()` to load calibrated cluster metadata from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, and initializes a `MasterFlightQuery` for the day's departure date range. `read_master_flights()` applies PyArrow filter pushdown to stream matching rows from `master_flights.parquet` into memory.
+1. **Cohort & Metadata Ingestion**: The orchestrator calls `read_corridors_map()` to load calibrated cluster metadata from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, and initializes a `MasterFlightQuery` for the day's departure date range. `read_master_flights()` applies PyArrow filter pushdown on precomputed `route` column (with automatic fallback to airport-set pushdown and vectorized in-memory filtering for legacy schemas) to stream matching rows from `master_flights.parquet` into memory.
 2. **Task Generation (Slot 1)**: Cohort rows are converted into `SimTask` dataclass objects. Each task lazily generates its canonical `SIM_FID` identifier via `task.to_sim_fid()`.
 3. **Pre-Batch Skip-Gate Verification (Slot 2)**: Before creating worker batches, Slot 2 invokes `read_existing_sim_fids()` to bulk-query all simulated `SIM_FID`s for the day's routes. Unsimulated tasks are chunked into full batches of `max_batch_size` (e.g. 50), maximizing CPU vectorization without empty slots.
 4. **Variational Optimization (Slot 2 & Slot 5)**: In variational mode, Slot 2 calls `read_ef_by_base_key()` to retrieve prior simulated FLs and $\text{EF}_{\text{total}}$ values. Succeeded flights with positive warming ($\text{EF}_{\text{total}} > 0$) generate step-down tasks via `compute_stepdown_task()` until contrail suppression or minimum safe altitude is reached.

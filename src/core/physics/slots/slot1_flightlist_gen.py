@@ -88,7 +88,8 @@ def generate_base_flightlist(
         route_key = f"{dep}-{arr}"
 
         icao24 = row["icao24"]
-        callsign = row.get("callsign", "UNK") or "UNK"
+        raw_callsign = row.get("callsign")
+        callsign = str(raw_callsign).strip() if pd.notna(raw_callsign) and raw_callsign else "UNK"
 
         available_cids = [cid for (r, cid) in available_clusters if r == route_key]
         if not available_cids:
@@ -120,6 +121,8 @@ def generate_base_flightlist(
                            if hasattr(row["lastseen"], "timestamp")
                            else row["lastseen"])
                            
+            raw_typecode = row.get("typecode")
+            typecode = str(raw_typecode).strip() if pd.notna(raw_typecode) and raw_typecode else ""
             candidate_pool.append(FlightCandidate(
                 icao24=icao24,
                 callsign=callsign,
@@ -127,7 +130,7 @@ def generate_base_flightlist(
                 arr=arr,
                 firstseen=firstseen,
                 lastseen=lastseen,
-                typecode=str(row.get("typecode", "") or ""),
+                typecode=typecode,
                 valid_cluster_ids=valid_cids
             ))
 
