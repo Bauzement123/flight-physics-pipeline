@@ -73,10 +73,14 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │       └── Safety/Fallback: Samples cluster IDs from candidate valid pool and materializes strongly typed SimTask instances.
 │
 ├── 4. Slot 2: Task Filtering, Mutation & Batching
+│   ├── slot2_batcher.partition_tasks()
+│   │   ├── Input: List[SimTask], max_batch_size.
+│   │   ├── Output: List[List[SimTask]] (100% saturated execution batches).
+│   │   └── Safety/Fallback: Deterministically sorts tasks by (dep, arr, cluster_id, firstseen); continuously slices into full max_batch_size batches to maximize vectorized saturation and preserve trajectory cache locality.
 │   ├── slot2_batcher.filter_and_batch()
 │   │   ├── Input: Candidate List[SimTask], sim_mode, lake_path, overwrite flag, max_batch_size.
 │   │   ├── Output: List[List[SimTask]] (partitioned execution batches).
-│   │   └── Safety/Fallback: Bulk-queries read_existing_sim_fids(); skips already-simulated tasks; groups by (dep, arr, cluster_id); chunks into full max_batch_size sub-batches.
+│   │   └── Safety/Fallback: Bulk-queries read_existing_sim_fids() or read_ef_by_base_key(); skips already-simulated tasks; delegates batch partitioning to partition_tasks().
 │   └── slot2_batcher.compute_stepdown_task()
 │       ├── Input: task (SimTask), ef (float), step_size (float), min_safe_fl (float).
 │       ├── Output: Optional[SimTask]
@@ -204,7 +208,7 @@ flowchart TD
 
 #### Step-by-Step Description:
 
-1. **Worker Setup**: `worker.run_batch()` receives a batch of `SimTask` items (sharing the same `dep`, `arr`, and `cluster_id`), the day's `met` and `rad` datasets, and configuration flags. It retrieves the configured trajectory loader (`get_loader`) and physics models (`get_model`).
+1. **Worker Setup**: `worker.run_batch()` receives a batch of `SimTask` items (deterministically sorted by route, cluster, and timestamp to preserve trajectory cache locality while saturating batch capacity), the day's `met` and `rad` datasets, and configuration flags. It retrieves the configured trajectory loader (`get_loader`) and physics models (`get_model`).
 2. **Phase 1 (Trajectory Loading & Time-Shifting)**:
    - For each task, `cluster_loader.load()` fetches the cluster parquet file from `corridors_map`.
    - Validates `task.typecode` using `is_supported_typecode()`. If invalid or unsupported, logs to `data/logs/skipped_aircraft.log` and returns `None`.

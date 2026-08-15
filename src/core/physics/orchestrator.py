@@ -52,7 +52,7 @@ from src.common.config import (
 )
 from src.core.physics.engine import crop_met_dataset, run_parallel
 from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_base_flightlist, select_clusters
-from src.core.physics.slots.slot2_batcher import filter_and_batch
+from src.core.physics.slots.slot2_batcher import filter_and_batch, partition_tasks
 from src.core.physics.slots.slot5_evaluator import evaluate
 from src.core.physics.worker import run_batch
 from src.data_manager.io_utils import optimize_sim_lake, read_master_flights, vacuum_sim_lake
@@ -491,17 +491,8 @@ def run(
                     round_still_todo.extend(eval_result.still_todo)
 
             if round_still_todo:
-                # Re-batch all round step-downs together via Slot 2 to pack full vectorized batches
-                pending = filter_and_batch(
-                    tasks=round_still_todo,
-                    sim_mode=sim_mode,
-                    lake_path=lake_path,
-                    step_size=step_size,
-                    min_safe_fl=min_safe_fl,
-                    max_batch_size=batch_size,
-                    overwrite=overwrite,
-                    model_config_id=model_config_id,
-                )
+                # Re-batch all round step-downs together via Slot 2 partition_tasks to pack full vectorized batches
+                pending = partition_tasks(round_still_todo, max_batch_size=batch_size)
                 round_idx += 1
             else:
                 pending = []

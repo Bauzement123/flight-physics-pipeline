@@ -25,7 +25,6 @@ Extracted from:
 
 import dataclasses
 import logging
-from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
 
@@ -36,6 +35,42 @@ from src.data_manager.io_utils import read_ef_by_base_key, read_existing_sim_fid
 from src.data_manager.schemas import SimTask
 
 logger = logging.getLogger(__name__)
+
+
+def partition_tasks(
+    tasks: List[SimTask],
+    max_batch_size: int = 50,
+) -> List[List[SimTask]]:
+    """Sort tasks by route, cluster, and timestamp, then continuously chunk into full batches.
+
+    Guarantees deterministic ordering, maximizes vectorization batch saturation (100% full
+    batches up to max_batch_size), and minimizes distinct routes per batch by keeping flights
+    on the same corridor adjacent.
+
+    Parameters
+    ----------
+    tasks : List[SimTask]
+        Flat list of simulation tasks to batch.
+    max_batch_size : int, optional
+        Target batch size ceiling (default 50).
+
+    Returns
+    -------
+    List[List[SimTask]]
+        List of saturated task batches.
+    """
+    if not tasks:
+        return []
+
+    sorted_tasks = sorted(
+        tasks,
+        key=lambda t: (t.dep, t.arr, t.cluster_id, t.firstseen),
+    )
+
+    return [
+        sorted_tasks[i : i + max_batch_size]
+        for i in range(0, len(sorted_tasks), max_batch_size)
+    ]
 
 
 def filter_and_batch(
@@ -50,9 +85,9 @@ def filter_and_batch(
 ) -> List[List[SimTask]]:
     """Filter candidate tasks against the Delta Lake and group into execution batches.
 
-    Tasks are grouped by (dep, arr, cluster_id) so the worker can reuse the
-    loaded K-cluster trajectory across all flights in one batch. If a group
-    exceeds ``max_batch_size`` it is chunked into sub-batches of that size.
+    Tasks are sorted by route, cluster, and timestamp, then continuously chunked
+    into batches of ``max_batch_size``. This maximizes vectorized GPU/CPU utilization
+    while keeping route switching minimal.
 
     Parameters
     ----------
@@ -67,8 +102,7 @@ def filter_and_batch(
     min_safe_fl : float, optional
         Minimum safe FL in feet (default 280.0). Variational only.
     max_batch_size : int, optional
-        Maximum number of tasks per batch (default 50). Groups larger than
-        this are split into sub-batches of this size.
+        Maximum number of tasks per batch (default 50).
     overwrite : bool, optional
         If True, re-simulate tasks already present in the lake (default False).
     model_config_id : str, optional
@@ -77,7 +111,7 @@ def filter_and_batch(
     Returns
     -------
     List[List[SimTask]]
-        List of task batches ordered by (dep, arr, cluster_id).
+        List of task batches ordered by (dep, arr, cluster_id, firstseen).
 
     Raises
     ------
@@ -98,7 +132,7 @@ def filter_and_batch(
             overwrite=overwrite,
         )
 
-    # --- standard: bulk existence check + semantic grouping ---
+    # --- standard: bulk existence check + route-sorted continuous batching ---
     routes = list({f"{t.dep}-{t.arr}" for t in tasks})
     dep_dates = {int(pd.Timestamp(t.firstseen, unit="s", tz="UTC").strftime("%Y%m%d")) for t in tasks}
     dep_date = dep_dates.pop() if len(dep_dates) == 1 else None
@@ -108,20 +142,13 @@ def filter_and_batch(
     unsimulated_tasks = [t for t in tasks if t.to_sim_fid() not in existing_fids]
     skipped = len(tasks) - len(unsimulated_tasks)
 
-    groups: dict = defaultdict(list)
-    for task in unsimulated_tasks:
-        groups[(task.dep, task.arr, task.cluster_id)].append(task)
+    batches = partition_tasks(unsimulated_tasks, max_batch_size=max_batch_size)
 
-    # Chunk each group into sub-batches of max_batch_size
-    batches: List[List[SimTask]] = []
-    for group in groups.values():
-        for i in range(0, len(group), max_batch_size):
-            batches.append(group[i : i + max_batch_size])
-
+    avg_density = (len(unsimulated_tasks) / len(batches)) if batches else 0.0
     logger.info(
         "Slot 2 (standard): %d tasks in → %d skipped → %d batch(es) "
-        "across %d route-cluster group(s) [max_batch_size=%d].",
-        len(tasks), skipped, len(batches), len(groups), max_batch_size,
+        "[max_batch_size=%d, avg_density=%.1f flights/batch].",
+        len(tasks), skipped, len(batches), max_batch_size, avg_density,
     )
     return batches
 
@@ -174,12 +201,12 @@ def _filter_and_expand_variational(
     skipped_floor = 0
     emit_initial = 0
     emit_stepdown = 0
-    groups: dict = defaultdict(list)
+    emitted_tasks: List[SimTask] = []
 
     if overwrite:
         for task in tasks:
             emit_initial += 1
-            groups[(task.dep, task.arr, task.cluster_id)].append(task)
+            emitted_tasks.append(task)
     else:
         routes = list({f"{t.dep}-{t.arr}" for t in tasks})
         dep_dates = list({
@@ -198,7 +225,7 @@ def _filter_and_expand_variational(
             if prior is None:
                 # Never simulated — emit at nominal FL from cluster registry
                 emit_initial += 1
-                groups[(task.dep, task.arr, task.cluster_id)].append(task)
+                emitted_tasks.append(task)
                 continue
 
             # Any result with EF <= 0 means contrail is already suppressed
@@ -223,20 +250,18 @@ def _filter_and_expand_variational(
                 continue
 
             emit_stepdown += 1
-            groups[(next_task.dep, next_task.arr, next_task.cluster_id)].append(next_task)
+            emitted_tasks.append(next_task)
 
-    batches: List[List[SimTask]] = []
-    for group in groups.values():
-        for i in range(0, len(group), max_batch_size):
-            batches.append(group[i : i + max_batch_size])
+    batches = partition_tasks(emitted_tasks, max_batch_size=max_batch_size)
 
+    avg_density = (len(emitted_tasks) / len(batches)) if batches else 0.0
     logger.info(
         "Slot 2 (variational): %d tasks in → "
         "%d initial, %d step-down, %d suppressed-skip, %d floor-skip "
-        "→ %d batch(es) [step_size=%.0f, min_safe_fl=%.0f].",
+        "→ %d batch(es) [max_batch_size=%d, avg_density=%.1f flights/batch, step_size=%.0f, min_safe_fl=%.0f].",
         len(tasks), emit_initial, emit_stepdown,
         skipped_suppressed, skipped_floor,
-        len(batches), step_size, min_safe_fl,
+        len(batches), max_batch_size, avg_density, step_size, min_safe_fl,
     )
     return batches
 
