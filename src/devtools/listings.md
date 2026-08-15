@@ -16,6 +16,11 @@ This directory contains standalone developer tools, test scripts, and migration 
 
 ---
 
+### `inspect_lake.py`
+`inspect_lake.py` is a high-performance Delta Lake inspection and diagnostic utility designed for instant table health and metric auditing on local disk and remote SMB network shares (`\\PC182...`). Run this tool whenever you need to check how many unique simulated flights (`SIM_FID`s) exist in a Delta Lake, verify table versioning, audit route and aircraft typecode distributions, inspect simulated flight level ranges (min/max FL), or check mean/max contrail radiative energy forcing ($\text{EF}_{\text{total}}$). The utility uses PyArrow columnar projections and streams record batches in fixed $100,000$-row chunks, guaranteeing constant $\mathcal{O}(1)$ memory consumption ($< 20\text{ MB}$ peak RAM) regardless of table size (even on 100M+ waypoint production lakes). It outputs a structured summary block to standard output. Invoked via `python -m src.devtools.inspect_lake <lake_path>`, it accepts a single positional argument for the local directory or UNC network path.
+
+---
+
 ### `rename_legacy_rank_folders.py`
 `rename_legacy_rank_folders.py` is a migration utility that renames or merges legacy trajectory directories structured as `rank_NNN_DEP-ARR` into clean `DEP-ARR` route directory names under `data/trajectories/`. Run this script when standardizing directory layouts or upgrading legacy trajectory dataset folder structures. It reads folder names, parquet trajectory files, JSON route manifests, and run manifests under `data/trajectories/` (or a custom path specified via `--trajectories-dir`). The script renames directories and files, patches internal JSON manifest references, and writes operational logs to `data/logs/manifest.log`. Invoked via `python -m src.devtools.rename_legacy_rank_folders`, it defaults to a safe dry-run preview and requires the `--commit` flag to execute filesystem mutations.
 
@@ -48,6 +53,11 @@ This directory contains standalone developer tools, test scripts, and migration 
 
 ### `test_refactor.py`
 `test_refactor.py` is a comprehensive regression test suite containing 13 test cases that validate safety and performance contracts across the fetching module (`src.core.fetching`). Run this script when refactoring fetching utilities, atomic parquet writers, flight phase labeling logic, or batch orchestrator resume behaviors. It programmatically constructs mock master flight dataframes, synthetic PyArrow timestamp arrays, and temporary parquet files inside `data/temp/`. The script outputs detailed PASS/FAIL test assertions and a final test tally to stdout, exiting with status code 1 if any regression assertion fails. It is invoked via `python -m src.devtools.test_refactor` and executes all unit tests synchronously without needing CLI options.
+
+---
+
+### `test_sync_delta_lake.py`
+`test_sync_delta_lake.py` is an end-to-end integration and regression test suite that validates the Delta Lake synchronization and maintenance utility (`src.data_manager.sync_delta_lake`). Run this script when modifying directional streaming sync algorithms, PyArrow anti-join deduplication logic, `--dry-run` safety guards, downsert routines, or remote maintenance/compaction functions. It programmatically constructs synthetic Delta Lake tables across isolated temporary directories, testing 5 core scenarios: (1) bootstrapping a non-existent destination lake, (2) in-sync zero-transfer no-ops, (3) incremental upsert with overlapping flight IDs, (4) downsert sync from remote to local, and (5) remote table compaction and Z-ordering. The script outputs progress milestones and assertion checks to standard output. It is invoked via `python -m src.devtools.test_sync_delta_lake` and requires no command-line flags.
 
 ---
 
