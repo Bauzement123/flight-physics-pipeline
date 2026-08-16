@@ -51,7 +51,7 @@ from src.common.config import (
     ALL_TARGET_FAMILIES,
 )
 from src.core.physics.engine import crop_met_dataset, run_parallel
-from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_base_flightlist, select_clusters
+from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_flightlist
 from src.core.physics.slots.slot2_batcher import filter_and_batch, partition_tasks
 from src.core.physics.slots.slot5_evaluator import evaluate
 from src.core.physics.worker import run_batch
@@ -308,9 +308,16 @@ def run(
         ``[west, south, east, north]`` spatial crop applied to ERA5 data.
     """
     # ── Slot 1: Build corridor cluster mapping from model registry ───── #
-    corridors_map = build_corridors_map(ranks=ranks, corridors_dir=corridors_dir)
+    corridors_map = build_corridors_map(
+        ranks=ranks,
+        corridors_dir=corridors_dir,
+        min_distance_km=min_distance_km,
+    )
     if not corridors_map:
-        logger.error("No corridor files found for ranks %s — nothing to do.", ranks)
+        logger.error(
+            "No corridor files found for ranks=%s, min_distance_km=%.1f — nothing to do.",
+            ranks, min_distance_km,
+        )
         return
 
     allowed_routes = list({route_id for (route_id, _) in corridors_map.keys()})
@@ -352,21 +359,8 @@ def run(
             logger.info("No flights for day %s — skipping.", day)
             continue
 
-        if min_distance_km > 0 and "distance_km" in cohort_df.columns:
-            cohort_df = cohort_df[cohort_df["distance_km"] >= min_distance_km]
-            if cohort_df.empty:
-                logger.info(
-                    "All flights < min_distance_km=%.1f km — skipping day %s.",
-                    min_distance_km, day,
-                )
-                continue
-
-        candidate_pool = generate_base_flightlist(
+        tasks: List[SimTask] = generate_flightlist(
             cohort_df=cohort_df,
-            available_clusters=corridors_map,
-        )
-        tasks: List[SimTask] = select_clusters(
-            candidate_pool=candidate_pool,
             available_clusters=corridors_map,
             strategy=cluster_selection,
             clusters_per_flight=clusters_per_flight,
@@ -377,13 +371,35 @@ def run(
 
         total_cohort_tasks += len(tasks)
 
-        # ── Compute exact ERA5 window from task firstseen / lastseen ────── #
+        # ── Slot 2: skip-gate + group into batches ───────────────────────── #
+        batches = filter_and_batch(
+            tasks=tasks,
+            sim_mode=sim_mode,
+            lake_path=lake_path,
+            step_size=step_size,
+            min_safe_fl=min_safe_fl,
+            max_batch_size=batch_size,
+            overwrite=overwrite,
+        )
+
+        if not batches:
+            day_elapsed = time.perf_counter() - day_t0
+            total_skipped_tasks += len(tasks)
+            logger.info(
+                "Day %s completed in %s — 0 tasks committed (all %d cohort tasks already simulated), 0 weather I/O.",
+                day, _format_duration(day_elapsed), len(tasks),
+            )
+            continue
+
+        active_tasks = [t for b in batches for t in b]
+
+        # ── Compute exact ERA5 window from active unsimulated tasks ──────── #
         era5_start = _floor_h(
-            min(pd.Timestamp(t.firstseen, unit="s", tz="UTC") for t in tasks)
+            min(pd.Timestamp(t.firstseen, unit="s", tz="UTC") for t in active_tasks)
         ) - pd.Timedelta(hours=1)
 
         era5_end = _ceil_h(
-            max(pd.Timestamp(t.lastseen, unit="s", tz="UTC") for t in tasks)
+            max(pd.Timestamp(t.lastseen, unit="s", tz="UTC") for t in active_tasks)
         ) + pd.Timedelta(hours=max_age_hours + 1)
 
         window_h = (era5_end - era5_start).total_seconds() / 3600
@@ -416,31 +432,9 @@ def run(
             [hour_cache[h][1].data for h in available], dim="time"
         ))
 
-        # ── Slot 2: skip-gate + group into batches ───────────────────────── #
-        batches = filter_and_batch(
-            tasks=tasks,
-            sim_mode=sim_mode,
-            lake_path=lake_path,
-            step_size=step_size,
-            min_safe_fl=min_safe_fl,
-            max_batch_size=batch_size,
-            overwrite=overwrite,
-        )
-
-        if not batches:
-            day_elapsed = time.perf_counter() - day_t0
-            total_skipped_tasks += len(tasks)
-            logger.info(
-                "Day %s completed in %s — 0 tasks committed (all %d cohort tasks skipped via skip-gate), 0 failed.",
-                day, _format_duration(day_elapsed), len(tasks),
-            )
-            del met, rad
-            gc.collect()
-            continue
-
         logger.info(
-            "Day %s: %d task(s) → %d batch(es) after skip-gate.",
-            day, len(tasks), len(batches),
+            "Day %s: %d cohort task(s) → %d active after skip-gate → %d batch(es).",
+            day, len(tasks), len(active_tasks), len(batches),
         )
 
         # ── Engine: ThreadPoolExecutor dispatch ─────────────────────────── #

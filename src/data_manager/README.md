@@ -55,19 +55,38 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers, Delta Lake
 │       ├── Output: pandas.DataFrame
 │       └── Safety/Fallback: Scans trajectory or clean registries using PyArrow dataset predicate pushdown (isin filter) for instant O(1) FID-to-filepath resolution.
 │
-├── 3. Trajectory Delta Lake Query Engine
+├── 3. Unified Simulation Lake IO Engine & Query
 │   ├── io_utils.read_sim_lake()
 │   │   ├── Input: lake_path (str | Path), SimResultQuery.
 │   │   ├── Output: pandas.DataFrame
 │   │   └── Safety/Fallback: Opens DeltaTable; converts to PyArrow dataset; applies predicate pushdown on sim_fids, routes, EF_total thresholds, FL bounds, model_config_id, and fuel.
-│   ├── io_utils.read_existing_sim_fids()
-│   │   ├── Input: lake_path, routes, dep_date.
+│   ├── io_utils.read_sim_lake_metadata()                            ← unified IO engine
+│   │   ├── Input: lake_path (str|Path), tasks (List[SimTask]), columns (List[str]).
+│   │   ├── Output: pd.DataFrame — one row per matched SIM_FID with caller-specified columns.
+│   │   └── Safety/Fallback: 4-stage pipeline: (1) dep_date.isin() file-level skip via Z-ORDER stats;
+│   │       (2) firstseen.isin() 84%-unique row filter decoded for evaluation only, never materialised;
+│   │       (3) waypoint.isin([0]) — verified 100% coverage, caps RAM at ≤1.2×N_tasks rows regardless
+│   │       of trajectory length; (4) in-RAM Python frozenset match on Base_FID
+│   │       = {icao24}_{callsign}_{dep}-{arr}_{YYYYMMDD}_{HHMM} — unique per master flight, no C++ join.
+│   │       ⚠ RAM Risk: on a lake of X GB across Y days, peak in-RAM table ≈ (X/Y) × 1.2 per day query.
+│   ├── io_utils.delete_sim_lake_rows()                              ← delete engine
+│   │   ├── Input: lake_path (str|Path), sim_fids (Collection[str]).
+│   │   ├── Output: None.
+│   │   └── Safety/Fallback: Single SQL SIM_FID IN (...) predicate. Bounded by daily loop to ≤few-thousand
+│   │       strings. Delta-rs streams files; Z-ORDER on dep_date means only day-files are rewritten
+│   │       (peak RAM ≈ X_lake/Y_days). ⚠ IO Risk: if called outside the daily loop on a large unbounded
+│   │       SIM_FID list, the SQL string and Parquet rewrite can exceed memory — always scope to one day.
+│   ├── io_utils.read_existing_sim_fids()                            ← thin wrapper
+│   │   ├── Input: lake_path (str|Path), tasks (List[SimTask]).
 │   │   ├── Output: frozenset[str]
-│   │   └── Safety/Fallback: Scans only the SIM_FID column with route and dep_date predicate pushdown for high-speed O(1) skip-gate evaluation.
-│   └── io_utils.read_ef_by_base_key()
-│       ├── Input: lake_path, base_keys, model_config_id, routes, dep_dates.
+│   │   └── Safety/Fallback: Delegates to read_sim_lake_metadata(columns=["SIM_FID"]). Returns frozenset
+│   │       of matched SIM_FID strings for O(1) skip-gate lookup in Slot 2 standard mode.
+│   └── io_utils.read_ef_by_base_key()                              ← thin wrapper
+│       ├── Input: lake_path (Path), tasks (List[SimTask]).
 │       ├── Output: Dict[str, List[Tuple[float, float]]]
-│       └── Safety/Fallback: Retrieves prior (FL, EF_total) pairs scoped by routes and dates for variational step-down planning.
+│       └── Safety/Fallback: Delegates to read_sim_lake_metadata(columns=["SIM_FID","FL","EF_total"]).
+│           Groups by CLUSTER_FID (SIM_FID without _{FL} suffix) so variational step-down sees all
+│           FL variants per (flight, cluster) pair.
 │
 ├── 4. Runtime Schema Validation & Persistence
 │   ├── io_utils.validate_sim_trajectory_df()
@@ -121,8 +140,8 @@ flowchart TD
     subgraph DataManager_Read ["DataManager Readers (io_utils.py)"]
         B1["read_master_flights(MasterFlightQuery)"]
         B2["read_corridors_map(ranks)"]
-        B3["read_existing_sim_fids(routes, dep_date)"]
-        B4["read_ef_by_base_key(base_keys)"]
+        B3["read_existing_sim_fids(tasks)"]
+        B4["read_ef_by_base_key(tasks)"]
     end
 
     subgraph Orchestrator ["Physics Orchestrator & Slots"]
@@ -168,6 +187,24 @@ flowchart TD
 4. **Variational Optimization (Slot 2 & Slot 5)**: In variational mode, Slot 2 calls `read_ef_by_base_key()` to retrieve prior simulated FLs and $\text{EF}_{\text{total}}$ values. Succeeded flights with positive warming ($\text{EF}_{\text{total}} > 0$) generate step-down tasks via `compute_stepdown_task()` until contrail suppression or minimum safe altitude is reached.
 5. **Runtime Schema Validation & Persistence**: Upon batch simulation, worker threads construct a full per-waypoint DataFrame and call `append_sim_lake()`. `validate_sim_trajectory_df()` enforces that all 14 mandatory metadata columns are present and non-null. Under `_LAKE_WRITE_LOCK`, `append_sim_lake()` merges rows on `(SIM_FID, model_config_id, time)` (or executes targeted delete-then-append if `overwrite=True` or new physics columns evolve).
 6. **Post-Day Vacuum & Multi-Dimensional Z-Ordering**: At the end of each daily orchestration loop, `vacuum_sim_lake()` prunes stale parquet files older than 168 hours, and `optimize_sim_lake()` compacts small files and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`, guaranteeing high-speed downstream analytics.
+
+> [!WARNING]
+> **RAM Risk — Unified IO Engine (`read_sim_lake_metadata`)**  
+> Peak in-RAM row count after Stage 3 (`waypoint == 0`) is ≤ 1.2 × N_tasks for a single day.
+> For a daily cohort of 2,000 tasks, this is ~2,400 rows × few columns ≈ 50 KB — negligible.
+> However, if `read_sim_lake_metadata` is called outside the daily loop with tasks spanning
+> many days simultaneously, in-RAM size scales linearly with the number of days: a 7-day
+> batch with 2,000 tasks/day yields ~17,000 rows — still fine. Avoid passing unbounded
+> multi-month task lists in a single call; prefer daily-bounded invocations as the orchestrator does.
+
+> [!WARNING]
+> **IO Risk — `delete_sim_lake_rows` Outside Daily Loop**  
+> The delete engine is designed for the daily overwrite path where `sim_fids` is bounded to
+> one day's worth of tasks (≤ ~10,000 SIM_FIDs). Calling `delete_sim_lake_rows` with a
+> large unbounded SIM_FID list (e.g. reprocessing months of data in one shot) risks:
+> (1) Generating a multi-MB SQL string that may exceed Delta-rs predicate limits.
+> (2) Forcing delta-rs to rewrite many Parquet files, with peak RAM proportional to the
+>     largest individual file. Always scope delete operations to ≤ one day at a time.
 
 ---
 

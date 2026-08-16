@@ -28,10 +28,13 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-import pandas as pd
-
 from src.common.config import MIN_SAFE_FL
-from src.data_manager.io_utils import read_ef_by_base_key, read_existing_sim_fids
+from src.data_manager.io_utils import (
+    delete_sim_lake_rows,
+    read_ef_by_base_key,
+    read_existing_sim_fids,
+    read_sim_lake_metadata,
+)
 from src.data_manager.schemas import SimTask
 
 logger = logging.getLogger(__name__)
@@ -81,7 +84,6 @@ def filter_and_batch(
     min_safe_fl: float = MIN_SAFE_FL,
     max_batch_size: int = 50,
     overwrite: bool = False,
-    model_config_id: Optional[str] = None,
 ) -> List[List[SimTask]]:
     """Filter candidate tasks against the Delta Lake and group into execution batches.
 
@@ -105,8 +107,8 @@ def filter_and_batch(
         Maximum number of tasks per batch (default 50).
     overwrite : bool, optional
         If True, re-simulate tasks already present in the lake (default False).
-    model_config_id : str, optional
-        Filter lake query to this model_config_id. Variational only.
+        Standard mode deletes exact SIM_FIDs; variational mode deletes all FL
+        variants matching each CLUSTER_FID so the step-down restarts clean.
 
     Returns
     -------
@@ -128,16 +130,17 @@ def filter_and_batch(
             step_size=step_size,
             min_safe_fl=min_safe_fl,
             max_batch_size=max_batch_size,
-            model_config_id=model_config_id,
             overwrite=overwrite,
         )
 
     # --- standard: bulk existence check + route-sorted continuous batching ---
-    routes = list({f"{t.dep}-{t.arr}" for t in tasks})
-    dep_dates = {int(pd.Timestamp(t.firstseen, unit="s", tz="UTC").strftime("%Y%m%d")) for t in tasks}
-    dep_date = dep_dates.pop() if len(dep_dates) == 1 else None
+    existing_fids = frozenset() if overwrite else read_existing_sim_fids(lake_path, tasks)
 
-    existing_fids = frozenset() if overwrite else read_existing_sim_fids(lake_path, routes, dep_date)
+    if overwrite:
+        # Delete the exact SIM_FIDs we are about to re-simulate so the lake
+        # stays deduplicated. Daily-loop boundary keeps the list small.
+        fids_to_delete = [t.to_sim_fid() for t in tasks]
+        delete_sim_lake_rows(lake_path, fids_to_delete)
 
     unsimulated_tasks = [t for t in tasks if t.to_sim_fid() not in existing_fids]
     skipped = len(tasks) - len(unsimulated_tasks)
@@ -163,34 +166,42 @@ def _filter_and_expand_variational(
     step_size: float,
     min_safe_fl: float,
     max_batch_size: int,
-    model_config_id: Optional[str],
     overwrite: bool = False,
 ) -> List[List[SimTask]]:
     """Determine which tasks to simulate next for the variational step-down campaign.
 
-    For each task:
-    - No lake rows for its base key → emit task at task.fl (first simulation).
-    - Any existing EF <= 0 → skip (contrail already suppressed at some FL).
-    - All existing EF > 0 → call compute_stepdown_task from the lowest simulated FL.
-      If that returns None (already at floor), skip.
+    Calls :func:`read_ef_by_base_key` (which delegates to :func:`read_sim_lake_metadata`)
+    to bulk-read prior ``(FL, EF_total)`` results, then for each task:
+
+    - No lake rows for its ``CLUSTER_FID`` → emit at ``task.fl`` (first simulation).
+    - Any existing ``EF_total <= 0`` → skip (contrail already suppressed at some FL).
+    - All existing ``EF_total > 0`` → call :func:`compute_stepdown_task` from the lowest
+      already-simulated FL; if that returns ``None`` (floor reached), skip.
 
     Parameters
     ----------
     tasks : List[SimTask]
-        Candidate tasks from Slot 1. ``task.fl`` carries the *nominal* FL from
-        the cluster registry — used only when no prior results exist.
+        Candidate tasks from Slot 1. ``task.fl`` is the nominal FL from the cluster
+        registry, used only when no prior lake results exist for the CLUSTER_FID.
     lake_path : Path
-        Root of the simulation Delta Lake.
+        Root directory of the simulation Delta Lake.
     step_size : float
-        FL decrement per iteration (feet).
+        FL decrement per step-down iteration (feet).
     min_safe_fl : float
         Operational floor below which no step-down is emitted.
     max_batch_size : int
-        Max tasks per batch chunk.
-    model_config_id : str or None
-        Scope the lake query to a specific fuel/model configuration.
+        Maximum tasks per batch chunk.
     overwrite : bool
-        If True, ignore prior lake results and re-emit all tasks at nominal FL.
+        If ``True``, wipe all existing FL variants for each CLUSTER_FID
+        (``SIM_FID`` without the ``_{FL}`` suffix) via :func:`delete_sim_lake_rows`,
+        then re-emit all tasks at nominal FL so the step-down campaign restarts clean.
+
+        .. warning::
+            **IO Risk**: overwrite triggers a :func:`read_sim_lake_metadata` scan
+            (to resolve which SIM_FIDs to delete) followed by a Delta Lake delete.
+            Both operations are bounded by the daily loop to one day's tasks
+            (~few-thousand SIM_FIDs). Do **not** call with unbounded multi-day task
+            lists in a single invocation — RAM and Parquet rewrite cost scale linearly.
 
     Returns
     -------
@@ -204,23 +215,24 @@ def _filter_and_expand_variational(
     emitted_tasks: List[SimTask] = []
 
     if overwrite:
+        # Wipe all FL variants for each cluster (CLUSTER_FID = SIM_FID without _{FL})
+        # so the variational step-down restarts clean from the nominal FL.
+        df_existing = read_sim_lake_metadata(lake_path, tasks, columns=["SIM_FID"])
+        if not df_existing.empty:
+            cluster_fids = frozenset(t.to_sim_fid().rsplit("_", 1)[0] for t in tasks)
+            to_delete = df_existing[
+                df_existing["SIM_FID"].str.rsplit("_", 1).str[0].isin(cluster_fids)
+            ]["SIM_FID"].tolist()
+            delete_sim_lake_rows(lake_path, to_delete)
         for task in tasks:
             emit_initial += 1
             emitted_tasks.append(task)
     else:
-        routes = list({f"{t.dep}-{t.arr}" for t in tasks})
-        dep_dates = list({
-            int(pd.Timestamp(t.firstseen, unit="s", tz="UTC").strftime("%Y%m%d"))
-            for t in tasks
-        })
-        base_keys = {task.to_sim_fid().rsplit("_", 1)[0] for task in tasks}
-        lake_results = read_ef_by_base_key(
-            lake_path, base_keys, model_config_id, routes=routes, dep_dates=dep_dates
-        )
+        lake_results = read_ef_by_base_key(lake_path, tasks)
 
         for task in tasks:
-            base_key = task.to_sim_fid().rsplit("_", 1)[0]
-            prior = lake_results.get(base_key)  # list[(fl, ef_total)] or None
+            cluster_fid = task.to_sim_fid().rsplit("_", 1)[0]
+            prior = lake_results.get(cluster_fid)  # list[(fl, ef_total)] or None
 
             if prior is None:
                 # Never simulated — emit at nominal FL from cluster registry
@@ -232,7 +244,7 @@ def _filter_and_expand_variational(
             if any(ef <= 0 for _fl, ef in prior):
                 skipped_suppressed += 1
                 logger.debug(
-                    "Variational skip (suppressed) base_key=%s.", base_key
+                    "Variational skip (suppressed) cluster_fid=%s.", cluster_fid
                 )
                 continue
 
@@ -245,7 +257,7 @@ def _filter_and_expand_variational(
             if next_task is None:
                 skipped_floor += 1
                 logger.debug(
-                    "Variational skip (floor) base_key=%s lowest_fl=%.0f.", base_key, lowest_fl
+                    "Variational skip (floor) cluster_fid=%s lowest_fl=%.0f.", cluster_fid, lowest_fl
                 )
                 continue
 

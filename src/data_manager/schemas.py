@@ -65,6 +65,7 @@ class RouteSummaryQuery:
     ranks: Optional[List[int]] = None
     dep_airports: Optional[List[str]] = None
     arr_airports: Optional[List[str]] = None
+    min_distance_km: Optional[float] = None
 
 
 @dataclass

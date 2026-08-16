@@ -21,41 +21,93 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.data_manager.schemas import CorridorCluster, SimTask, FlightCandidate
-from src.data_manager.io_utils import read_corridors_map
+from src.common.config import BASE_DIR
+from src.data_manager.schemas import CorridorCluster, FlightCandidate, RouteSummaryQuery, SimTask
+from src.data_manager.io_utils import read_corridor_model_registry, read_route_summary
 
 logger = logging.getLogger(__name__)
 
 
 def build_corridors_map(
     ranks: Optional[List[int]] = None,
-    registry_path: Optional[Path] = None,
     corridors_dir: Optional[Path] = None,
+    min_distance_km: float = 0.0,
+    registry_path: Optional[Path] = None,
 ) -> Dict[Tuple[str, int], CorridorCluster]:
     """Build the (route_id, cluster_id) -> CorridorCluster map from registry.
 
-    Delegates data retrieval to ``src.data_manager.io_utils.read_corridors_map()``.
+    1. Queries ``read_route_summary`` if ``ranks`` or ``min_distance_km > 0`` is specified.
+    2. Queries ``read_corridor_model_registry`` with allowed routes predicate pushdown.
+    3. Resolves trajectory filepaths into ``CorridorCluster(path, fl)`` instances.
 
     Parameters
     ----------
     ranks : List[int], optional
         List of route ranks to include (1-indexed). If None, all routes in the
         registry are included.
-    registry_path : Path, optional
-        Path to the corridor model registry parquet. Defaults to GLOBAL_CORRIDOR_MODEL_REGISTRY.
     corridors_dir : Path, optional
         Base directory containing corridor parquet files if overriding default paths.
+    min_distance_km : float
+        Pre-filter: skip routes shorter than this distance in km (default 0.0).
+    registry_path : Path, optional
+        Path to the corridor model registry parquet. Defaults to GLOBAL_CORRIDOR_MODEL_REGISTRY.
 
     Returns
     -------
     Dict[Tuple[str, int], CorridorCluster]
         Mapping of (route_id, cluster_id) -> CorridorCluster(path, fl).
     """
-    return read_corridors_map(
-        ranks=ranks,
+    corridors_map: Dict[Tuple[str, int], CorridorCluster] = {}
+    allowed_routes: Optional[List[str]] = None
+
+    if ranks is not None or min_distance_km > 0:
+        summary_query = RouteSummaryQuery(
+            ranks=ranks,
+            min_distance_km=min_distance_km if min_distance_km > 0 else None,
+        )
+        df_summary = read_route_summary(query=summary_query, columns=["rank", "route"])
+        if df_summary.empty:
+            logger.warning(
+                "build_corridors_map: no routes matched criteria (ranks=%s, min_distance_km=%.1f).",
+                ranks, min_distance_km,
+            )
+            return corridors_map
+
+        allowed = df_summary["route"].dropna().tolist()
+        allowed_routes = list({r.replace(" -> ", "-") for r in allowed})
+        logger.info(
+            "build_corridors_map: filtered by summary (ranks=%s, min_dist=%.1f km) → %d allowed route(s).",
+            ranks, min_distance_km, len(allowed_routes),
+        )
+
+    df_registry = read_corridor_model_registry(
+        routes=allowed_routes,
         registry_path=registry_path,
-        corridors_dir=corridors_dir,
     )
+
+    if df_registry.empty:
+        logger.warning("build_corridors_map: registry returned 0 matching corridor models.")
+        return corridors_map
+
+    for _, row in df_registry.iterrows():
+        route_id   = str(row.get("route_id") or row.get("route", "")).replace(" -> ", "-")
+        cluster_id = int(row["cluster_id"])
+        rel_path   = row["file_path"]
+        fl_val     = row.get("fl")
+        fl         = float(fl_val) if fl_val is not None and not pd.isna(fl_val) else float("nan")
+
+        if corridors_dir is not None:
+            abs_path = corridors_dir / Path(rel_path).name
+        else:
+            abs_path = BASE_DIR / rel_path
+
+        if abs_path.exists():
+            corridors_map[(route_id, cluster_id)] = CorridorCluster(path=abs_path, fl=fl)
+        else:
+            logger.warning("Corridor file missing for %s c%d: %s", route_id, cluster_id, abs_path)
+
+    logger.info("corridors_map: %d entry/entries loaded from registry.", len(corridors_map))
+    return corridors_map
 
 
 def generate_base_flightlist(
@@ -199,12 +251,41 @@ def select_clusters(
 
 def generate_flightlist(
     cohort_df: pd.DataFrame,
-    available_clusters: Dict[Tuple[str, int], Any],
+    available_clusters: Dict[Tuple[str, int], CorridorCluster],
+    strategy: str = "random",
     clusters_per_flight: int = 1,
+    **kwargs: Any,
 ) -> List[SimTask]:
-    """Backward-compatible wrapper for generating SimTask objects."""
-    pool = generate_base_flightlist(cohort_df, available_clusters)
-    return select_clusters(pool, available_clusters, strategy="random", clusters_per_flight=clusters_per_flight)
+    """Primary Slot 1 API: Convert cohort rows into concrete SimTask objects.
+
+    Encapsulates ``generate_base_flightlist`` and ``select_clusters``.
+
+    Parameters
+    ----------
+    cohort_df : pd.DataFrame
+        One day's slice of master_flights.
+    available_clusters : Dict[Tuple[str, int], CorridorCluster]
+        Mapping of ``(route_key, cluster_id)`` to ``CorridorCluster(path, fl)``.
+    strategy : str
+        Cluster selection strategy (default 'random').
+    clusters_per_flight : int
+        Number of clusters to assign per flight (default 1).
+    **kwargs : Any
+        Additional strategy-specific keyword arguments.
+
+    Returns
+    -------
+    List[SimTask]
+        Flat list of simulation tasks.
+    """
+    candidate_pool = generate_base_flightlist(cohort_df, available_clusters)
+    return select_clusters(
+        candidate_pool=candidate_pool,
+        available_clusters=available_clusters,
+        strategy=strategy,
+        clusters_per_flight=clusters_per_flight,
+        **kwargs,
+    )
 
 
 # Backward compatibility aliases

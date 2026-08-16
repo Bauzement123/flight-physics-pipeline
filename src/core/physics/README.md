@@ -80,7 +80,12 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   ├── slot2_batcher.filter_and_batch()
 │   │   ├── Input: Candidate List[SimTask], sim_mode, lake_path, overwrite flag, max_batch_size.
 │   │   ├── Output: List[List[SimTask]] (partitioned execution batches).
-│   │   └── Safety/Fallback: Bulk-queries read_existing_sim_fids() or read_ef_by_base_key(); skips already-simulated tasks; delegates batch partitioning to partition_tasks().
+│   │   └── Safety/Fallback: Standard mode: calls read_existing_sim_fids(tasks) → frozenset skip-gate;
+│   │       if overwrite, calls delete_sim_lake_rows(exact SIM_FID list) before emit.
+│   │       Variational mode: calls read_ef_by_base_key(tasks) → CLUSTER_FID-keyed EF dict;
+│   │       if overwrite, reads + resolves CLUSTER_FIDs then calls delete_sim_lake_rows.
+│   │       Both IO calls delegate to read_sim_lake_metadata() — the unified engine.
+│   │       ⚠ RAM/IO: bounded to one day by the daily loop; do not invoke with unbounded task lists.
 │   └── slot2_batcher.compute_stepdown_task()
 │       ├── Input: task (SimTask), ef (float), step_size (float), min_safe_fl (float).
 │       ├── Output: Optional[SimTask]
@@ -155,7 +160,9 @@ flowchart TD
    $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
    $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$
    Stale hours before `era5_start` are evicted from `hour_cache`, missing hours are opened concurrently, and concatenated into daily `met` and `rad` datasets.
-5. **Bulk Skip-Gate & Batch Packing (Slot 2)**: In standard mode, `filter_and_batch()` calls `read_existing_sim_fids()` to retrieve all simulated `SIM_FID`s for the day in a single PyArrow scan. Unsimulated tasks are grouped by `(dep, arr, cluster_id)` and packed into full batches of `max_batch_size` (default 50). In variational mode, `read_ef_by_base_key()` retrieves prior FLs and Energy Forcing values.
+5. **Bulk Skip-Gate & Batch Packing (Slot 2)**: `filter_and_batch()` delegates to the unified IO engine `read_sim_lake_metadata()` via two thin wrappers:
+   - **Standard mode**: `read_existing_sim_fids(tasks)` bulk-queries all simulated SIM_FIDs for the day in a single 4-stage scan (`dep_date` file-skip → `firstseen` row filter → `waypoint==0` one-row-per-SIM_FID → in-RAM `Base_FID` frozenset match). Unsimulated tasks are packed into batches of `max_batch_size` (default 50). If `--overwrite`, exact SIM_FIDs are deleted first via `delete_sim_lake_rows()`.
+   - **Variational mode**: `read_ef_by_base_key(tasks)` uses the same scan, projecting `["SIM_FID", "FL", "EF_total"]`, grouped by `CLUSTER_FID` = `SIM_FID` without `_{FL}` suffix. If `--overwrite`, all FL variants per CLUSTER_FID are resolved in-RAM and deleted before re-emitting tasks at nominal FL.
 6. **Parallel Dispatch**: The orchestrator invokes `engine.run_parallel()`, passing batches to a `ThreadPoolExecutor` running `worker.run_batch()`.
 7. **Batch Evaluation (Slot 5) & Round-Boundary Re-Batching**: As workers complete, `evaluate()` classifies outcomes into `succeeded` and `failed`. In variational mode, flights with positive warming ($\text{EF}_{\text{total}} > 0$) call `slot2_batcher.compute_stepdown_task()` to populate `still_todo`. The orchestrator accumulates all `still_todo` tasks across the round and re-batches them via Slot 2 at the round boundary into full vectorized batches.
 8. **Post-Day Vacuum & Z-Order Optimization**: After all batches and step-downs for the day finish, `vacuum_sim_lake()` prunes stale parquet files older than 168 hours and `optimize_sim_lake()` compacts small files into optimal **512 MB** Parquet chunks (`DELTA_LAKE_TARGET_FILE_SIZE_BYTES = 536,870,912` bytes from `config.py`) and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`.
@@ -178,6 +185,26 @@ flowchart TD
      Failed Simulations:      0
      ================================================================================
      ```
+
+> [!WARNING]
+> **RAM Risk — `read_sim_lake_metadata` (unified Slot 2 IO engine)**
+> After Stage 3 (`waypoint == 0`) on-disk filtering, the in-RAM table is at most
+> ~1.2 × N_tasks rows for one day's cohort (~2,400 rows for 2,000 tasks ≈ 50 KB).
+> `filter_and_batch()` is always called inside the orchestrator's daily loop, which
+> keeps N_tasks naturally bounded. Do **not** call `read_sim_lake_metadata` directly
+> with task lists spanning multiple days in a single invocation — in-RAM row count
+> scales linearly with the number of unique `dep_date` values in the task list.
+
+> [!WARNING]
+> **IO Risk — `delete_sim_lake_rows` with `--overwrite` outside the daily loop**
+> The delete engine emits a single `SIM_FID IN (...)` SQL predicate and is designed
+> for the daily overwrite path, where the SIM_FID list is bounded to one day's tasks
+> (≤ ~10,000 strings). If `--overwrite` is applied to an unbounded multi-day task
+> list in a single `filter_and_batch()` call (i.e. bypassing the orchestrator's
+> day-by-day iteration), both the SQL predicate string and the Parquet file rewrite
+> cost grow unboundedly. Peak RAM during deletion ≈ X_lake / Y_days per file batch.
+> Always run the orchestrator day-by-day; never batch multiple days into one
+> `filter_and_batch(overwrite=True)` call.
 
 ---
 
