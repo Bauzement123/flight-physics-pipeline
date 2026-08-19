@@ -57,7 +57,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=str,
         default="kerosene",
         dest="model_config_id",
-        help="Identifier for the physics model configuration (e.g. 'kerosene', 'hydrogen').",
+        help=(
+            "Physics model configuration identifier. "
+            "Supported: 'kerosene' (standard), 'kerosene_lowmem' (CoCiP preprocess_lowmem). "
+            "SAF variants reserved for second pass."
+        ),
     )
 
     # ── Fuel type (Slot 3 injection) ────────────────────────────────────── #
@@ -216,7 +220,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--low-mem",
         action="store_true",
         dest="low_mem",
-        help="Lazy-load ERA5 (skip eager .load()); reduces peak RAM at cost of speed.",
+        help=(
+            "Skip ERA5 eager .load(); arrays stay file-backed until accessed "
+            "(reduces peak RAM at cost of speed). "
+            "For CoCiP low-memory preprocessing use --model-config-id kerosene_lowmem."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -298,7 +306,7 @@ def main(argv=None) -> None:
         batch_size=args.batch_size,
         step_size=args.step_size,
         min_safe_fl=args.min_safe_fl,
-        low_mem=args.low_mem,
+        era5_lazy=args.low_mem,
         cluster_selection=args.cluster_selection,
         clusters_per_flight=args.clusters_per_flight,
         min_distance_km=args.min_distance,

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 import pandas as pd
 import pyarrow as pa
 
@@ -151,3 +151,15 @@ class EvalResult:
     succeeded: List[WorkerResult] = field(default_factory=list)   # EF <= 0, done
     failed: List[WorkerResult] = field(default_factory=list)      # crash / exception
     still_todo: List[SimTask] = field(default_factory=list)       # O2: re-queue these
+
+
+@dataclass
+class BatchOutput:
+    """Raw output from worker.run_batch — consumed by slot5_evaluator.evaluate().
+
+    The worker returns raw (task, Flight) pairs. No WorkerResult construction
+    happens in the worker — that is Slot 5's exclusive responsibility.
+    """
+    successful: List[Tuple["SimTask", Any]]  # (task, Flight) pairs where PSFlight+CoCiP both passed
+    failed:     List[Tuple["SimTask", str]]  # (task, reason_str) for all failure stages
+

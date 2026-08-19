@@ -32,7 +32,7 @@ src/core/physics/
 │   └── cluster_loader.py          ← Slot 3a: K-Cluster trajectory loader & time-shifter
 ├── models/                        ← Slot 4: Physics model builders
 │   ├── __init__.py                ← Model package initialization
-│   └── ps_cocip.py                ← Kerosene & Hydrogen PSFlight + CoCiP model builder (`get_model`)
+│   └── ps_cocip.py                ← Model builder (`get_model` dispatches 'kerosene', 'kerosene_lowmem')
 └── slots/                         ← Slotted pipeline step definitions
     ├── __init__.py                ← Slots package initialization
     ├── slot1_flightlist_gen.py    ← Slot 1: Flight list generation from master_flights slices
@@ -60,7 +60,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   └── orchestrator.run()
 │       ├── Input: Date range, corridors_map, lake_path, weather_cache_dir, execution flags.
 │       ├── Output: None (writes directly to Delta Lake).
-│       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically; re-batches step-down tasks at round boundaries.
+│       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically with gc.collect(); loads missing hours via bounded packets (_load_hour_packet) with ThreadPoolExecutor(WEATHER_IO_WORKERS); re-batches step-down tasks at round boundaries.
 │
 ├── 3. Slot 1: Flight List Generation & Selection
 │   ├── slot1_flightlist_gen.generate_base_flightlist()
@@ -99,21 +99,21 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │
 ├── 6. Slot 4: Physics Model Instantiation & Evaluation
 │   └── models.ps_cocip.get_model() / worker.run_batch()
-│       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, low_mem, fuel, step_down_method.
-│       ├── Output: Tuple[PSFlight, Cocip] / List[WorkerResult] (with actual_fl populated)
-│       └── Safety/Fallback: Runs vectorized ps_model.eval() + cocip_model.eval(); on vector exception, executes sequential per-flight fallback; logs unrecoverable failures to skipped_aircraft.log.
+│       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, fuel, step_down_method.
+│       ├── Output: Tuple[PSFlight, Cocip] / BatchOutput (containing raw (SimTask, Flight) pairs for successes and (SimTask, reason_str) for failures).
+│       └── Safety/Fallback: get_model() dispatches via _BUILDERS dict using model_config_id ('kerosene' or 'kerosene_lowmem'). run_batch() executes two independent phases: Phase 2 _eval_psflight() (vectorized Fleet PSFlight → sequential fallback) and Phase 3 _eval_cocip() (vectorized Fleet CoCiP → sequential fallback). Each phase independently falls back. Lazy sequential model instantiation — PSFlight and Cocip sequential instances are created only inside the except branch, never upfront. del fl_ps; gc.collect() called after Fleet CoCiP eval. Returns BatchOutput, never constructs WorkerResult.
 │
 ├── 7. Parallel Execution Coordination
 │   └── engine.run_parallel()
 │       ├── Input: List[List[SimTask]], worker_fn (partial run_batch), max_workers.
-│       ├── Output: Iterator[List[WorkerResult]]
-│       └── Safety/Fallback: Spawns ThreadPoolExecutor; catches batch exceptions and yields empty lists; calls gc.collect() after each batch completion.
+│       ├── Output: Iterator[BatchOutput]
+│       └── Safety/Fallback: Spawns ThreadPoolExecutor; catches batch exceptions and yields BatchOutput(successful=[], failed=[]); calls gc.collect() after each batch completion.
 │
 ├── 8. Slot 5: Batch Result Evaluation & FL Sanity Check
 │   └── slots.slot5_evaluator.evaluate()
-│       ├── Input: List[WorkerResult], task_by_fid, sim_mode, step_size, min_safe_fl.
+│       ├── Input: BatchOutput (raw batch output from worker), task_by_fid, sim_mode, model_config_id, step_size, min_safe_fl.
 │       ├── Output: EvalResult (succeeded, failed, still_todo).
-│       └── Safety/Fallback: Validates actual_fl against task.fl (fails tasks if |actual_fl - task.fl| > 1.5 FL); partitions succeeded vs failed; for variational mode, calls slot2_batcher.compute_stepdown_task() to populate still_todo.
+│       └── Safety/Fallback: First calls _classify_results(batch_output, model_config_id) — the universal, sim_mode-independent verdict constructor that builds all WorkerResult objects. Then dispatches to mode evaluator _evaluate_standard or _evaluate_variational which receive pre-classified (succeeded, failed) lists and only compute still_todo. FL sanity check remains in _evaluate_variational (mutates result.status = 'fail' for |actual_fl - task.fl| > 1.5 FL). WorkerResult is only ever constructed inside _classify_results — this is the central ownership invariant.
 │
 └── 9. Trajectory Persistence & Post-Day Lake Optimization
     ├── worker._write_to_lake()
@@ -156,15 +156,15 @@ flowchart TD
 1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, fuel, simulation mode, memory flags). `read_corridors_map()` loads `(route_id, cluster_id)` corridor metadata and calibrated FLs from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, filtered via PyArrow dataset predicate pushdown on `route_summary.parquet` if ranks are specified.
 2. **Daily Cohort Ingestion**: For each calendar day in `--start-date` to `--end-date`, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC, leveraging single-column predicate pushdown on precomputed `route` fields.
 3. **Flight List Generation (Slot 1)**: `generate_base_flightlist()` converts cohort rows into `FlightCandidate` items by matching route codes against available cluster trajectories in `corridors_map`, safely handling missing `callsign` and `typecode` fields with `pd.notna` guards. `select_clusters()` then samples and materializes strongly typed `SimTask` dataclass items.
-4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:
+4. **Dynamic ERA5 Windowing & Packetized Ingestion**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:
    $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
    $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$
-   Stale hours before `era5_start` are evicted from `hour_cache`, missing hours are opened concurrently, and concatenated into daily `met` and `rad` datasets.
+   Stale hours before `era5_start` are evicted from `hour_cache` and garbage-collected (`gc.collect()`). Missing hours are partitioned into discrete packets of size `WEATHER_OPEN_PACKET_HOURS` and loaded via `ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS)` using `_load_hour_packet()`. Each worker builds an isolated dictionary without mutating shared state. The main thread aggregates packets into `hour_cache` and wraps the concatenated daily datasets with `MetDataset(..., copy=False)`.
 5. **Bulk Skip-Gate & Batch Packing (Slot 2)**: `filter_and_batch()` delegates to the unified IO engine `read_sim_lake_metadata()` via two thin wrappers:
    - **Standard mode**: `read_existing_sim_fids(tasks)` bulk-queries all simulated SIM_FIDs for the day in a single 4-stage scan (`dep_date` file-skip → `firstseen` row filter → `waypoint==0` one-row-per-SIM_FID → in-RAM `Base_FID` frozenset match). Unsimulated tasks are packed into batches of `max_batch_size` (default 50). If `--overwrite`, exact SIM_FIDs are deleted first via `delete_sim_lake_rows()`.
    - **Variational mode**: `read_ef_by_base_key(tasks)` uses the same scan, projecting `["SIM_FID", "FL", "EF_total"]`, grouped by `CLUSTER_FID` = `SIM_FID` without `_{FL}` suffix. If `--overwrite`, all FL variants per CLUSTER_FID are resolved in-RAM and deleted before re-emitting tasks at nominal FL.
 6. **Parallel Dispatch**: The orchestrator invokes `engine.run_parallel()`, passing batches to a `ThreadPoolExecutor` running `worker.run_batch()`.
-7. **Batch Evaluation (Slot 5) & Round-Boundary Re-Batching**: As workers complete, `evaluate()` classifies outcomes into `succeeded` and `failed`. In variational mode, flights with positive warming ($\text{EF}_{\text{total}} > 0$) call `slot2_batcher.compute_stepdown_task()` to populate `still_todo`. The orchestrator accumulates all `still_todo` tasks across the round and re-batches them via Slot 2 at the round boundary into full vectorized batches.
+7. **Batch Evaluation (Slot 5) & Round-Boundary Re-Batching**: Before dispatching parallel batches, the orchestrator constructs `task_by_fid = {t.to_sim_fid(): t}` once per round across all pending batches (avoiding redundant dictionary constructions inside the inner worker batch stream). As workers complete, `evaluate()` receives `batch_output` (a `BatchOutput`) and `model_config_id`. It first calls `_classify_results(batch_output, model_config_id)` to universally construct all `WorkerResult` objects, then dispatches to the mode-specific evaluator. In variational mode, flights with positive warming ($\text{EF}_{\text{total}} > 0$) call `slot2_batcher.compute_stepdown_task()` to populate `still_todo`. The orchestrator accumulates all `still_todo` tasks across the round and re-batches them via Slot 2 at the round boundary into full vectorized batches.
 8. **Post-Day Vacuum & Z-Order Optimization**: After all batches and step-downs for the day finish, `vacuum_sim_lake()` prunes stale parquet files older than 168 hours and `optimize_sim_lake()` compacts small files into optimal **512 MB** Parquet chunks (`DELTA_LAKE_TARGET_FILE_SIZE_BYTES = 536,870,912` bytes from `config.py`) and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`.
 9. **Wall-to-Wall Temporal & Task Emission Metrics**:
    - Tracks end-to-end wall-clock elapsed time per day and across the entire campaign, calculating effective throughput (`s/task` and `tasks/s`).
@@ -212,48 +212,34 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["Batch of SimTasks (Same Route & Cluster)"] --> B["worker.run_batch()"]
-    B --> C["Instantiate Loader & Models"]
-    C -->|"get_loader / get_model"| D["Phase 1: Load Trajectories"]
-    D --> E{"Validate Aircraft Typecode"}
-    E -->|"Invalid / Unsupported"| F["Log skipped_aircraft.log -> status=fail, EF=0.0"]
-    E -->|"Valid"| G["Time-Shift Waypoints to firstseen -> attach attrs['fuel']"]
-    G --> H["Phase 2: Vectorized Evaluation"]
-    H --> I{"ps_model.eval() + cocip_model.eval()"}
-    I -->|"Success"| J["Extract EF_total (np.nansum) -> status=success"]
-    I -->|"Exception Caught"| K["Sequential Fallback Loop"]
-    K --> L{"Per-Flight Eval"}
-    L -->|"Success"| M["Extract EF_total -> status=success"]
-    L -->|"Fail"| N["Log skipped_aircraft.log -> status=fail, EF=0.0"]
-    J & M --> O["Phase 3: Trajectory DataFrame Serialization"]
-    O --> P["Inject 14 Fixed Metadata Columns"]
-    P --> Q{"Lock _LAKE_WRITE_LOCK"}
-    Q --> R["io_utils.append_sim_lake()"]
-    R --> S["validate_sim_trajectory_df() -> Atomic Merge / Overwrite"]
-    S --> T["Return List[WorkerResult]"]
+    A["Batch of SimTasks"] --> B["worker.run_batch()"]
+    B --> |"get_model(model_config_id)\nget_loader(sim_mode)"| C["Phase 1: _load_flights()"]
+    C --> D{"Load OK?"}
+    D --> |"Fail / None"| E["failed_pairs ← (task, 'load_failed')"]
+    D --> |"Success"| F["Phase 2: _eval_psflight()"]
+    F --> G["Vectorized Fleet PSFlight eval"]
+    G --> |"Success"| H["psflight_ok_pairs"]
+    G --> |"Exception"| I["_eval_psflight_sequential() per-flight"]
+    I --> |"PSFlight RuntimeError"| J["failed_pairs ← (task, reason)"]
+    I --> |"PSFlight OK"| H
+    H --> K["Phase 3: _eval_cocip()"]
+    K --> L["Vectorized Fleet CoCiP eval"]
+    L --> |"Success"| M["del fl_ps → gc.collect()\ncocip_ok_pairs"]
+    L --> |"Exception"| N["_eval_cocip_sequential() per-flight"]
+    N --> |"CoCiP OK"| M
+    N --> |"CoCiP Fail"| J
+    M --> O["_write_to_lake(cocip_ok_pairs)"]
+    O --> P["Return BatchOutput(successful, failed)"]
 ```
 
 #### Step-by-Step Description:
 
-1. **Worker Setup**: `worker.run_batch()` receives a batch of `SimTask` items (deterministically sorted by route, cluster, and timestamp to preserve trajectory cache locality while saturating batch capacity), the day's `met` and `rad` datasets, and configuration flags. It retrieves the configured trajectory loader (`get_loader`) and physics models (`get_model`).
-2. **Phase 1 (Trajectory Loading & Time-Shifting)**:
-   - For each task, `cluster_loader.load()` fetches the cluster parquet file from `corridors_map`.
-   - Validates `task.typecode` using `is_supported_typecode()`. If invalid or unsupported, logs to `data/logs/skipped_aircraft.log` and returns `None`.
-   - Shifts all waypoints so waypoint[0] matches `task.firstseen`.
-   - If `step_down_method == 'cap'`, clamps waypoint altitudes to the target `task.fl` ceiling ($z \le \text{FL} \times 100 \times 0.3048\text{ m}$) with 2-point boundary linear interpolation at Top-of-Climb (TOC) and Top-of-Descent (TOD) transition waypoints to eliminate derivative rate-of-climb/descent ($\text{ROCD}$) discontinuities.
-   - Instantiates a `pycontrails.Flight` object, attaches `flight.attrs["fuel"] = "hydrogen"` or `"kerosene"`, and assigns fuel-specific properties.
-3. **Phase 2 (Physics Evaluation & Fallback)**:
-   - **Vectorized Evaluation**: All loaded `Flight` objects are evaluated in a single vector call: `ps_model.eval(flights_list)` and `cocip_model.eval(source=fl_ps)`. Total Energy Forcing ($\text{EF}_{\text{total}} = \sum \text{ef}$ in Joules) is computed via `_extract_ef()`, and simulated cruise flight level is extracted via `_extract_actual_fl()`.
-   - **Vertical Evaluation Domain**: CoCiP is configured with `min_altitude_m = 5000.0 m` ($\approx \text{FL } 164$) and `max_altitude_m = 13000.0 m` ($\approx \text{FL } 426.5$). Setting the minimum evaluation bound below `MIN_SAFE_FL = 190.0` ($5,791.2\text{ m}$) guarantees that step-down flights at the operational floor undergo genuine physical temperature and ice supersaturation evaluation rather than artificial truncation, while `max_altitude_m` guarantees 3D bracketed interpolation within the top $150\text{ hPa}$ ERA5 ceiling.
-   - **Hydrogen `nvpm_ei_n` Notice**: For hydrogen simulations, PyContrails emits an informational `UserWarning: Found duplicate key nvpm_ei_n in attrs and data`. This occurs because the initial emission index constant ($2.76 \times 10^{13}\text{ kg}^{-1}$) is attached as a flight attribute while CoCiP generates per-waypoint emission series. This warning is expected and has **zero impact on simulation correctness**.
-   - **Sequential Fallback**: If vectorized evaluation raises an exception, the worker falls back to sequential single-flight evaluation. Any flight that fails sequential simulation logs to `skipped_aircraft.log` and is marked `status="fail", ef=0.0`.
-   - **Slot 5 FL Sanity Guard**: In Slot 5, `_evaluate_variational` validates `|actual_fl - task.fl| <= 1.5` FL. If a step-down method fails to modify trajectory altitude, the task is immediately reclassified as `failed` and prevented from generating corrupted downstream step-downs.
-4. **Phase 3 (Full Trajectory Delta Lake Persistence)**:
-   - For all successful flights, the worker extracts the full per-waypoint DataFrame (`flight.to_dataframe()`) preserving all 68+ dynamic physics columns.
-   - Injects the **14 mandatory fixed metadata columns** (`SIM_FID`, `model_config_id`, `fuel`, `route`, `icao24`, `callsign`, `typecode`, `cluster_id`, `FL`, `dep_date`, `firstseen`, `lastseen`, `EF_total`, `total_fuel_burn`).
-   - Acquires `_LAKE_WRITE_LOCK` and calls `io_utils.append_sim_lake()`.
-   - `validate_sim_trajectory_df()` enforces schema compliance before committing an atomic MERGE on `(SIM_FID, model_config_id, time)` or clean delete-then-append.
-   - Returns `List[WorkerResult]` to the engine.
+1. **Worker Setup**: `run_batch()` receives batch, MetDatasets, and config. Calls `get_model(model_config_id)` to get a single model pair (dispatch via `_BUILDERS` dict: `'kerosene'` or `'kerosene_lowmem'`). Calls `get_loader()` for the trajectory loader. No sequential model instances created yet.
+2. **Phase 1 — Trajectory Loading (`_load_flights`)**: For each task, calls `cluster_loader.load()`. Invalid/missing → appended to `failed_pairs` as `(task, 'load_failed')`. Valid → `loaded_pairs`.
+3. **Phase 2 — PSFlight (`_eval_psflight`)**: Attempts vectorized Fleet PSFlight eval on all loaded flights. On any exception, falls back flight-by-flight via `_eval_psflight_sequential()`. Sequential model instance (`PSFlight(met=ps_model.met, params={...copy_source: False})`) is created lazily **only inside the `except` branch**. PSFlight kinematic rejections (`RuntimeError`) → `failed_pairs`. Survivors → `psflight_ok_pairs`.
+4. **Phase 3 — CoCiP (`_eval_cocip`)**: Takes `psflight_ok_pairs`. Attempts vectorized Fleet CoCiP eval. On success: `del fl_ps; gc.collect()` immediately to release PSFlight memory. On exception: falls back per-flight via `_eval_cocip_sequential()`. Sequential Cocip instance (`Cocip(met=..., rad=..., params={...})`) created lazily **only inside the `except` branch**. CoCiP failures → `failed_pairs`. Survivors → `cocip_ok_pairs`.
+5. **Delta Lake Write**: `_write_to_lake(cocip_ok_pairs)` serializes trajectory DataFrames, injects 14 fixed metadata columns, acquires `_LAKE_WRITE_LOCK`, calls `io_utils.append_sim_lake()`. Only successful pairs are written.
+6. **Return**: `BatchOutput(successful=cocip_ok_pairs, failed=failed_pairs)`. No `WorkerResult` constructed here. Slot 5 owns all verdict construction.
 
 ---
 
@@ -261,10 +247,23 @@ flowchart TD
 
 | Feature / Behavior | Standard Mode (`--low-mem` omitted) | Low-Memory Mode (`--low-mem` enabled) |
 |---|---|---|
-| **ERA5 Spatial Crop** | Cropped to `EUR_BBOX` ($[-26^\circ, 30^\circ, 44^\circ, 79^\circ]$) $+ 10^\circ$ padding via `crop_met_dataset()`. | **Skipped entirely**. Dask slices touched chunks lazily without spatial crop overhead. |
-| **ERA5 In-Memory Load** | Executes eager `.load()` call to pull cropped array into uncompressed RAM. | **Skipped eager load**. Data remains in lazy Dask / NetCDF arrays. |
-| **CoCiP Preprocessing** | Standard PyContrails array processing. | Enables `preprocess_lowmem=True` parameter inside `Cocip` model initialization. |
-| **Primary Advantage** | Fastest execution speed per batch; optimal for high-CPU nodes with ample RAM ($\ge 32\text{ GB}$). | **Minimizes peak RAM footprint**; prevents OOM crashes on memory-constrained workers. |
+| **ERA5 Spatial Crop** | Cropped to `EUR_BBOX` ($[-26^\circ, 30^\circ, 44^\circ, 79^\circ]$) $+ 10^\circ$ padding via native `downselect()`. | Cropped lazily to `EUR_BBOX` $+ 10^\circ$ via `downselect()` (limits Dask index space). |
+| **ERA5 In-Memory Load** | Executes eager `.load()` call to pull cropped array into uncompressed RAM. | Skip ERA5 eager `.load()`; arrays stay file-backed. Does NOT affect CoCiP preprocessing — use `--model-config-id kerosene_lowmem` for that. |
+| **ERA5 Ingestion Chunking** | Loads missing hours in packets of `WEATHER_OPEN_PACKET_HOURS` across `WEATHER_IO_WORKERS`. | Uses `WEATHER_OPEN_PACKET_HOURS=1` and `WEATHER_IO_WORKERS=1` on VM to eliminate NetCDF lock races and memory spikes. |
+| **Flight Memory Lifecycle** | `copy_source=True` for Fleet evaluation (PyContrails requirement); sequential fallback uses lazy `copy_source=False` instances created only inside the `except` branch. | Identical to standard mode. `--low-mem` does not affect the worker execution path — both phases always attempt vectorized Fleet eval first and fall back per-flight on exception. |
+| **CoCiP Preprocessing** | Standard PyContrails CoCiP preprocessing. | No longer controlled by `--low-mem`. Use `--model-config-id kerosene_lowmem` to enable `Cocip(preprocess_lowmem=True)`. |
+| **Primary Advantage** | Fastest execution speed per batch; optimal for high-CPU nodes with ample RAM ($\ge 32\text{ GB}$). | **Minimizes peak RAM footprint**; prevents OOM crashes and file-handle exhaustion on memory-constrained workers. |
+
+> **Separation of concerns**: `--low-mem` controls only ERA5 I/O (whether xarray arrays are eagerly loaded into RAM). `--model-config-id kerosene_lowmem` controls only CoCiP preprocessing behaviour (`preprocess_lowmem=True`). These two flags are fully independent.
+
+### 4.4 Supported Model Configurations (`--model-config-id`)
+
+The `ps_cocip.py` model factory maps `--model-config-id` to specific physical model parameters and acts as a primary partition key in the Delta Lake results:
+
+| `model_config_id` | Performance Model | Contrail Model | Parameters & Behavior |
+|---|---|---|---|
+| `kerosene` (default) | `PSFlight` | `Cocip` | Standard Jet-A fuel params; standard CoCiP met interpolation. |
+| `kerosene_lowmem` | `PSFlight` | `Cocip` | Standard Jet-A fuel params; sets `preprocess_lowmem=True` on `Cocip` to chunk pressure-level interpolation and prevent RAM spikes. |
 
 ---
 
@@ -286,18 +285,18 @@ python -m src.core.physics.cli \
     --batch-size 50 \
     --out-dir data/results/corridor_simulations_kerosene
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
+# Low-Memory Variational Step-Down Campaign with Altitude Capping
 python -m src.core.physics.cli \
     --start-date 2025-01-01 \
     --end-date 2025-01-07 \
     --ranks 1,3,5 \
     --sim-mode variational \
     --step-down-method cap \
-    --fuel hydrogen \
-    --model-config-id kerosene \
+    --fuel kerosene \
+    --model-config-id kerosene_lowmem \
     --step-size 10.0 \
     --min-safe-fl 190.0 \
-    --out-dir data/results/corridor_simulations_hydrogen \
+    --out-dir data/results/corridor_simulations_kerosene_lowmem \
     --low-mem \
     --max-age 1
 ```
@@ -318,18 +317,18 @@ python -m src.core.physics.cli `
     --batch-size 50 `
     --out-dir data/results/corridor_simulations_kerosene
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
+# Low-Memory Variational Step-Down Campaign with Altitude Capping
 python -m src.core.physics.cli `
     --start-date 2025-01-01 `
     --end-date 2025-01-07 `
     --ranks "1,3,5" `
     --sim-mode variational `
     --step-down-method cap `
-    --fuel hydrogen `
-    --model-config-id kerosene `
+    --fuel kerosene `
+    --model-config-id kerosene_lowmem `
     --step-size 10.0 `
     --min-safe-fl 190.0 `
-    --out-dir data/results/corridor_simulations_hydrogen `
+    --out-dir data/results/corridor_simulations_kerosene_lowmem `
     --low-mem `
     --max-age 1
 ```
@@ -343,7 +342,7 @@ python -m src.core.physics.cli `
 | `--sim-mode` | `str` | `'standard'` | Simulation mode: `'standard'` (nominal FL baseline) or `'variational'` (step-down optimization pass). |
 | `--step-down-method` | `str` | `None` | Step-down altitude modification method in Slot 3 (`'cap'`). **Required if and only if `--sim-mode variational` is active**. |
 | `--fuel` | `str` | `'kerosene'` | Fuel type: `'kerosene'` or `'hydrogen'`. Attaches `Flight(fuel=...)` in Slot 3 and sets `fuel` column. |
-| `--model-config-id` | `str` | `'kerosene'` | Model configuration identifier passed to physics engine and composite merge key. |
+| `--model-config-id` | `str` | `'kerosene'` | Physics model configuration passed to get_model() and used as Delta Lake composite merge key. Supported: 'kerosene' (standard Jet-A), 'kerosene_lowmem' (Jet-A with CoCiP preprocess_lowmem=True). SAF variants reserved. |
 | `--ranks` | `str` | `None` | Comma-separated list of route cluster ranks to process (e.g. `'1,3,5'`). Mutually exclusive with `--lower-rank`. |
 | `--lower-rank` | `int` | `None` | Lower bound of corridor cluster rank (inclusive). Requires `--upper-rank`. |
 | `--upper-rank` | `int` | `None` | Upper bound of corridor cluster rank (inclusive). Requires `--lower-rank`. |
@@ -358,9 +357,17 @@ python -m src.core.physics.cli `
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
 | `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |
 | `--batch-size` | `int` | `50` | Maximum number of flight tasks per parallel execution batch. |
-| `--low-mem` | `flag` | `False` | Enables lazy ERA5 loading, skips spatial cropping and eager `.load()`. |
+| `--low-mem` | `flag` | `False` | Skips eager ERA5 .load(); xarray arrays remain file-backed until accessed during CoCiP interpolation. Does NOT affect CoCiP preprocessing — use --model-config-id kerosene_lowmem for that. |
 | `--overwrite` | `flag` | `False` | Bypass Delta Lake skip-gate and delete-then-append fresh results. |
 | `--test-mode` | `flag` | `False` | Restricts run to single day (`2025-01-01`) and single cluster per flight. |
+
+### 5.4 Environment Variable Tuning Options
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `WEATHER_OPEN_PACKET_HOURS` | `12` | Number of ERA5 hours per discrete load packet. Set to `1` in `.env` on VM / SMB mounts; increase on fast local SSDs. |
+| `WEATHER_IO_WORKERS` | `2` | Number of concurrent `ThreadPoolExecutor` workers for weather packet ingestion. Set to `1` in `.env` on VM / SMB mounts. |
+| `HDF5_USE_FILE_LOCKING` | OS default | Set to `FALSE` on network mounts (SMB/NFS) to prevent HDF5 file locking errors across workers. |
 
 ---
 

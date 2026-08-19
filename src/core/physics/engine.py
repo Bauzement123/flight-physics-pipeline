@@ -22,7 +22,7 @@ from typing import Callable, Iterable, Iterator, List
 from pycontrails import MetDataset
 
 from src.common.config import WEATHER_PADDING
-from src.data_manager.schemas import WorkerResult
+from src.data_manager.schemas import BatchOutput
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +89,9 @@ def crop_met_dataset(
 
 def run_parallel(
     batches: Iterable[List],
-    worker_fn: Callable[[List], List[WorkerResult]],
+    worker_fn: Callable[[List], BatchOutput],
     max_workers: int = 4,
-) -> Iterator[List[WorkerResult]]:
+) -> Iterator[BatchOutput]:
     """Execute pre-formed SimTask batches in parallel and yield results as they complete.
 
     Parameters
@@ -99,7 +99,7 @@ def run_parallel(
     batches : Iterable[List[SimTask]]
         Pre-partitioned batches produced by Slot 2. Each inner list is one
         ``(dep, arr, cluster_id)`` group.
-    worker_fn : Callable[[List[SimTask]], List[WorkerResult]]
+    worker_fn : Callable[[List[SimTask]], BatchOutput]
         Pre-bound callable — typically ``functools.partial(run_batch,
         corridors_map=..., model_config_id=..., sim_mode=...,
         lake_path=..., met=..., rad=..., max_age_hours=...)``.
@@ -110,10 +110,10 @@ def run_parallel(
 
     Yields
     ------
-    List[WorkerResult]
-        Results from one completed batch, in completion order (not submission
-        order). On batch exception: logs ERROR and yields ``[]`` so the
-        orchestrator loop can continue.
+    BatchOutput
+        Raw results from one completed batch, in completion order (not submission
+        order). On batch exception: logs ERROR and yields empty ``BatchOutput``
+        so the orchestrator loop can continue.
 
     Notes
     -----
@@ -139,18 +139,19 @@ def run_parallel(
         for future in as_completed(future_to_idx):
             batch_idx = future_to_idx[future]
             try:
-                results: List[WorkerResult] = future.result()
+                results: BatchOutput = future.result()
                 logger.info(
-                    "Batch %d/%d complete — %d results.",
-                    batch_idx + 1, len(batch_list), len(results),
+                    "Batch %d/%d complete — %d successful, %d failed.",
+                    batch_idx + 1, len(batch_list),
+                    len(results.successful), len(results.failed),
                 )
                 yield results
             except Exception as exc:
                 logger.error(
-                    "Batch %d/%d raised an exception — yielding empty result: %s",
+                    "Batch %d/%d raised an exception — yielding empty BatchOutput: %s",
                     batch_idx + 1, len(batch_list), exc,
                 )
-                yield []
+                yield BatchOutput(successful=[], failed=[])
             finally:
                 # Prompt GC to release Flight objects from the completed batch
                 gc.collect()

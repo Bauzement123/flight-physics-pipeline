@@ -28,7 +28,7 @@ Slot ordering per day
 import gc
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from functools import partial
 from pathlib import Path
@@ -47,10 +47,11 @@ from src.common.config import (
     ERA5_SURFACE_VARIABLES,
     MIN_SAFE_FL,
     WEATHER_IO_WORKERS,
+    WEATHER_OPEN_PACKET_HOURS,
     WEATHER_PADDING,
     ALL_TARGET_FAMILIES,
 )
-from src.core.physics.engine import crop_met_dataset, run_parallel
+from src.core.physics.engine import run_parallel
 from src.core.physics.slots.slot1_flightlist_gen import build_corridors_map, generate_flightlist
 from src.core.physics.slots.slot2_batcher import filter_and_batch, partition_tasks
 from src.core.physics.slots.slot5_evaluator import evaluate
@@ -85,107 +86,83 @@ def _format_duration(seconds: float) -> str:
 
 
 def _open_crop_and_load(era5_obj: ERA5, bbox: list, low_mem: bool) -> MetDataset:
-    """Open, optionally crop, and optionally eager-load one ERA5 dataset. Thread-safe.
+    """Open, spatially crop, and optionally eager-load one ERA5 dataset. Thread-safe.
 
-    In standard mode: crop to bbox (reduces in-memory footprint) then eager-load.
-    In low-mem mode: skip crop (dask only loads touched chunks anyway, crop adds
-    graph overhead without meaningfully reducing peak RAM) and skip eager load.
+    Always applies spatial bounding box cropping via native ``downselect()`` to bound array
+    extents in memory/graphs. In low-mem mode, skips the eager ``.load()`` so arrays remain lazy.
     """
     met_ds = era5_obj.open_metdataset()
+    west, south, east, north = bbox
+    padded = (
+        max(-180.0, west - WEATHER_PADDING),
+        max(-90.0, south - WEATHER_PADDING),
+        min(180.0, east + WEATHER_PADDING),
+        min(90.0, north + WEATHER_PADDING),
+    )
+    met_ds = met_ds.downselect(padded)
     if not low_mem:
-        met_ds = crop_met_dataset(met_ds, bbox, pad=WEATHER_PADDING)
         met_ds.data.load()
     return met_ds
 
 
-def _build_era5_objects(
-    start_time: pd.Timestamp,
-    end_time: pd.Timestamp,
-    weather_cache_dir: Path,
-) -> Tuple[ERA5, ERA5]:
-    """Construct ERA5 PL and SL objects for a contiguous time range.
-
-    Prefers offline mode (``paths=`` list) when all hourly .nc files exist.
-    Falls back to online ``DiskCacheStore`` fetch when any file is missing.
-    Adapted from clone_simulation.py L312-394.
-    """
-    start_str = start_time.strftime("%Y-%m-%dT%H:%M:%S")
-    end_str   = end_time.strftime("%Y-%m-%dT%H:%M:%S")
-    hours     = pd.date_range(start=start_time, end=end_time, freq="h")
-
-    pl_paths, sl_paths = [], []
-    all_pl_exist = all_sl_exist = True
-
-    for h in hours:
-        pl_name = f"{h.strftime('%Y%m%d-%H')}-era5pl0.5reanalysis.nc"
-        sl_name = f"{h.strftime('%Y%m%d-%H')}-era5sl0.5reanalysis.nc"
-        pl_file = weather_cache_dir / pl_name
-        sl_file = weather_cache_dir / sl_name
-
-        if pl_file.exists():
-            pl_paths.append(str(pl_file))
-        else:
-            all_pl_exist = False
-        if sl_file.exists():
-            sl_paths.append(str(sl_file))
-        else:
-            all_sl_exist = False
-
-    if all_pl_exist and all_sl_exist and pl_paths and sl_paths:
-        logger.info("ERA5 offline mode: all files cached for %s → %s.", start_str, end_str)
-        try:
-            era5_pl = ERA5(
-                time=(start_str, end_str),
-                paths=pl_paths,
-                variables=ERA5_PRESSURE_LEVEL_VARIABLES,
-                pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
-                grid=ERA5_GRID,
-            )
-            era5_sl = ERA5(
-                time=(start_str, end_str),
-                paths=sl_paths,
-                variables=ERA5_SURFACE_VARIABLES,
-                pressure_levels=-1,
-                grid=ERA5_GRID,
-            )
-            return era5_pl, era5_sl
-        except Exception as exc:
-            logger.warning("Offline ERA5 init failed (%s) — falling back to online.", exc)
-
-    logger.info("ERA5 online mode: fetching via DiskCacheStore for %s → %s.", start_str, end_str)
-    disk_cache = DiskCacheStore(cache_dir=str(weather_cache_dir))
-    era5_pl = ERA5(
-        time=(start_str, end_str),
-        variables=ERA5_PRESSURE_LEVEL_VARIABLES,
-        pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
-        grid=ERA5_GRID,
-        cachestore=disk_cache,
-    )
-    era5_sl = ERA5(
-        time=(start_str, end_str),
-        variables=ERA5_SURFACE_VARIABLES,
-        pressure_levels=-1,
-        grid=ERA5_GRID,
-        cachestore=disk_cache,
-    )
-    return era5_pl, era5_sl
-
-
-def _load_hour_range(
-    start_time: pd.Timestamp,
-    end_time: pd.Timestamp,
+def _load_hour_packet(
+    hours: List[pd.Timestamp],
     weather_cache_dir: Path,
     bbox: list,
     low_mem: bool,
-) -> Tuple[MetDataset, MetDataset]:
-    """Load and crop PL+SL ERA5 for a contiguous block. PL and SL opened concurrently."""
-    era5_pl, era5_sl = _build_era5_objects(start_time, end_time, weather_cache_dir)
-    with ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS) as executor:
-        future_pl = executor.submit(_open_crop_and_load, era5_pl, bbox, low_mem)
-        future_sl = executor.submit(_open_crop_and_load, era5_sl, bbox, low_mem)
-        met = future_pl.result()
-        rad = future_sl.result()
-    return met, rad
+) -> Dict[pd.Timestamp, Tuple[MetDataset, MetDataset]]:
+    """Load a bounded packet of ERA5 hours sequentially. Never mutates shared state.
+
+    Each hour is opened as an independent single-file ERA5 object. PL and SL
+    are opened sequentially within the packet — the safer choice for the VM/SMB
+    environment where low_mem is used and C-library state is fragile.
+    The executor queues packets and runs at most WEATHER_IO_WORKERS concurrently;
+    on VM (workers=1) this collapses to a fully sequential single-threaded loop.
+    Returns an isolated dict safe to merge into hour_cache on the main thread.
+    """
+    result: Dict[pd.Timestamp, Tuple[MetDataset, MetDataset]] = {}
+    for h in hours:
+        h_str = h.strftime("%Y-%m-%dT%H:%M:%S")
+        pl_path = weather_cache_dir / f"{h.strftime('%Y%m%d-%H')}-era5pl0.5reanalysis.nc"
+        sl_path = weather_cache_dir / f"{h.strftime('%Y%m%d-%H')}-era5sl0.5reanalysis.nc"
+        try:
+            if pl_path.exists() and sl_path.exists():
+                era5_pl = ERA5(
+                    time=(h_str, h_str),
+                    paths=[str(pl_path)],
+                    variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+                    pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+                    grid=ERA5_GRID,
+                )
+                era5_sl = ERA5(
+                    time=(h_str, h_str),
+                    paths=[str(sl_path)],
+                    variables=ERA5_SURFACE_VARIABLES,
+                    pressure_levels=-1,
+                    grid=ERA5_GRID,
+                )
+            else:
+                disk_cache = DiskCacheStore(cache_dir=str(weather_cache_dir))
+                era5_pl = ERA5(
+                    time=(h_str, h_str),
+                    variables=ERA5_PRESSURE_LEVEL_VARIABLES,
+                    pressure_levels=ERA5_REQUIRED_PRESSURE_LEVELS,
+                    grid=ERA5_GRID,
+                    cachestore=disk_cache,
+                )
+                era5_sl = ERA5(
+                    time=(h_str, h_str),
+                    variables=ERA5_SURFACE_VARIABLES,
+                    pressure_levels=-1,
+                    grid=ERA5_GRID,
+                    cachestore=disk_cache,
+                )
+            met = _open_crop_and_load(era5_pl, bbox, low_mem)
+            rad = _open_crop_and_load(era5_sl, bbox, low_mem)
+            result[h] = (met, rad)
+        except Exception as exc:
+            logger.warning("ERA5 load failed for hour %s: %s", h, exc)
+    return result
 
 
 def _populate_hour_cache(
@@ -195,46 +172,45 @@ def _populate_hour_cache(
     bbox: list,
     low_mem: bool,
 ) -> None:
-    """Load only the missing hours from ``needed`` into ``hour_cache``.
+    """Load missing hours into hour_cache using bounded packets dispatched to a thread pool.
 
-    Consecutive missing hours are grouped into contiguous load ranges to
-    minimise ERA5 object construction overhead.  Each loaded block is then
-    sliced into per-hour ``MetDataset`` entries and stored in the cache.
+    Missing hours are partitioned into packets of WEATHER_OPEN_PACKET_HOURS.
+    Packets are submitted to ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS).
+    Each worker builds an isolated dict; the main thread merges results.
+    On VM (WEATHER_IO_WORKERS=1, WEATHER_OPEN_PACKET_HOURS=1): fully sequential,
+    one file open at a time.
     """
     missing = sorted(h for h in needed if h not in hour_cache)
     if not missing:
         logger.debug("All %d ERA5 hours already cached.", len(needed))
         return
 
-    # Group consecutive hours into contiguous ranges
-    ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-    t0 = prev = missing[0]
-    for h in missing[1:]:
-        if h - prev > pd.Timedelta(hours=1):
-            ranges.append((t0, prev))
-            t0 = h
-        prev = h
-    ranges.append((t0, prev))
+    P = WEATHER_OPEN_PACKET_HOURS
+    packets = [missing[i : i + P] for i in range(0, len(missing), P)]
 
     logger.info(
-        "Loading %d missing ERA5 hours in %d contiguous range(s).",
-        len(missing), len(ranges),
+        "Loading %d missing ERA5 hour(s) in %d packet(s) of <=%d h "
+        "(workers=%d, low_mem=%s).",
+        len(missing), len(packets), P, WEATHER_IO_WORKERS, low_mem,
     )
+    t0 = time.perf_counter()
 
-    for seg_start, seg_end in ranges:
-        met_block, rad_block = _load_hour_range(
-            seg_start, seg_end, weather_cache_dir, bbox, low_mem
-        )
-        seg_hours = pd.date_range(seg_start, seg_end, freq="h")
-        for h in seg_hours:
+    with ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS) as pool:
+        futures = {
+            pool.submit(_load_hour_packet, pkt, weather_cache_dir, bbox, low_mem): pkt
+            for pkt in packets
+        }
+        for future in as_completed(futures):
             try:
-                h_np = h.to_datetime64()
-                hour_cache[h] = (
-                    MetDataset(met_block.data.sel(time=[h_np])),
-                    MetDataset(rad_block.data.sel(time=[h_np])),
-                )
+                hour_cache.update(future.result())
             except Exception as exc:
-                logger.warning("Could not slice hour %s from ERA5 block: %s", h, exc)
+                logger.error("ERA5 packet failed: %s", exc)
+
+    loaded = sum(1 for h in missing if h in hour_cache)
+    logger.info(
+        "ERA5 cache populated: %d/%d hour(s) loaded in %s.",
+        loaded, len(missing), _format_duration(time.perf_counter() - t0),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +231,7 @@ def run(
     max_workers: int = 4,
     step_size: float = 10.0,
     min_safe_fl: float = MIN_SAFE_FL,
-    low_mem: bool = False,
+    era5_lazy: bool = False,
     cluster_selection: str = "random",
     clusters_per_flight: int = 1,
     min_distance_km: float = 0.0,
@@ -293,8 +269,10 @@ def run(
         FL step-down increment in feet for variational mode (default 1000.0).
     min_safe_fl : float
         Minimum FL below which step-down is halted (default 280.0).
-    low_mem : bool
-        Lazy-load ERA5 datasets; skip eager ``.load()`` call (default False).
+    era5_lazy : bool
+        Skip eager ERA5 ``.load()`` call; arrays stay file-backed until accessed
+        during CoCiP interpolation (default False). Independent of CoCiP
+        ``preprocess_lowmem`` — use ``model_config_id='kerosene_lowmem'`` for that.
     clusters_per_flight : int
         Number of cluster trajectories to generate per flight (default 1).
     min_distance_km : float
@@ -414,10 +392,11 @@ def run(
             logger.info("Evicting %d stale ERA5 hour(s) from cache.", len(stale))
             for h in stale:
                 del hour_cache[h]
+            gc.collect()
 
         # ── Load only missing hours ──────────────────────────────────────── #
         needed = pd.date_range(era5_start, era5_end, freq="h")
-        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, low_mem)
+        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, era5_lazy)
 
         available = [h for h in needed if h in hour_cache]
         if not available:
@@ -427,10 +406,10 @@ def run(
         # ── Concatenate cached hours → full met / rad for this day ────────  #
         met = MetDataset(xr.concat(
             [hour_cache[h][0].data for h in available], dim="time"
-        ))
+        ), copy=False)
         rad = MetDataset(xr.concat(
             [hour_cache[h][1].data for h in available], dim="time"
-        ))
+        ), copy=False)
 
         logger.info(
             "Day %s: %d cohort task(s) → %d active after skip-gate → %d batch(es).",
@@ -449,7 +428,6 @@ def run(
             max_age_hours=max_age_hours,
             fuel=fuel,
             step_down_method=step_down_method,
-            low_mem=low_mem,
             overwrite=overwrite,
         )
 
@@ -462,16 +440,18 @@ def run(
         while pending:
             round_still_todo: List[SimTask] = []
 
-            for worker_results in run_parallel(pending, worker_fn, max_workers):
-                # Build task lookup for Slot 5 variational step-down
-                task_by_fid = {
-                    t.to_sim_fid(): t
-                    for batch in pending
-                    for t in batch
-                }
+            # Build task lookup for Slot 5 variational step-down once per round (pending is stable during inner loop)
+            task_by_fid = {
+                t.to_sim_fid(): t
+                for batch in pending
+                for t in batch
+            }
+
+            for batch_output in run_parallel(pending, worker_fn, max_workers):
                 eval_result = evaluate(
-                    worker_results, task_by_fid, sim_mode, step_size, min_safe_fl
+                    batch_output, task_by_fid, sim_mode, model_config_id, step_size, min_safe_fl
                 )
+
                 n_succ = len(eval_result.succeeded)
                 day_succeeded += n_succ
                 day_failed    += len(eval_result.failed)
