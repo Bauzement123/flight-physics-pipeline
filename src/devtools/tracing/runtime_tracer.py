@@ -28,6 +28,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +62,8 @@ def _worker_trace_init(session_id: str, log_dir_str: str) -> None:
     frag_path = Path(log_dir_str) / f"runtime_trace_{session_id}_worker_{pid}.tmp"
     frag_path.parent.mkdir(parents=True, exist_ok=True)
     frag_handle = open(frag_path, "a", encoding="utf-8", buffering=1)  # noqa: WPS515
-    depth = [0]  # list for closure mutability
+    import threading
+    local = threading.local()
 
     def _worker_callback(frame, event, arg):
         code = frame.f_code
@@ -70,20 +72,26 @@ def _worker_trace_init(session_id: str, log_dir_str: str) -> None:
         is_pycontrails = "pycontrails" in filename
         if not (is_src or is_pycontrails):
             return _worker_callback
+            
+        if not hasattr(local, "depth"):
+            local.depth = 0
+
+        tname = threading.current_thread().name
+        thread_tag = f"PID={pid}" if tname == "MainThread" else f"PID={pid}:T-{tname}"
 
         if event == "call":
-            depth[0] += 1
-            indent = "|   " * (depth[0] - 1) + "|-- "
+            local.depth += 1
+            indent = "|   " * (local.depth - 1) + "|-- "
             arg_parts = []
             for var in code.co_varnames[: code.co_argcount]:
                 val = frame.f_locals.get(var, "<unbound>")
-                s = repr(val)
+                s = repr(val).replace("\n", " ").replace("\r", " ")
                 if len(s) > 40:
                     s = s[:37] + "..."
                 arg_parts.append(f"{var}={s}")
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             line = (
-                f"[PID={pid}][{ts}] {indent}"
+                f"[{thread_tag}][{ts}] {indent}"
                 f"CALL {code.co_name}({', '.join(arg_parts)})"
                 f" @ {_format_path(filename)}:{frame.f_lineno}\n"
             )
@@ -91,22 +99,23 @@ def _worker_trace_init(session_id: str, log_dir_str: str) -> None:
             frag_handle.flush()
 
         elif event == "return":
-            indent = "|   " * (depth[0] - 1) + "`-- "
-            ret = repr(arg)
+            indent = "|   " * (local.depth - 1) + "`-- "
+            ret = repr(arg).replace("\n", " ").replace("\r", " ")
             if len(ret) > 40:
                 ret = ret[:37] + "..."
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             line = (
-                f"[PID={pid}][{ts}] {indent}"
+                f"[{thread_tag}][{ts}] {indent}"
                 f"RETURN {code.co_name} -> {ret}\n"
             )
             frag_handle.write(line)
             frag_handle.flush()
-            depth[0] = max(0, depth[0] - 1)
+            local.depth = max(0, local.depth - 1)
 
         return _worker_callback
 
     sys.settrace(_worker_callback)
+    threading.settrace(_worker_callback)
 
 
 def _chained_worker_trace_init(session_id: str, log_dir_str: str, orig_fn, orig_args) -> None:
@@ -128,8 +137,10 @@ class RuntimeTracer:
         self._log_file: Optional[Path] = None
         self._log_handle = None
         self._original_ppe_init = None
+        self._original_tpe_init = None
+        self._write_lock = threading.Lock()
         self._log_dir = Path("data/traces")
-        self._depth: int = 0
+        self._local = threading.local()
         self._start_time: float = 0.0
         self._record_count: int = 0
 
@@ -138,7 +149,7 @@ class RuntimeTracer:
     # ------------------------------------------------------------------
 
     def start(self, log_file: Optional[str] = None) -> None:
-        """Begin a tracing session. Patches ProcessPoolExecutor and attaches sys.settrace."""
+        """Begin a tracing session. Patches ProcessPoolExecutor, ThreadPoolExecutor and attaches sys.settrace."""
         self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,19 +160,23 @@ class RuntimeTracer:
 
         self._log_file.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = open(self._log_file, "w", encoding="utf-8")  # noqa: WPS515
-        self._depth = 0
+        self._local.depth = 0
         self._record_count = 0
         self._start_time = time.time()
 
         self._patch_process_pool_executor()
+        self._patch_thread_pool_executor()
         sys.settrace(self._main_callback)
+        threading.settrace(self._main_callback)
 
         self._emit(f"=== Runtime Tracer Started | Session: {self._session_id} | Log: {self._log_file} ===")
 
     def stop(self) -> None:
-        """Stop tracing, restore ProcessPoolExecutor.__init__, merge worker fragments."""
+        """Stop tracing, restore executors, merge worker fragments."""
         sys.settrace(None)
+        threading.settrace(None)
         self._restore_process_pool_executor()
+        self._restore_thread_pool_executor()
 
         elapsed = time.time() - self._start_time
         footer = (
@@ -192,34 +207,40 @@ class RuntimeTracer:
         is_pycontrails = "pycontrails" in filename
         if not (is_src or is_pycontrails):
             return self._main_callback
+            
+        if not hasattr(self._local, "depth"):
+            self._local.depth = 0
+            
+        tname = threading.current_thread().name
+        thread_tag = f"MAIN" if tname == "MainThread" else f"T-{tname}"
 
         if event == "call":
-            self._depth += 1
-            indent = "|   " * (self._depth - 1) + "|-- "
+            self._local.depth += 1
+            indent = "|   " * (self._local.depth - 1) + "|-- "
             arg_parts = []
             for var in code.co_varnames[: code.co_argcount]:
                 val = frame.f_locals.get(var, "<unbound>")
-                s = repr(val)
+                s = repr(val).replace("\n", " ").replace("\r", " ")
                 if len(s) > 40:
                     s = s[:37] + "..."
                 arg_parts.append(f"{var}={s}")
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             line = (
-                f"[MAIN][{ts}] {indent}"
+                f"[{thread_tag}][{ts}] {indent}"
                 f"CALL {code.co_name}({', '.join(arg_parts)})"
                 f" @ {_format_path(filename)}:{frame.f_lineno}"
             )
             self._emit(line)
 
         elif event == "return":
-            indent = "|   " * (self._depth - 1) + "`-- "
-            ret = repr(arg)
+            indent = "|   " * (self._local.depth - 1) + "`-- "
+            ret = repr(arg).replace("\n", " ").replace("\r", " ")
             if len(ret) > 40:
                 ret = ret[:37] + "..."
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            line = f"[MAIN][{ts}] {indent}RETURN {code.co_name} -> {ret}"
+            line = f"[{thread_tag}][{ts}] {indent}RETURN {code.co_name} -> {ret}"
             self._emit(line)
-            self._depth = max(0, self._depth - 1)
+            self._local.depth = max(0, self._local.depth - 1)
 
         return self._main_callback
 
@@ -287,6 +308,52 @@ class RuntimeTracer:
             self._original_ppe_init = None
 
     # ------------------------------------------------------------------
+    # ThreadPoolExecutor patching
+    # ------------------------------------------------------------------
+
+    def _patch_thread_pool_executor(self) -> None:
+        """
+        Patch ThreadPoolExecutor.__init__ IN PLACE on the class object.
+        Ensures worker threads start with sys.settrace attached in Python 3.12.
+        """
+        original_init = concurrent.futures.ThreadPoolExecutor.__init__
+        self._original_tpe_init = original_init
+
+        callback = self._main_callback
+
+        def thread_trace_init(orig_fn, orig_args):
+            import sys
+            import threading
+            sys.settrace(callback)
+            threading.settrace(callback)
+            if orig_fn:
+                orig_fn(*orig_args)
+
+        def patched_init(
+            executor_self,
+            max_workers=None,
+            thread_name_prefix="",
+            initializer=None,
+            initargs=(),
+        ):
+            from functools import partial
+            new_init = partial(thread_trace_init, initializer, initargs)
+            original_init(
+                executor_self,
+                max_workers=max_workers,
+                thread_name_prefix=thread_name_prefix,
+                initializer=new_init,
+                initargs=(),
+            )
+
+        concurrent.futures.ThreadPoolExecutor.__init__ = patched_init  # type: ignore[method-assign]
+
+    def _restore_thread_pool_executor(self) -> None:
+        if self._original_tpe_init is not None:
+            concurrent.futures.ThreadPoolExecutor.__init__ = self._original_tpe_init  # type: ignore[method-assign]
+            self._original_tpe_init = None
+
+    # ------------------------------------------------------------------
     # Worker fragment merge
     # ------------------------------------------------------------------
 
@@ -351,11 +418,12 @@ class RuntimeTracer:
     # ------------------------------------------------------------------
 
     def _emit(self, line: str) -> None:
-        self._record_count += 1
-        if self._log_handle:
-            self._log_handle.write(line + "\n")
-            self._log_handle.flush()
-        self._safe_print(line)
+        with self._write_lock:
+            self._record_count += 1
+            if self._log_handle:
+                self._log_handle.write(line + "\n")
+                self._log_handle.flush()
+            self._safe_print(line)
 
     @staticmethod
     def _safe_print(text: str) -> None:

@@ -231,7 +231,7 @@ def run(
     max_workers: int = 4,
     step_size: float = 10.0,
     min_safe_fl: float = MIN_SAFE_FL,
-    low_mem: bool = False,
+    era5_lazy: bool = False,
     cluster_selection: str = "random",
     clusters_per_flight: int = 1,
     min_distance_km: float = 0.0,
@@ -269,8 +269,10 @@ def run(
         FL step-down increment in feet for variational mode (default 1000.0).
     min_safe_fl : float
         Minimum FL below which step-down is halted (default 280.0).
-    low_mem : bool
-        Lazy-load ERA5 datasets; skip eager ``.load()`` call (default False).
+    era5_lazy : bool
+        Skip eager ERA5 ``.load()`` call; arrays stay file-backed until accessed
+        during CoCiP interpolation (default False). Independent of CoCiP
+        ``preprocess_lowmem`` — use ``model_config_id='kerosene_lowmem'`` for that.
     clusters_per_flight : int
         Number of cluster trajectories to generate per flight (default 1).
     min_distance_km : float
@@ -394,7 +396,7 @@ def run(
 
         # ── Load only missing hours ──────────────────────────────────────── #
         needed = pd.date_range(era5_start, era5_end, freq="h")
-        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, low_mem)
+        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, era5_lazy)
 
         available = [h for h in needed if h in hour_cache]
         if not available:
@@ -426,7 +428,6 @@ def run(
             max_age_hours=max_age_hours,
             fuel=fuel,
             step_down_method=step_down_method,
-            low_mem=low_mem,
             overwrite=overwrite,
         )
 
@@ -439,16 +440,18 @@ def run(
         while pending:
             round_still_todo: List[SimTask] = []
 
-            for worker_results in run_parallel(pending, worker_fn, max_workers):
-                # Build task lookup for Slot 5 variational step-down
-                task_by_fid = {
-                    t.to_sim_fid(): t
-                    for batch in pending
-                    for t in batch
-                }
+            # Build task lookup for Slot 5 variational step-down once per round (pending is stable during inner loop)
+            task_by_fid = {
+                t.to_sim_fid(): t
+                for batch in pending
+                for t in batch
+            }
+
+            for batch_output in run_parallel(pending, worker_fn, max_workers):
                 eval_result = evaluate(
-                    worker_results, task_by_fid, sim_mode, step_size, min_safe_fl
+                    batch_output, task_by_fid, sim_mode, model_config_id, step_size, min_safe_fl
                 )
+
                 n_succ = len(eval_result.succeeded)
                 day_succeeded += n_succ
                 day_failed    += len(eval_result.failed)
