@@ -91,6 +91,7 @@ def _build_kerosene(
     ps_model = PSFlight(
         met=met,
         params={
+            "copy_source": False,
             "fill_low_altitude_with_isa_temperature": True,
             "fill_low_altitude_with_zero_wind": False,
             "correct_fuel_flow": False,
@@ -99,6 +100,7 @@ def _build_kerosene(
     )
 
     cocip_params = {
+        "copy_source": False,
         "process_emissions": True,
         "verbose_outputs": False,
         "humidity_scaling": ConstantHumidityScaling(rhi_adj=0.97),

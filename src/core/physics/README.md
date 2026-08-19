@@ -60,7 +60,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   └── orchestrator.run()
 │       ├── Input: Date range, corridors_map, lake_path, weather_cache_dir, execution flags.
 │       ├── Output: None (writes directly to Delta Lake).
-│       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically; re-batches step-down tasks at round boundaries.
+│       └── Safety/Fallback: Calculates exact ERA5 window from task min(firstseen) / max(lastseen) + max_age_hours; evicts stale ERA5 hours dynamically with gc.collect(); loads missing hours via bounded packets (_load_hour_packet) with ThreadPoolExecutor(WEATHER_IO_WORKERS); re-batches step-down tasks at round boundaries.
 │
 ├── 3. Slot 1: Flight List Generation & Selection
 │   ├── slot1_flightlist_gen.generate_base_flightlist()
@@ -101,7 +101,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   └── models.ps_cocip.get_model() / worker.run_batch()
 │       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, low_mem, fuel, step_down_method.
 │       ├── Output: Tuple[PSFlight, Cocip] / List[WorkerResult] (with actual_fl populated)
-│       └── Safety/Fallback: Runs vectorized ps_model.eval() + cocip_model.eval(); on vector exception, executes sequential per-flight fallback; logs unrecoverable failures to skipped_aircraft.log.
+│       └── Safety/Fallback: Instantiates models with copy_source=False to mutate ephemeral Flight objects in place; runs vectorized ps_model.eval() + cocip_model.eval(); on vector exception, executes sequential per-flight fallback; logs unrecoverable failures to skipped_aircraft.log.
 │
 ├── 7. Parallel Execution Coordination
 │   └── engine.run_parallel()
@@ -156,10 +156,10 @@ flowchart TD
 1. **CLI Initialization**: `cli.py` parses command-line flags (date range, corridor ranks, worker count, fuel, simulation mode, memory flags). `read_corridors_map()` loads `(route_id, cluster_id)` corridor metadata and calibrated FLs from `GLOBAL_CORRIDOR_MODEL_REGISTRY`, filtered via PyArrow dataset predicate pushdown on `route_summary.parquet` if ranks are specified.
 2. **Daily Cohort Ingestion**: For each calendar day in `--start-date` to `--end-date`, `orchestrator.run()` queries `master_flights.parquet` via `read_master_flights()` for flights departing between `00:00:00` and `23:59:59` UTC, leveraging single-column predicate pushdown on precomputed `route` fields.
 3. **Flight List Generation (Slot 1)**: `generate_base_flightlist()` converts cohort rows into `FlightCandidate` items by matching route codes against available cluster trajectories in `corridors_map`, safely handling missing `callsign` and `typecode` fields with `pd.notna` guards. `select_clusters()` then samples and materializes strongly typed `SimTask` dataclass items.
-4. **Dynamic ERA5 Windowing**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:
+4. **Dynamic ERA5 Windowing & Packetized Ingestion**: The orchestrator inspects all generated tasks for the day and calculates hourly bounds:
    $$\text{era5\_start} = \lfloor \min(\text{task.firstseen}) \rfloor - 1\text{h}$$
    $$\text{era5\_end} = \lceil \max(\text{task.lastseen}) \rceil + \text{max\_age\_hours} + 1\text{h}$$
-   Stale hours before `era5_start` are evicted from `hour_cache`, missing hours are opened concurrently, and concatenated into daily `met` and `rad` datasets.
+   Stale hours before `era5_start` are evicted from `hour_cache` and garbage-collected (`gc.collect()`). Missing hours are partitioned into discrete packets of size `WEATHER_OPEN_PACKET_HOURS` and loaded via `ThreadPoolExecutor(max_workers=WEATHER_IO_WORKERS)` using `_load_hour_packet()`. Each worker builds an isolated dictionary without mutating shared state. The main thread aggregates packets into `hour_cache` and wraps the concatenated daily datasets with `MetDataset(..., copy=False)`.
 5. **Bulk Skip-Gate & Batch Packing (Slot 2)**: `filter_and_batch()` delegates to the unified IO engine `read_sim_lake_metadata()` via two thin wrappers:
    - **Standard mode**: `read_existing_sim_fids(tasks)` bulk-queries all simulated SIM_FIDs for the day in a single 4-stage scan (`dep_date` file-skip → `firstseen` row filter → `waypoint==0` one-row-per-SIM_FID → in-RAM `Base_FID` frozenset match). Unsimulated tasks are packed into batches of `max_batch_size` (default 50). If `--overwrite`, exact SIM_FIDs are deleted first via `delete_sim_lake_rows()`.
    - **Variational mode**: `read_ef_by_base_key(tasks)` uses the same scan, projecting `["SIM_FID", "FL", "EF_total"]`, grouped by `CLUSTER_FID` = `SIM_FID` without `_{FL}` suffix. If `--overwrite`, all FL variants per CLUSTER_FID are resolved in-RAM and deleted before re-emitting tasks at nominal FL.
@@ -261,10 +261,12 @@ flowchart TD
 
 | Feature / Behavior | Standard Mode (`--low-mem` omitted) | Low-Memory Mode (`--low-mem` enabled) |
 |---|---|---|
-| **ERA5 Spatial Crop** | Cropped to `EUR_BBOX` ($[-26^\circ, 30^\circ, 44^\circ, 79^\circ]$) $+ 10^\circ$ padding via `crop_met_dataset()`. | **Skipped entirely**. Dask slices touched chunks lazily without spatial crop overhead. |
+| **ERA5 Spatial Crop** | Cropped to `EUR_BBOX` ($[-26^\circ, 30^\circ, 44^\circ, 79^\circ]$) $+ 10^\circ$ padding via native `downselect()`. | Cropped lazily to `EUR_BBOX` $+ 10^\circ$ via `downselect()` (limits Dask index space). |
 | **ERA5 In-Memory Load** | Executes eager `.load()` call to pull cropped array into uncompressed RAM. | **Skipped eager load**. Data remains in lazy Dask / NetCDF arrays. |
+| **ERA5 Ingestion Chunking** | Loads missing hours in packets of `WEATHER_OPEN_PACKET_HOURS` across `WEATHER_IO_WORKERS`. | Uses `WEATHER_OPEN_PACKET_HOURS=1` and `WEATHER_IO_WORKERS=1` on VM to eliminate NetCDF lock races and memory spikes. |
+| **Flight Memory Lifecycle** | `copy_source=False` on `PSFlight` and `Cocip` mutates ephemeral `Flight` DataFrames in place. | `copy_source=False` on `PSFlight` and `Cocip` mutates ephemeral `Flight` DataFrames in place. |
 | **CoCiP Preprocessing** | Standard PyContrails array processing. | Enables `preprocess_lowmem=True` parameter inside `Cocip` model initialization. |
-| **Primary Advantage** | Fastest execution speed per batch; optimal for high-CPU nodes with ample RAM ($\ge 32\text{ GB}$). | **Minimizes peak RAM footprint**; prevents OOM crashes on memory-constrained workers. |
+| **Primary Advantage** | Fastest execution speed per batch; optimal for high-CPU nodes with ample RAM ($\ge 32\text{ GB}$). | **Minimizes peak RAM footprint**; prevents OOM crashes and file-handle exhaustion on memory-constrained workers. |
 
 ---
 
@@ -358,9 +360,17 @@ python -m src.core.physics.cli `
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
 | `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |
 | `--batch-size` | `int` | `50` | Maximum number of flight tasks per parallel execution batch. |
-| `--low-mem` | `flag` | `False` | Enables lazy ERA5 loading, skips spatial cropping and eager `.load()`. |
+| `--low-mem` | `flag` | `False` | Enables lazy ERA5 loading, skips eager `.load()`, enables `Cocip(preprocess_lowmem=True)`. |
 | `--overwrite` | `flag` | `False` | Bypass Delta Lake skip-gate and delete-then-append fresh results. |
 | `--test-mode` | `flag` | `False` | Restricts run to single day (`2025-01-01`) and single cluster per flight. |
+
+### 5.4 Environment Variable Tuning Options
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `WEATHER_OPEN_PACKET_HOURS` | `12` | Number of ERA5 hours per discrete load packet. Set to `1` in `.env` on VM / SMB mounts; increase on fast local SSDs. |
+| `WEATHER_IO_WORKERS` | `2` | Number of concurrent `ThreadPoolExecutor` workers for weather packet ingestion. Set to `1` in `.env` on VM / SMB mounts. |
+| `HDF5_USE_FILE_LOCKING` | OS default | Set to `FALSE` on network mounts (SMB/NFS) to prevent HDF5 file locking errors across workers. |
 
 ---
 

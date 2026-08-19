@@ -72,17 +72,17 @@ PROCESSING_KALMAN_THREADS_PER_WORKER: int = 1
 CORRIDOR_IO_THREADS: int = 4
 CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
 
-# On the VM, netCDF4/HDF5 concurrent file-open calls race at the C-library
-# initialisation layer and cause a SIGSEGV.  Force sequential ERA5 opens
-# (1 worker) when the WEATHER_IO_SEQUENTIAL env var is set to "1" or "true",
-# or when running on the ILR-rocket VM (detected by hostname).  Local dev
-# retains 2 parallel workers for performance.
-import socket as _socket
-_on_vm: bool = (
-    os.environ.get("WEATHER_IO_SEQUENTIAL", "").lower() in ("1", "true")
-    or _socket.gethostname().lower() == "ilr-rocket"
-)
-WEATHER_IO_WORKERS: int = 1 if _on_vm else 2
+# Weather I/O concurrency and packet sizing.
+# Both values are read exclusively from the local .env file (gitignored).
+# Set these per deployment node — no code change or branch needed.
+#
+# VM / SMB mount:      WEATHER_IO_WORKERS=1    WEATHER_OPEN_PACKET_HOURS=1
+# Local dev / NVMe:    WEATHER_IO_WORKERS=2    WEATHER_OPEN_PACKET_HOURS=12
+#
+# Defaults (2 workers, 12 h packets) are safe for local development.
+# Small packets (1–3 h) bound concurrent open file handles on network mounts.
+WEATHER_IO_WORKERS: int = int(os.environ.get("WEATHER_IO_WORKERS", "2"))
+WEATHER_OPEN_PACKET_HOURS: int = int(os.environ.get("WEATHER_OPEN_PACKET_HOURS", "12"))
 
 # Trino retry / timeout parameters (§3.3.1)
 BACKOFF_MAX_RETRIES: int = 10           # Max Trino retry attempts (exponential back-off)
