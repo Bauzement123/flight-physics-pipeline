@@ -32,7 +32,7 @@ src/core/physics/
 │   └── cluster_loader.py          ← Slot 3a: K-Cluster trajectory loader & time-shifter
 ├── models/                        ← Slot 4: Physics model builders
 │   ├── __init__.py                ← Model package initialization
-│   └── ps_cocip.py                ← Kerosene & Hydrogen PSFlight + CoCiP model builder (`get_model`)
+│   └── ps_cocip.py                ← Model builder (`get_model` dispatches 'kerosene', 'kerosene_lowmem')
 └── slots/                         ← Slotted pipeline step definitions
     ├── __init__.py                ← Slots package initialization
     ├── slot1_flightlist_gen.py    ← Slot 1: Flight list generation from master_flights slices
@@ -256,6 +256,14 @@ flowchart TD
 
 > **Separation of concerns**: `--low-mem` controls only ERA5 I/O (whether xarray arrays are eagerly loaded into RAM). `--model-config-id kerosene_lowmem` controls only CoCiP preprocessing behaviour (`preprocess_lowmem=True`). These two flags are fully independent.
 
+### 4.4 Supported Model Configurations (`--model-config-id`)
+
+The `ps_cocip.py` model factory maps `--model-config-id` to specific physical model parameters and acts as a primary partition key in the Delta Lake results:
+
+| `model_config_id` | Performance Model | Contrail Model | Parameters & Behavior |
+|---|---|---|---|
+| `kerosene` (default) | `PSFlight` | `Cocip` | Standard Jet-A fuel params; standard CoCiP met interpolation. |
+| `kerosene_lowmem` | `PSFlight` | `Cocip` | Standard Jet-A fuel params; sets `preprocess_lowmem=True` on `Cocip` to chunk pressure-level interpolation and prevent RAM spikes. |
 
 ---
 
@@ -277,18 +285,18 @@ python -m src.core.physics.cli \
     --batch-size 50 \
     --out-dir data/results/corridor_simulations_kerosene
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
+# Low-Memory Variational Step-Down Campaign with Altitude Capping
 python -m src.core.physics.cli \
     --start-date 2025-01-01 \
     --end-date 2025-01-07 \
     --ranks 1,3,5 \
     --sim-mode variational \
     --step-down-method cap \
-    --fuel hydrogen \
-    --model-config-id kerosene \
+    --fuel kerosene \
+    --model-config-id kerosene_lowmem \
     --step-size 10.0 \
     --min-safe-fl 190.0 \
-    --out-dir data/results/corridor_simulations_hydrogen \
+    --out-dir data/results/corridor_simulations_kerosene_lowmem \
     --low-mem \
     --max-age 1
 ```
@@ -309,18 +317,18 @@ python -m src.core.physics.cli `
     --batch-size 50 `
     --out-dir data/results/corridor_simulations_kerosene
 
-# Variational Step-Down Campaign (Hydrogen) with Low-Memory mode and Altitude Capping
+# Low-Memory Variational Step-Down Campaign with Altitude Capping
 python -m src.core.physics.cli `
     --start-date 2025-01-01 `
     --end-date 2025-01-07 `
     --ranks "1,3,5" `
     --sim-mode variational `
     --step-down-method cap `
-    --fuel hydrogen `
-    --model-config-id kerosene `
+    --fuel kerosene `
+    --model-config-id kerosene_lowmem `
     --step-size 10.0 `
     --min-safe-fl 190.0 `
-    --out-dir data/results/corridor_simulations_hydrogen `
+    --out-dir data/results/corridor_simulations_kerosene_lowmem `
     --low-mem `
     --max-age 1
 ```
