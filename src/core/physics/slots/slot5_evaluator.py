@@ -169,6 +169,18 @@ def check_cocip_ok(
             failed.append((task, "ef_all_nan"))
             continue
 
+        # ── Fuel burn sanity gate ──────────────────────────────────────── #
+        # A flight with zero or NaN total_fuel_burn indicates broken weather
+        # interpolation or a model failure — reject before lake commit.
+        tfb = flight.attrs.get("total_fuel_burn", None)
+        if tfb is None or np.isnan(tfb) or tfb <= 0.0:
+            reason = f"zero_or_nan_fuel_burn(total_fuel_burn={tfb})"
+            logger.warning(
+                "check_cocip_ok: rejecting %s — %s", task.sim_fid, reason,
+            )
+            failed.append((task, reason))
+            continue
+
         ok.append((task, flight))
 
     return ok, failed

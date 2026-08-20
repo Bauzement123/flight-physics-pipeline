@@ -45,7 +45,7 @@ def _make_task(
 def _make_mock_flight(sim_fid: str, typecode: str = "B738") -> MagicMock:
     """Create a minimal mock Flight object for testing."""
     flight = MagicMock(spec=Flight)
-    flight.attrs = {"flight_id": sim_fid, "aircraft_type": typecode}
+    flight.attrs = {"flight_id": sim_fid, "aircraft_type": typecode, "total_fuel_burn": 5000.0}
     flight.data = {"ef": np.array([100.0, 200.0]), "altitude": np.array([10668.0, 10668.0])}
     flight.__len__.return_value = 10
     flight.__getitem__.side_effect = lambda k: flight.data[k]

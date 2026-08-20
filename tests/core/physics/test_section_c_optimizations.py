@@ -41,7 +41,7 @@ def _make_task(callsign: str = "KLM123", fl: float = 350.0) -> SimTask:
 
 def _make_mock_flight(sim_fid: str, alt_fl: float = 350.0, ef_val: float = 100.0) -> MagicMock:
     flight = MagicMock(spec=Flight)
-    flight.attrs = {"flight_id": sim_fid, "aircraft_type": "B738"}
+    flight.attrs = {"flight_id": sim_fid, "aircraft_type": "B738", "total_fuel_burn": 5000.0}
     alt_m = alt_fl * 100.0 * 0.3048
     flight.data = {
         "ef": np.array([ef_val, ef_val]),
@@ -128,21 +128,38 @@ def test_check_cocip_ok_filters_invalid_flights():
     fl_nan_ef.__len__.return_value = 10
     fl_nan_ef.__getitem__.side_effect = lambda k: fl_nan_ef.data[k]
 
+    # Invalid flight: zero total_fuel_burn (broken weather interpolation)
+    fl_zero_fuel = MagicMock(spec=Flight)
+    fl_zero_fuel.attrs = {"flight_id": task.sim_fid, "total_fuel_burn": 0.0}
+    fl_zero_fuel.data = {"ef": np.array([1.0, 2.0])}
+    fl_zero_fuel.__len__.return_value = 10
+    fl_zero_fuel.__getitem__.side_effect = lambda k: fl_zero_fuel.data[k]
+
+    # Invalid flight: NaN total_fuel_burn
+    fl_nan_fuel = MagicMock(spec=Flight)
+    fl_nan_fuel.attrs = {"flight_id": task.sim_fid, "total_fuel_burn": np.nan}
+    fl_nan_fuel.data = {"ef": np.array([1.0, 2.0])}
+    fl_nan_fuel.__len__.return_value = 10
+    fl_nan_fuel.__getitem__.side_effect = lambda k: fl_nan_fuel.data[k]
+
     pairs = [
         (task, fl_valid),
         (task, fl_unk),
         (task, fl_no_ef),
         (task, fl_nan_ef),
+        (task, fl_zero_fuel),
+        (task, fl_nan_fuel),
     ]
 
     ok, failed = check_cocip_ok(pairs)
     assert len(ok) == 1
     assert ok[0][1] == fl_valid
-    assert len(failed) == 3
+    assert len(failed) == 5
     reasons = [reason for _, reason in failed]
     assert "invalid_flight_id_unk" in reasons
     assert "missing_ef_column" in reasons
     assert "ef_all_nan" in reasons
+    assert any("zero_or_nan_fuel_burn" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------
