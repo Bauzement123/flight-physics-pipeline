@@ -4,6 +4,7 @@ Provides unified conversion interfaces between Pandas DataFrames and pycontrails
 centralizing Parquet I/O and preventing pyarrow Timestamp JSON serialization crashes.
 """
 
+import numpy as np
 import pandas as pd
 import logging
 from pathlib import Path
@@ -442,3 +443,35 @@ def traffic_to_pycontrails(flight_or_df, typecode: str | None = None, drop_kinem
         final_attrs[k] = v
         
     return Flight(data=df_pc, crs="EPSG:4326", drop_duplicated_times=True, **final_attrs)
+
+
+# ---------------------------------------------------------------------------
+# Simulation Lake serialization helper
+# ---------------------------------------------------------------------------
+
+_BROADCASTABLE_TYPES = (str, int, float, bool, np.integer, np.floating, pd.Timestamp)
+
+
+def promote_attrs_to_data(flight: Flight) -> None:
+    """Promote all scalar attrs into ``flight.data`` in-place.
+
+    Iterates ``flight.attrs`` and writes every scalar value (str, numeric,
+    bool, Timestamp) into ``flight.data`` as a ``np.full(flight.size, val)``
+    array, so that a subsequent ``flight.to_dataframe()`` call includes all
+    simulation metadata and physics attributes as columns.
+
+    Non-scalar attrs (arrays, dicts, None) are silently skipped.
+
+    Called by ``_write_to_lake`` in ``worker.py`` immediately before
+    ``to_dataframe()``, covering both ``full`` and ``summary`` verbosity modes.
+    In summary mode the target Flight has ``size=1``; in full mode ``size=N``.
+
+    Parameters
+    ----------
+    flight : Flight
+        Flight object with attrs already injected (14 fixed metadata fields
+        plus any CoCiP / model-specific attrs set during simulation).
+    """
+    for key, val in flight.attrs.items():
+        if isinstance(val, _BROADCASTABLE_TYPES):
+            flight.data[key] = np.full(flight.size, val)

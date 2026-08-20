@@ -220,7 +220,10 @@ class RuntimeTracer:
             arg_parts = []
             for var in code.co_varnames[: code.co_argcount]:
                 val = frame.f_locals.get(var, "<unbound>")
-                s = repr(val).replace("\n", " ").replace("\r", " ")
+                try:
+                    s = repr(val).replace("\n", " ").replace("\r", " ")
+                except Exception:
+                    s = "<repr_error>"
                 if len(s) > 40:
                     s = s[:37] + "..."
                 arg_parts.append(f"{var}={s}")
@@ -234,7 +237,10 @@ class RuntimeTracer:
 
         elif event == "return":
             indent = "|   " * (self._local.depth - 1) + "`-- "
-            ret = repr(arg).replace("\n", " ").replace("\r", " ")
+            try:
+                ret = repr(arg).replace("\n", " ").replace("\r", " ")
+            except Exception:
+                ret = "<repr_error>"
             if len(ret) > 40:
                 ret = ret[:37] + "..."
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]

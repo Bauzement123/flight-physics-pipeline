@@ -91,7 +91,7 @@ def _open_crop_and_load(era5_obj: ERA5, bbox: list, low_mem: bool) -> MetDataset
     Always applies spatial bounding box cropping via native ``downselect()`` to bound array
     extents in memory/graphs. In low-mem mode, skips the eager ``.load()`` so arrays remain lazy.
     """
-    met_ds = era5_obj.open_metdataset()
+    met_ds = era5_obj.open_metdataset(dataset_kwargs={"engine": "h5netcdf"})
     west, south, east, north = bbox
     padded = (
         max(-180.0, west - WEATHER_PADDING),
@@ -231,13 +231,14 @@ def run(
     max_workers: int = 4,
     step_size: float = 10.0,
     min_safe_fl: float = MIN_SAFE_FL,
-    era5_lazy: bool = False,
+    low_mem: bool = False,
     cluster_selection: str = "random",
     clusters_per_flight: int = 1,
     min_distance_km: float = 0.0,
     overwrite: bool = False,
     batch_size: int = 50,
     bbox: list = EUR_BBOX,
+    lake_verbosity: str = "full",
 ) -> None:
     """Run the physics pipeline for a list of calendar days.
 
@@ -269,10 +270,10 @@ def run(
         FL step-down increment in feet for variational mode (default 1000.0).
     min_safe_fl : float
         Minimum FL below which step-down is halted (default 280.0).
-    era5_lazy : bool
-        Skip eager ERA5 ``.load()`` call; arrays stay file-backed until accessed
-        during CoCiP interpolation (default False). Independent of CoCiP
-        ``preprocess_lowmem`` — use ``model_config_id='kerosene_lowmem'`` for that.
+    low_mem : bool
+        Low-memory execution mode (default False). Skips eager ERA5 .load()
+        (arrays stay file-backed until accessed) and runs physics models
+        sequentially with copy_source=False, cutting peak RAM by ~60%.
     clusters_per_flight : int
         Number of cluster trajectories to generate per flight (default 1).
     min_distance_km : float
@@ -284,6 +285,8 @@ def run(
         Max flights per parallel batch.
     bbox : list
         ``[west, south, east, north]`` spatial crop applied to ERA5 data.
+    lake_verbosity : str
+        Storage verbosity for Delta Lake: ``'full'`` (all waypoints) or ``'summary'`` (1-row summary).
     """
     # ── Slot 1: Build corridor cluster mapping from model registry ───── #
     corridors_map = build_corridors_map(
@@ -396,7 +399,7 @@ def run(
 
         # ── Load only missing hours ──────────────────────────────────────── #
         needed = pd.date_range(era5_start, era5_end, freq="h")
-        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, era5_lazy)
+        _populate_hour_cache(needed, hour_cache, weather_cache_dir, bbox, low_mem)
 
         available = [h for h in needed if h in hour_cache]
         if not available:
@@ -404,12 +407,14 @@ def run(
             continue
 
         # ── Concatenate cached hours → full met / rad for this day ────────  #
-        met = MetDataset(xr.concat(
-            [hour_cache[h][0].data for h in available], dim="time"
-        ), copy=False)
-        rad = MetDataset(xr.concat(
-            [hour_cache[h][1].data for h in available], dim="time"
-        ), copy=False)
+        met_xr = xr.concat([hour_cache[h][0].data for h in available], dim="time")
+        rad_xr = xr.concat([hour_cache[h][1].data for h in available], dim="time")
+        if low_mem:
+            met_xr = met_xr.chunk({"time": -1})
+            rad_xr = rad_xr.chunk({"time": -1})
+
+        met = MetDataset(met_xr, copy=False)
+        rad = MetDataset(rad_xr, copy=False)
 
         logger.info(
             "Day %s: %d cohort task(s) → %d active after skip-gate → %d batch(es).",
@@ -429,6 +434,8 @@ def run(
             fuel=fuel,
             step_down_method=step_down_method,
             overwrite=overwrite,
+            lake_verbosity=lake_verbosity,
+            low_mem=low_mem,
         )
 
         day_succeeded = day_failed = 0
@@ -442,7 +449,7 @@ def run(
 
             # Build task lookup for Slot 5 variational step-down once per round (pending is stable during inner loop)
             task_by_fid = {
-                t.to_sim_fid(): t
+                t.sim_fid: t
                 for batch in pending
                 for t in batch
             }

@@ -31,7 +31,7 @@ Selection Pattern
 """
 
 import logging
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from pycontrails import Flight
@@ -60,6 +60,118 @@ def _extract_actual_fl(flight: Flight) -> float:
         max_alt_m = float(np.nanmax(flight["altitude"]))
         return round(max_alt_m / (100 * 0.3048), 1)
     return 0.0
+
+def check_load_ok(
+    pairs: List[Tuple[SimTask, Optional[Flight]]],
+    sim_mode: str = "standard",
+) -> Tuple[List[Tuple[SimTask, Flight]], List[Tuple[SimTask, str]]]:
+    """Validate loaded flight trajectories across universal and mode-specific invariants.
+
+    Parameters
+    ----------
+    pairs : List[Tuple[SimTask, Optional[Flight]]]
+        Raw loaded (task, flight) pairs.
+    sim_mode : str
+        Execution mode ('standard' | 'variational').
+
+    Returns
+    -------
+    ok : List[Tuple[SimTask, Flight]]
+        Validated flight pairs ready for physics evaluation.
+    failed : List[Tuple[SimTask, str]]
+        (task, reason) pairs for rejected flights.
+    """
+    failed: List[Tuple[SimTask, str]] = []
+    valid_structural: List[Tuple[SimTask, Flight]] = []
+
+    # 1. Universal structural validation
+    for task, flight in pairs:
+        if flight is None:
+            failed.append((task, "load_failed"))
+        elif not len(flight):
+            failed.append((task, "empty_trajectory"))
+        elif flight.attrs.get("flight_id") != task.sim_fid:
+            logger.error(
+                "Loader returned flight with mismatched flight_id: expected=%s, got=%s",
+                task.sim_fid,
+                flight.attrs.get("flight_id"),
+            )
+            failed.append((task, "loader_fid_mismatch"))
+        else:
+            valid_structural.append((task, flight))
+
+    if not valid_structural:
+        return [], failed
+
+    # 2. Mode-specific validation (hoisted outside per-flight loop)
+    if sim_mode == "variational":
+        actual_fls = np.array([_extract_actual_fl(fl) for _, fl in valid_structural])
+        target_fls = np.array([t.fl for t, _ in valid_structural])
+        fl_diff = np.abs(actual_fls - target_fls)
+        valid_mask = fl_diff <= 1.5
+
+        ok: List[Tuple[SimTask, Flight]] = []
+        for idx, is_valid in enumerate(valid_mask):
+            task, fl = valid_structural[idx]
+            if is_valid:
+                ok.append((task, fl))
+            else:
+                logger.warning(
+                    "Variational step-down invalid for %s: actual_fl=%.1f != target_fl=%.1f",
+                    task.sim_fid,
+                    actual_fls[idx],
+                    target_fls[idx],
+                )
+                failed.append((task, "step_down_failed"))
+        return ok, failed
+
+    return valid_structural, failed
+
+
+def check_cocip_ok(
+    pairs: List[Tuple[SimTask, Flight]],
+    sim_mode: str = "standard",
+) -> Tuple[List[Tuple[SimTask, Flight]], List[Tuple[SimTask, str]]]:
+    """Validate simulated flights before committing rows to the Delta Lake.
+
+    Parameters
+    ----------
+    pairs : List[Tuple[SimTask, Flight]]
+        Simulated (task, flight) pairs output from CoCiP.
+    sim_mode : str
+        Execution mode ('standard' | 'variational').
+
+    Returns
+    -------
+    ok : List[Tuple[SimTask, Flight]]
+        Validated flight pairs ready for Delta Lake writing.
+    failed : List[Tuple[SimTask, str]]
+        (task, reason) pairs for rejected flights.
+    """
+    ok: List[Tuple[SimTask, Flight]] = []
+    failed: List[Tuple[SimTask, str]] = []
+
+    for task, flight in pairs:
+        if flight is None:
+            failed.append((task, "cocip_eval_failed_none"))
+            continue
+        if not len(flight):
+            failed.append((task, "empty_trajectory"))
+            continue
+        fid = flight.attrs.get("flight_id")
+        if not fid or str(fid).strip() == "" or str(fid).strip().upper() == "UNK":
+            failed.append((task, "invalid_flight_id_unk"))
+            continue
+        if "ef" not in flight.data:
+            failed.append((task, "missing_ef_column"))
+            continue
+        if np.isnan(flight["ef"]).all():
+            failed.append((task, "ef_all_nan"))
+            continue
+
+        ok.append((task, flight))
+
+    return ok, failed
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +207,7 @@ def _classify_results(
 
     for task, flight in batch_output.successful:
         succeeded.append(WorkerResult(
-            sim_fid=task.to_sim_fid(),
+            sim_fid=task.sim_fid,
             ef=_extract_ef(flight),
             fl=task.fl,
             model_config_id=model_config_id,
@@ -105,7 +217,7 @@ def _classify_results(
 
     for task, _reason in batch_output.failed:
         failed.append(WorkerResult(
-            sim_fid=task.to_sim_fid(),
+            sim_fid=task.sim_fid,
             ef=0.0,
             fl=task.fl,
             model_config_id=model_config_id,

@@ -70,7 +70,7 @@ def load(
         - The typecode fails ``is_supported_typecode()`` validation.
     """
     route_key = f"{task.dep}-{task.arr}"
-    sim_fid = task.to_sim_fid()
+    sim_fid = task.sim_fid
 
     # --- Resolve cluster file path ---
     corridor_entry = corridors_map.get((route_key, task.cluster_id))

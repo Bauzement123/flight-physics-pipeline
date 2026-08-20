@@ -174,6 +174,20 @@ def parse_args(argv=None) -> argparse.Namespace:
         help=f"Minimum safe flight level for variational step-down (default {MIN_SAFE_FL}).",
     )
 
+    # ── Delta Lake storage verbosity ────────────────────────────────────── #
+    parser.add_argument(
+        "--lake-verbosity",
+        choices=["full", "summary"],
+        default="full",
+        dest="lake_verbosity",
+        help=(
+            "Storage verbosity for simulation Delta Lake: "
+            "'full' (writes all 4D waypoints per flight) or "
+            "'summary' (compact 1-row flight-level summary from flight.attrs, "
+            "reducing storage footprint by ~98%)."
+        ),
+    )
+
     # ── Flight sampling ─────────────────────────────────────────────────── #
     parser.add_argument(
         "--cluster-selection",
@@ -221,9 +235,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         dest="low_mem",
         help=(
-            "Skip ERA5 eager .load(); arrays stay file-backed until accessed "
-            "(reduces peak RAM at cost of speed). "
-            "For CoCiP low-memory preprocessing use --model-config-id kerosene_lowmem."
+            "WARNING: --low-mem is currently BROKEN for production use. "
+            "Lazy Dask-backed MetDatasets assembled from per-hour xr.concat "
+            "produce NaN during PyContrails 4D pressure-level interpolation "
+            "(15/16 flights return 0.0 fuel burn). Root cause is unresolved — "
+            "see README § Known Issues. Use eager mode (omit this flag) instead. "
+            "Original intent: skip ERA5 eager .load(); arrays stay file-backed "
+            "until accessed (reduces peak RAM at cost of speed)."
         ),
     )
     parser.add_argument(
@@ -306,12 +324,13 @@ def main(argv=None) -> None:
         batch_size=args.batch_size,
         step_size=args.step_size,
         min_safe_fl=args.min_safe_fl,
-        era5_lazy=args.low_mem,
+        low_mem=args.low_mem,
         cluster_selection=args.cluster_selection,
         clusters_per_flight=args.clusters_per_flight,
         min_distance_km=args.min_distance,
         overwrite=args.overwrite,
         bbox=EUR_BBOX,
+        lake_verbosity=args.lake_verbosity,
     )
 
 

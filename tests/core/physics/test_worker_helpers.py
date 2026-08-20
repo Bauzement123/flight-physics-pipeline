@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import numpy as np
 import pytest
 
 from pycontrails import Flight
@@ -45,7 +46,9 @@ def _make_mock_flight(sim_fid: str, typecode: str = "B738") -> MagicMock:
     """Create a minimal mock Flight object for testing."""
     flight = MagicMock(spec=Flight)
     flight.attrs = {"flight_id": sim_fid, "aircraft_type": typecode}
-    flight.data = {}
+    flight.data = {"ef": np.array([100.0, 200.0]), "altitude": np.array([10668.0, 10668.0])}
+    flight.__len__.return_value = 10
+    flight.__getitem__.side_effect = lambda k: flight.data[k]
     return flight
 
 
@@ -57,7 +60,7 @@ def test_load_flights_all_valid():
     corridors_map = {}
 
     loader = MagicMock()
-    loader.side_effect = lambda task, cmap: _make_mock_flight(task.to_sim_fid(), task.typecode)
+    loader.side_effect = lambda task, cmap: _make_mock_flight(task.sim_fid, task.typecode)
 
     loaded_pairs, failed_results = _load_flights(batch, corridors_map, loader)
 
@@ -77,7 +80,7 @@ def test_load_flights_loader_raises():
     def loader_side_effect(task, cmap):
         if task.callsign == "FAIL1":
             raise RuntimeError("Trajectory file corrupted")
-        return _make_mock_flight(task.to_sim_fid(), task.typecode)
+        return _make_mock_flight(task.sim_fid, task.typecode)
 
     loader = MagicMock(side_effect=loader_side_effect)
 
@@ -99,7 +102,7 @@ def test_load_flights_loader_returns_none():
     def loader_side_effect(task, cmap):
         if task.callsign == "NONE1":
             return None
-        return _make_mock_flight(task.to_sim_fid(), task.typecode)
+        return _make_mock_flight(task.sim_fid, task.typecode)
 
     loader = MagicMock(side_effect=loader_side_effect)
 
@@ -114,14 +117,15 @@ def test_load_flights_loader_returns_none():
 def test_eval_psflight_fleet_succeeds():
     """Vectorized PSFlight succeeds — sequential NOT called, returns raw ok_pairs."""
     task1 = _make_task(callsign="FL01")
-    fl1 = _make_mock_flight(task1.to_sim_fid())
+    fl1 = _make_mock_flight(task1.sim_fid)
     pairs = [(task1, fl1)]
 
     ps_model = MagicMock()
-    fl_ps_out = _make_mock_flight(task1.to_sim_fid())  # output flight
+    fl_ps_out = _make_mock_flight(task1.sim_fid)  # output flight
     ps_model.eval.return_value = [fl_ps_out]  # returns list of flights
 
-    ok_pairs, failed_pairs = _eval_psflight(pairs, ps_model, "kerosene")
+    met_mock, rad_mock = MagicMock(), MagicMock()
+    ok_pairs, failed_pairs = _eval_psflight(pairs, ps_model, "kerosene", met_mock, rad_mock, 48)
 
     ps_model.eval.assert_called_once()
     assert len(ok_pairs) == 1
@@ -135,8 +139,8 @@ def test_eval_psflight_fleet_fails_falls_back_to_sequential():
     """Vectorized PSFlight raises — sequential called, failed tasks return (task, str)."""
     task1 = _make_task(callsign="FL01")
     task2 = _make_task(callsign="FL02")
-    fl1 = _make_mock_flight(task1.to_sim_fid())
-    fl2 = _make_mock_flight(task2.to_sim_fid())
+    fl1 = _make_mock_flight(task1.sim_fid)
+    fl2 = _make_mock_flight(task2.sim_fid)
     pairs = [(task1, fl1), (task2, fl2)]
 
     ps_model = MagicMock()
@@ -147,8 +151,9 @@ def test_eval_psflight_fleet_fails_falls_back_to_sequential():
     seq_ps = MagicMock()
     seq_ps.eval.side_effect = lambda fl: fl  # returns flight unchanged
 
-    with patch("src.core.physics.worker.PSFlight", return_value=seq_ps):
-        ok_pairs, failed_pairs = _eval_psflight(pairs, ps_model, "kerosene")
+    with patch("src.core.physics.worker.get_model", return_value=(seq_ps, None)):
+        met_mock, rad_mock = MagicMock(), MagicMock()
+        ok_pairs, failed_pairs = _eval_psflight(pairs, ps_model, "kerosene", met_mock, rad_mock, 48)
 
     assert len(ok_pairs) == 2
     assert len(failed_pairs) == 0
@@ -161,9 +166,9 @@ def test_eval_psflight_sequential_filters_kinematic(mock_log_skipped):
     task1 = _make_task(callsign="FL01")
     task2 = _make_task(callsign="FL02")
     task3 = _make_task(callsign="FL03")
-    fl1 = _make_mock_flight(task1.to_sim_fid())
-    fl2 = _make_mock_flight(task2.to_sim_fid())
-    fl3 = _make_mock_flight(task3.to_sim_fid())
+    fl1 = _make_mock_flight(task1.sim_fid)
+    fl2 = _make_mock_flight(task2.sim_fid)
+    fl3 = _make_mock_flight(task3.sim_fid)
     pairs = [(task1, fl1), (task2, fl2), (task3, fl3)]
 
     def ps_eval(fl):
@@ -190,8 +195,8 @@ def test_eval_cocip_fleet_fails_falls_back_to_sequential():
     """CoCiP Fleet fails — falls back to sequential, returns (task, str) for failures."""
     task1 = _make_task(callsign="FL01")
     task2 = _make_task(callsign="FL02")
-    fl1 = _make_mock_flight(task1.to_sim_fid())
-    fl2 = _make_mock_flight(task2.to_sim_fid())
+    fl1 = _make_mock_flight(task1.sim_fid)
+    fl2 = _make_mock_flight(task2.sim_fid)
     pairs = [(task1, fl1), (task2, fl2)]
 
     cocip_model = MagicMock()
@@ -204,8 +209,9 @@ def test_eval_cocip_fleet_fails_falls_back_to_sequential():
     seq_cocip = MagicMock()
     seq_cocip.eval.side_effect = lambda source: _make_mock_flight(source.attrs["flight_id"])
 
-    with patch("src.core.physics.worker.Cocip", return_value=seq_cocip):
-        ok_pairs, failed_pairs = _eval_cocip(pairs, cocip_model, "kerosene")
+    with patch("src.core.physics.worker.get_model", return_value=(None, seq_cocip)):
+        met_mock, rad_mock = MagicMock(), MagicMock()
+        ok_pairs, failed_pairs = _eval_cocip(pairs, cocip_model, "kerosene", met_mock, rad_mock, 48)
 
     assert len(ok_pairs) == 2
     assert len(failed_pairs) == 0
@@ -226,7 +232,7 @@ def test_run_batch_returns_batch_output_type():
          patch("src.core.physics.worker._write_to_lake") as mock_write:
 
         mock_get_model.return_value = (MagicMock(), MagicMock())
-        fl = _make_mock_flight(task.to_sim_fid())
+        fl = _make_mock_flight(task.sim_fid)
         mock_load.return_value = ([(task, fl)], [])
         mock_ps.return_value = ([(task, fl)], [])
         mock_cocip.return_value = ([(task, fl)], [])

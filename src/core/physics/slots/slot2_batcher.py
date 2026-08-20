@@ -139,10 +139,10 @@ def filter_and_batch(
     if overwrite:
         # Delete the exact SIM_FIDs we are about to re-simulate so the lake
         # stays deduplicated. Daily-loop boundary keeps the list small.
-        fids_to_delete = [t.to_sim_fid() for t in tasks]
+        fids_to_delete = [t.sim_fid for t in tasks]
         delete_sim_lake_rows(lake_path, fids_to_delete)
 
-    unsimulated_tasks = [t for t in tasks if t.to_sim_fid() not in existing_fids]
+    unsimulated_tasks = [t for t in tasks if t.sim_fid not in existing_fids]
     skipped = len(tasks) - len(unsimulated_tasks)
 
     batches = partition_tasks(unsimulated_tasks, max_batch_size=max_batch_size)
@@ -219,7 +219,7 @@ def _filter_and_expand_variational(
         # so the variational step-down restarts clean from the nominal FL.
         df_existing = read_sim_lake_metadata(lake_path, tasks, columns=["SIM_FID"])
         if not df_existing.empty:
-            cluster_fids = frozenset(t.to_sim_fid().rsplit("_", 1)[0] for t in tasks)
+            cluster_fids = frozenset(t.sim_fid.rsplit("_", 1)[0] for t in tasks)
             to_delete = df_existing[
                 df_existing["SIM_FID"].str.rsplit("_", 1).str[0].isin(cluster_fids)
             ]["SIM_FID"].tolist()
@@ -231,7 +231,7 @@ def _filter_and_expand_variational(
         lake_results = read_ef_by_base_key(lake_path, tasks)
 
         for task in tasks:
-            cluster_fid = task.to_sim_fid().rsplit("_", 1)[0]
+            cluster_fid = task.sim_fid.rsplit("_", 1)[0]
             prior = lake_results.get(cluster_fid)  # list[(fl, ef_total)] or None
 
             if prior is None:

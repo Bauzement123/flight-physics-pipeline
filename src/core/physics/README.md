@@ -117,9 +117,9 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │
 └── 9. Trajectory Persistence & Post-Day Lake Optimization
     ├── worker._write_to_lake()
-    │   ├── Input: List[Tuple[SimTask, Flight]], model_config_id, fuel, lake_path, overwrite.
+    │   ├── Input: List[Tuple[SimTask, Flight]], model_config_id, fuel, lake_path, overwrite, lake_verbosity.
     │   ├── Output: Delta Lake storage update.
-    │   └── Safety/Fallback: Serializes 14 fixed metadata columns + 68 dynamic physics columns; guarded by thread lock (_LAKE_WRITE_LOCK); delegates to io_utils.append_sim_lake().
+    │   └── Safety/Fallback: Combined write engine — injects 14 fixed metadata attrs into flight.attrs; constructs target_fl (1-waypoint [:1] slice in summary mode, full flight in full mode); calls promote_attrs_to_data() (src.common.adapters) to broadcast all scalar attrs into flight.data; executes unified to_dataframe() conversion; clears df.attrs = {} to prevent pyarrow JSON serialization errors; acquires thread lock (_LAKE_WRITE_LOCK); delegates to io_utils.append_sim_lake().
     └── orchestrator post-day cleanup
         └── io_utils.vacuum_sim_lake() & io_utils.optimize_sim_lake()
             └── Multi-dimensional Z-ordering on ['dep_date', 'route', 'EF_total'] after daily runs.
@@ -238,7 +238,7 @@ flowchart TD
 2. **Phase 1 — Trajectory Loading (`_load_flights`)**: For each task, calls `cluster_loader.load()`. Invalid/missing → appended to `failed_pairs` as `(task, 'load_failed')`. Valid → `loaded_pairs`.
 3. **Phase 2 — PSFlight (`_eval_psflight`)**: Attempts vectorized Fleet PSFlight eval on all loaded flights. On any exception, falls back flight-by-flight via `_eval_psflight_sequential()`. Sequential model instance (`PSFlight(met=ps_model.met, params={...copy_source: False})`) is created lazily **only inside the `except` branch**. PSFlight kinematic rejections (`RuntimeError`) → `failed_pairs`. Survivors → `psflight_ok_pairs`.
 4. **Phase 3 — CoCiP (`_eval_cocip`)**: Takes `psflight_ok_pairs`. Attempts vectorized Fleet CoCiP eval. On success: `del fl_ps; gc.collect()` immediately to release PSFlight memory. On exception: falls back per-flight via `_eval_cocip_sequential()`. Sequential Cocip instance (`Cocip(met=..., rad=..., params={...})`) created lazily **only inside the `except` branch**. CoCiP failures → `failed_pairs`. Survivors → `cocip_ok_pairs`.
-5. **Delta Lake Write**: `_write_to_lake(cocip_ok_pairs)` serializes trajectory DataFrames, injects 14 fixed metadata columns, acquires `_LAKE_WRITE_LOCK`, calls `io_utils.append_sim_lake()`. Only successful pairs are written.
+5. **Delta Lake Write**: `_write_to_lake` injects 14 fixed metadata attributes into `flight.attrs`, constructs `target_fl` (1-waypoint `[:1]` slice in `summary` mode, full flight in `full` mode), calls `promote_attrs_to_data()` to broadcast all scalar attrs (including variable CoCiP outputs) into `flight.data`, then calls `to_dataframe()` as a single unified conversion path for both modes. `df.attrs = {}` is cleared to prevent pyarrow JSON serialization errors before appending via `io_utils.append_sim_lake()` under `_LAKE_WRITE_LOCK`. Only successful pairs are written.
 6. **Return**: `BatchOutput(successful=cocip_ok_pairs, failed=failed_pairs)`. No `WorkerResult` constructed here. Slot 5 owns all verdict construction.
 
 ---
@@ -264,6 +264,23 @@ The `ps_cocip.py` model factory maps `--model-config-id` to specific physical mo
 |---|---|---|---|
 | `kerosene` (default) | `PSFlight` | `Cocip` | Standard Jet-A fuel params; standard CoCiP met interpolation. |
 | `kerosene_lowmem` | `PSFlight` | `Cocip` | Standard Jet-A fuel params; sets `preprocess_lowmem=True` on `Cocip` to chunk pressure-level interpolation and prevent RAM spikes. |
+
+### 4.5 Delta Lake Storage Verbosity (`--lake-verbosity`)
+
+The simulation pipeline supports two Delta Lake write verbosity levels:
+
+| `lake_verbosity` | Rows per Flight | Stored Content | Storage Footprint | Primary Use Case |
+|---|---|---|---|---|
+| `full` (default) | ~104 waypoints | All 4D waypoints across ~82 physics & performance columns. | 100% (~11 to 38 GiB for 52M rows) | Deep per-waypoint trajectory analysis, spatial plotting, altitude profile inspection. |
+| `summary` | 1 summary row | 1-row flight-level summary with row-0 physics and all broadcast scalar attrs (`time=firstseen`, `waypoint=0`). | **~1.4% (~98.6% reduction)** | Large-scale production campaigns, campaign sweeps, aggregate contrail climatology, skip-gate metadata checks. |
+
+* **Full Compatibility**: `summary` mode is 100% backward and forward compatible with Slot 2 skip-gates (`read_sim_lake_metadata`, `read_existing_sim_fids`, `read_ef_by_base_key`), Delta Lake MERGE transactions, and downstream evaluators.
+
+> [!NOTE]
+> **Attr Retention & Combined Write Engine**:
+> - **Full Attribute Retention**: In both modes, `promote_attrs_to_data()` (`src.common.adapters`) broadcasts all scalar `flight.attrs` — including the 14 fixed metadata fields, variable CoCiP physics outputs, and any model-specific or SAF/hydrogen attrs set during simulation — into `flight.data` before `to_dataframe()`. Non-scalar attrs (arrays, dicts, `None`) are safely skipped.
+> - **Row-0 Physics Preservation**: In `summary` mode, `target_fl` uses a `[:1]` slice of `flight.data`, retaining actual waypoint physics from row 0 (not a synthetic empty row). This natively satisfies the skip-gate `waypoint == 0` filter.
+> - **Unified Conversion**: Both modes execute identical `target_fl.to_dataframe()` → `df.attrs = {}` → `append_sim_lake()` path. The IO layer (`io_utils.py`) and skip-gate logic are completely unchanged.
 
 ---
 
@@ -357,6 +374,7 @@ python -m src.core.physics.cli `
 | `--min-distance` | `float` | `0.0` | Pre-filter minimum route distance in kilometers; shorter routes are skipped. |
 | `--max-workers` | `int` | `4` | Number of concurrent worker threads in `ThreadPoolExecutor`. |
 | `--batch-size` | `int` | `50` | Maximum number of flight tasks per parallel execution batch. |
+| `--lake-verbosity` | `str` | `'full'` | Delta Lake storage verbosity: `'full'` (writes all 4D waypoints per flight) or `'summary'` (compact 1-row summary from `flight.attrs`, reducing storage by ~98%). |
 | `--low-mem` | `flag` | `False` | Skips eager ERA5 .load(); xarray arrays remain file-backed until accessed during CoCiP interpolation. Does NOT affect CoCiP preprocessing — use --model-config-id kerosene_lowmem for that. |
 | `--overwrite` | `flag` | `False` | Bypass Delta Lake skip-gate and delete-then-append fresh results. |
 | `--test-mode` | `flag` | `False` | Restricts run to single day (`2025-01-01`) and single cluster per flight. |
@@ -381,6 +399,8 @@ python -m src.core.physics.cli `
 - **`pandas` / `numpy`**: Vectorized numerical data manipulation.
 
 ### Pipeline Config & Registries Referenced
+- **`src.common.adapters`**:
+  - `promote_attrs_to_data()`: In-place broadcast of all scalar `flight.attrs` (`str`, `int`, `float`, `bool`, `np.integer`, `np.floating`, `pd.Timestamp`) into `flight.data` before `to_dataframe()`. Ensures full retention of simulation metadata and variable CoCiP/model-specific physics attributes as DataFrame columns for both `full` and `summary` verbosity modes.
 - **`src.common.config`**:
   - `BASE_DIR`
   - `WEATHER_DIR` (`data/weather`)
@@ -393,3 +413,35 @@ python -m src.core.physics.cli `
   - `DELTA_LAKE_TARGET_FILE_SIZE_BYTES` (`536,870,912` = 512 MB)
   - `is_supported_typecode()` / `UNSUPPORTED_TYPECODE_FLAG`
 - **Logging Destination**: Written to `data/logs/simulation.log` via `setup_file_logger("simulation.log")`. Skipped or unsupported airframes are appended to `data/logs/skipped_aircraft.log`.
+
+---
+
+## 7. Known Issues
+
+### 7.1 `--low-mem` Lazy ERA5 Interpolation Failure (Unresolved)
+
+**Status**: ⛔ **BROKEN — Do not use `--low-mem` in production.** Use eager mode (omit the flag).
+
+**Symptom**: When `--low-mem` is enabled, 15/16 flights return `0.0` total fuel burn. The root cause is that `air_temperature` (and other pressure-level variables) return `NaN` for all cruise-altitude waypoints during PyContrails' 4D interpolation (`lon`, `lat`, `level`, `time`). Surface-level interpolation works correctly. One flight non-deterministically succeeds per run.
+
+**Architecture context**: The packetized ERA5 loading refactor (`e52bd14`) changed weather loading from a single `ERA5(time=(start, end), paths=[...])` object (one unified `xr.open_mfdataset` Dask graph) to N independent per-hour `ERA5(time=(h, h), paths=[single_file])` objects. These N independent Dask graphs are stitched together via `xr.concat(..., dim="time")` and rechunked with `.chunk({"time": -1})`. In eager mode (`.load()` called), the concat produces a NumPy array and interpolation works perfectly. In lazy mode, the concatenated Dask graph produces `NaN` during pressure-level interpolation despite the rechunk.
+
+**Hypotheses tested and eliminated**:
+
+| # | Hypothesis | Test Applied | Result |
+|---|---|---|---|
+| 1 | Dask `ThreadPoolExecutor` race on `netCDF4` C-library | `dask.config.set(scheduler="synchronous")` in `worker.py` | ❌ Still fails |
+| 2 | `netCDF4` engine thread-unsafety | Swapped to `h5netcdf` engine | ❌ Still fails |
+| 3 | `xr.concat` chunk boundaries not fused | `.chunk({"time": -1})` already present | ❌ Still fails |
+| 4 | `MetDataset(copy=False)` skipping internal setup | Tested with `copy=True` (default) for lazy path | ❌ Still fails |
+| 5 | `copy_source=False` mutating PSFlight model state | Tested with `copy_source=True` | ❌ Still fails |
+
+**Remaining fix options (untested)**:
+
+1. **`xr.open_mfdataset` direct assembly**: Instead of `xr.concat` of per-hour MetDatasets, call `xr.open_mfdataset(all_hour_paths, chunks={"time": -1})` directly on the NC files for each day's window. This should produce one unified Dask graph identical to the pre-refactor approach, but with O(log N) tree-merge depth instead of O(N × preprocessing_depth). Requires replicating ERA5's lightweight post-processing (variable rename + level selection + spatial downselect) outside of the ERA5 class.
+
+2. **Per-flight eager slice**: In `_eval_psflight_sequential`, compute only the 3–4 hour weather slice needed for each individual flight before calling `eval()`. Keeps RAM low (~300 MB per flight) but requires passing the full lazy MetDataset into the sequential evaluator and slicing + computing per iteration.
+
+3. **Force `.compute()` after concat**: Call `met_xr.compute()` / `rad_xr.compute()` in the low-mem assembly path. Effectively makes low-mem identical to eager for simulation but preserves lazy hour-cache eviction benefits for multi-day runs. Defeats the original RAM-reduction goal during simulation.
+
+**Diagnostic artifacts**: Trace reports and telemetry from investigation sessions are archived in `data/traces/parity_test_lowmem/`.

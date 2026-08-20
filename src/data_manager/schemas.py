@@ -116,17 +116,21 @@ class SimTask:
     typecode: str      # ICAO aircraft type designator — required by PSFlight
     cluster_id: int
     fl: float          # target flight level in feet
+    sim_fid: str = field(init=False)
 
-    def to_sim_fid(self) -> str:
-        """Construct the canonical SIM_FID string from task components."""
+    def __post_init__(self):
         import re
         fs_dt = pd.Timestamp(self.firstseen, unit="s", tz="UTC")
         fs_str = fs_dt.strftime("%Y%m%d_%H%M")
         clean_cs = re.sub(r"[^A-Z0-9]", "", (self.callsign or "").upper())
-        return (
+        self.sim_fid = (
             f"{self.icao24}_{clean_cs}_{self.dep}-{self.arr}"
             f"_{fs_str}_{self.cluster_id}_{int(self.fl)}"
         )
+
+    def to_sim_fid(self) -> str:
+        """Deprecated: Use .sim_fid attribute directly."""
+        return self.sim_fid
 
 
 @dataclass
