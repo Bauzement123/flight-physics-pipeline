@@ -39,10 +39,12 @@ def aggregate_route_classes(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or 'route_class' not in df.columns:
         return pd.DataFrame()
 
+    route_col = 'route_id' if 'route_id' in df.columns else 'route'
+
     # Group by route_class and aggregate unique corridors and total paths
     # Reindex to ensure all 4 classes (1, 2, 3, 4) are represented, filling missing with 0
     df_dist = df.groupby('route_class').agg(
-        unique_routes=('route', 'nunique'),
+        unique_routes=(route_col, 'nunique'),
         total_paths=('file_path', 'count')
     ).reindex([1, 2, 3, 4], fill_value=0).reset_index()
 
@@ -183,7 +185,8 @@ def main():
         logger.error("Registry is empty or failed to load. Program aborted.")
         sys.exit(1)
 
-    total_unique_routes = df['route'].nunique()
+    route_col = 'route_id' if 'route_id' in df.columns else 'route'
+    total_unique_routes = df[route_col].nunique()
     total_generated_paths = len(df)
 
     # Aggregate

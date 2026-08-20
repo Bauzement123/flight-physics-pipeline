@@ -472,8 +472,8 @@ def run(
                 pending = []
 
         # ── Post-day cleanup ─────────────────────────────────────────────── #
-        vacuum_sim_lake(lake_path)
         optimize_sim_lake(lake_path, z_order_cols=["dep_date", "route", "EF_total"])
+        vacuum_sim_lake(lake_path, retention_hours=0)
         del met, rad
         gc.collect()
 

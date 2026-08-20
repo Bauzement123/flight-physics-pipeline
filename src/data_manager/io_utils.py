@@ -702,7 +702,7 @@ def read_existing_sim_fids(
 
 def vacuum_sim_lake(
     lake_path: Path,
-    retention_hours: int = 168,
+    retention_hours: int = 0,
 ) -> None:
     """Run Delta Lake VACUUM to remove orphaned data files beyond the retention window."""
     path_str = str(lake_path)

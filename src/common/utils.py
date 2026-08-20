@@ -55,14 +55,16 @@ def log_skipped_aircraft(
     due to a NaN, missing, or non-target family typecode.
     Conforms to the global audit log format: id \t typecode \t reason.
     """
-    skipped_log = LOGS_DIR / "skipped_aircraft.log"
-    tc_str = str(typecode) if pd.notna(typecode) and typecode is not None and str(typecode).strip() != "" else UNSUPPORTED_TYPECODE_FLAG
+    skipped_log = Path(LOGS_DIR) / "skipped_aircraft.log"
+    tc_str = str(typecode).strip() if pd.notna(typecode) and typecode is not None and str(typecode).strip() != "" else UNSUPPORTED_TYPECODE_FLAG
+    clean_id = str(flight_or_icao_id).replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
+    clean_reason = str(reason).replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     try:
         skipped_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(skipped_log, "a", encoding="utf-8") as f:
-            f.write(f"{flight_or_icao_id}\t{tc_str}\t{reason}\n")
+        with open(skipped_log, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"{clean_id}\t{tc_str}\t{clean_reason}\n")
     except Exception as e:
-        logger.error(f"Failed to append to skipped_aircraft.log for {flight_or_icao_id}: {e}")
+        logger.error(f"Failed to append to skipped_aircraft.log for {clean_id}: {e}")
 
 
 def load_route_summary(summary_path: str | Path | None = None) -> pd.DataFrame:
