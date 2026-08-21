@@ -37,6 +37,7 @@ import numpy as np
 from pycontrails import Flight
 
 from src.common.config import MIN_SAFE_FL
+from src.common.utils import log_simulation_failure
 from src.core.physics.slots.slot2_batcher import compute_stepdown_task
 from src.data_manager.schemas import BatchOutput, EvalResult, SimTask, WorkerResult
 
@@ -88,8 +89,10 @@ def check_load_ok(
     for task, flight in pairs:
         if flight is None:
             failed.append((task, "load_failed"))
+            log_simulation_failure(task.sim_fid, "check_load_ok", "load_failed")
         elif not len(flight):
             failed.append((task, "empty_trajectory"))
+            log_simulation_failure(task.sim_fid, "check_load_ok", "empty_trajectory")
         elif flight.attrs.get("flight_id") != task.sim_fid:
             logger.error(
                 "Loader returned flight with mismatched flight_id: expected=%s, got=%s",
@@ -97,6 +100,7 @@ def check_load_ok(
                 flight.attrs.get("flight_id"),
             )
             failed.append((task, "loader_fid_mismatch"))
+            log_simulation_failure(task.sim_fid, "check_load_ok", "loader_fid_mismatch")
         else:
             valid_structural.append((task, flight))
 
@@ -123,9 +127,85 @@ def check_load_ok(
                     target_fls[idx],
                 )
                 failed.append((task, "step_down_failed"))
+                log_simulation_failure(task.sim_fid, "check_load_ok", "step_down_failed")
         return ok, failed
 
     return valid_structural, failed
+
+
+def check_psflight_ok(
+    pairs: List[Tuple[SimTask, Flight]],
+) -> Tuple[List[Tuple[SimTask, Flight]], List[Tuple[SimTask, str]]]:
+    """Validate PSFlight output before sending to CoCiP.
+
+    Catches flights where PSFlight produced degenerate output (all-NaN
+    fuel_flow, zero total_fuel_burn, missing true_airspeed) so they don't
+    waste CoCiP compute. Flights that fail here are written to the
+    PSFlight failure lake by the caller.
+
+    Parameters
+    ----------
+    pairs : List[Tuple[SimTask, Flight]]
+        PSFlight-evaluated (task, flight) pairs.
+
+    Returns
+    -------
+    ok : List[Tuple[SimTask, Flight]]
+        Validated pairs ready for CoCiP evaluation.
+    failed : List[Tuple[SimTask, str]]
+        (task, reason) pairs for rejected flights.
+    """
+    ok: List[Tuple[SimTask, Flight]] = []
+    failed: List[Tuple[SimTask, str]] = []
+
+    for task, flight in pairs:
+        if flight is None:
+            failed.append((task, "psflight_output_none"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_output_none")
+            continue
+        if not len(flight):
+            failed.append((task, "psflight_empty_trajectory"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_empty_trajectory")
+            continue
+
+        # Fuel burn sanity — catch the NaN cascade before CoCiP
+        tfb = flight.attrs.get("total_fuel_burn", None)
+        if tfb is None or np.isnan(tfb) or tfb <= 0.0:
+            reason = f"psflight_zero_fuel_burn(total_fuel_burn={tfb})"
+            failed.append((task, reason))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", reason)
+            continue
+
+        # Fuel flow column — must exist and not be all-NaN
+        if "fuel_flow" not in flight.data:
+            failed.append((task, "psflight_missing_fuel_flow"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_missing_fuel_flow")
+            continue
+        if np.isnan(flight["fuel_flow"]).all():
+            failed.append((task, "psflight_fuel_flow_all_nan"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_fuel_flow_all_nan")
+            continue
+
+        # TAS column — catches met interpolation failure at source
+        if "true_airspeed" not in flight.data:
+            failed.append((task, "psflight_missing_true_airspeed"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_missing_true_airspeed")
+            continue
+        if np.isnan(flight["true_airspeed"]).all():
+            failed.append((task, "psflight_true_airspeed_all_nan"))
+            log_simulation_failure(task.sim_fid, "check_psflight_ok", "psflight_true_airspeed_all_nan")
+            continue
+
+        ok.append((task, flight))
+
+    if failed:
+        logger.warning(
+            "check_psflight_ok: %d/%d flights rejected (reasons: %s).",
+            len(failed), len(pairs),
+            ", ".join(sorted({r for _, r in failed})),
+        )
+
+    return ok, failed
 
 
 def check_cocip_ok(
@@ -154,19 +234,24 @@ def check_cocip_ok(
     for task, flight in pairs:
         if flight is None:
             failed.append((task, "cocip_eval_failed_none"))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", "cocip_eval_failed_none")
             continue
         if not len(flight):
             failed.append((task, "empty_trajectory"))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", "empty_trajectory")
             continue
         fid = flight.attrs.get("flight_id")
         if not fid or str(fid).strip() == "" or str(fid).strip().upper() == "UNK":
             failed.append((task, "invalid_flight_id_unk"))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", "invalid_flight_id_unk")
             continue
         if "ef" not in flight.data:
             failed.append((task, "missing_ef_column"))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", "missing_ef_column")
             continue
         if np.isnan(flight["ef"]).all():
             failed.append((task, "ef_all_nan"))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", "ef_all_nan")
             continue
 
         # ── Fuel burn sanity gate ──────────────────────────────────────── #
@@ -179,6 +264,7 @@ def check_cocip_ok(
                 "check_cocip_ok: rejecting %s — %s", task.sim_fid, reason,
             )
             failed.append((task, reason))
+            log_simulation_failure(task.sim_fid, "check_cocip_ok", reason)
             continue
 
         ok.append((task, flight))

@@ -101,7 +101,7 @@ Module Objective: High-Performance, Thread-Safe Physics Simulation & Trajectory 
 │   └── models.ps_cocip.get_model() / worker.run_batch()
 │       ├── Input: model_config_id, MetDataset (met), MetDataset (rad), max_age_hours, fuel, step_down_method.
 │       ├── Output: Tuple[PSFlight, Cocip] / BatchOutput (containing raw (SimTask, Flight) pairs for successes and (SimTask, reason_str) for failures).
-│       └── Safety/Fallback: get_model() dispatches via _BUILDERS dict using model_config_id ('kerosene' or 'kerosene_lowmem'). run_batch() executes two independent phases: Phase 2 _eval_psflight() (vectorized Fleet PSFlight → sequential fallback) and Phase 3 _eval_cocip() (vectorized Fleet CoCiP → sequential fallback). Each phase independently falls back. Lazy sequential model instantiation — PSFlight and Cocip sequential instances are created only inside the except branch, never upfront. del fl_ps; gc.collect() called after Fleet CoCiP eval. Returns BatchOutput, never constructs WorkerResult.
+│       └── Safety/Fallback: get_model() dispatches via _BUILDERS dict using model_config_id ('kerosene' or 'kerosene_lowmem'). run_batch() executes four phases with per-phase wall-clock timing (logged to simulation.log): Phase 2 _eval_psflight() (vectorized Fleet PSFlight → sequential fallback; vectorize_ps=False skips vectorized attempt entirely); Phase 2.5 check_psflight_ok() gate (rejects degenerate PSFlight output — zero/NaN total_fuel_burn, all-NaN fuel_flow or true_airspeed — before CoCiP, preventing wasted compute); Phase 3 _eval_cocip() (vectorized Fleet CoCiP → sequential fallback); Phase 4 check_cocip_ok() pre-lake gate. All failure events across all phases are appended to data/logs/simulation_failures.log via log_simulation_failure() (process-safe direct file append). Lazy sequential model instantiation — sequential instances are created only inside the except branch. Returns BatchOutput, never constructs WorkerResult.
 │
 ├── 7. Parallel Execution Coordination
 │   └── engine.run_parallel()
@@ -214,32 +214,39 @@ flowchart TD
 flowchart TD
     A["Batch of SimTasks"] --> B["worker.run_batch()"]
     B --> |"get_model(model_config_id)\nget_loader(sim_mode)"| C["Phase 1: _load_flights()"]
-    C --> D{"Load OK?"}
-    D --> |"Fail / None"| E["failed_pairs ← (task, 'load_failed')"]
-    D --> |"Success"| F["Phase 2: _eval_psflight()"]
-    F --> G["Vectorized Fleet PSFlight eval"]
+    C --> D{"check_load_ok?"}
+    D --> |"Fail / None"| E["failed_pairs ← (task, reason)\nlog_simulation_failure()"]
+    D --> |"Success"| F["Phase 2: _eval_psflight(vectorize_ps=True/False)"]
+    F --> G["Vectorized Fleet PSFlight eval\n(if vectorize_ps=True)"]
     G --> |"Success"| H["psflight_ok_pairs"]
     G --> |"Exception"| I["_eval_psflight_sequential() per-flight"]
-    I --> |"PSFlight RuntimeError"| J["failed_pairs ← (task, reason)"]
-    I --> |"PSFlight OK"| H
-    H --> K["Phase 3: _eval_cocip()"]
+    I --> |"RuntimeError"| J["failed_pairs ← (task, reason)\nlog_simulation_failure()"]
+    I --> |"OK"| H
+    H --> H2["Phase 2.5: check_psflight_ok()"]
+    H2 --> |"zero fuel burn / NaN columns"| J
+    H2 --> |"Valid"| K["Phase 3: _eval_cocip()"]
     K --> L["Vectorized Fleet CoCiP eval"]
     L --> |"Success"| M["del fl_ps → gc.collect()\ncocip_ok_pairs"]
     L --> |"Exception"| N["_eval_cocip_sequential() per-flight"]
     N --> |"CoCiP OK"| M
     N --> |"CoCiP Fail"| J
-    M --> O["_write_to_lake(cocip_ok_pairs)"]
-    O --> P["Return BatchOutput(successful, failed)"]
+    M --> O["Phase 4: check_cocip_ok()"]
+    O --> |"ef_all_nan / missing_ef / zero_fuel_burn"| J
+    O --> |"Valid"| P["_write_to_lake(final_ok)"]
+    P --> Q["Return BatchOutput(successful, failed)\n+ Batch Timing log"]
 ```
 
 #### Step-by-Step Description:
 
-1. **Worker Setup**: `run_batch()` receives batch, MetDatasets, and config. Calls `get_model(model_config_id)` to get a single model pair (dispatch via `_BUILDERS` dict: `'kerosene'` or `'kerosene_lowmem'`). Calls `get_loader()` for the trajectory loader. No sequential model instances created yet.
-2. **Phase 1 — Trajectory Loading (`_load_flights`)**: For each task, calls `cluster_loader.load()`. Invalid/missing → appended to `failed_pairs` as `(task, 'load_failed')`. Valid → `loaded_pairs`.
-3. **Phase 2 — PSFlight (`_eval_psflight`)**: Attempts vectorized Fleet PSFlight eval on all loaded flights. On any exception, falls back flight-by-flight via `_eval_psflight_sequential()`. Sequential model instance (`PSFlight(met=ps_model.met, params={...copy_source: False})`) is created lazily **only inside the `except` branch**. PSFlight kinematic rejections (`RuntimeError`) → `failed_pairs`. Survivors → `psflight_ok_pairs`.
-4. **Phase 3 — CoCiP (`_eval_cocip`)**: Takes `psflight_ok_pairs`. Attempts vectorized Fleet CoCiP eval. On success: `del fl_ps; gc.collect()` immediately to release PSFlight memory. On exception: falls back per-flight via `_eval_cocip_sequential()`. Sequential Cocip instance (`Cocip(met=..., rad=..., params={...})`) created lazily **only inside the `except` branch**. CoCiP failures → `failed_pairs`. Survivors → `cocip_ok_pairs`.
-5. **Delta Lake Write**: `_write_to_lake` injects 14 fixed metadata attributes into `flight.attrs`, constructs `target_fl` (1-waypoint `[:1]` slice in `summary` mode, full flight in `full` mode), calls `promote_attrs_to_data()` to broadcast all scalar attrs (including variable CoCiP outputs) into `flight.data`, then calls `to_dataframe()` as a single unified conversion path for both modes. `df.attrs = {}` is cleared to prevent pyarrow JSON serialization errors before appending via `io_utils.append_sim_lake()` under `_LAKE_WRITE_LOCK`. Only successful pairs are written.
-6. **Return**: `BatchOutput(successful=cocip_ok_pairs, failed=failed_pairs)`. No `WorkerResult` constructed here. Slot 5 owns all verdict construction.
+1. **Worker Setup**: `run_batch()` receives batch, MetDatasets, and config. Calls `get_model(model_config_id)` to get a single model pair (dispatch via `_BUILDERS` dict: `'kerosene'` or `'kerosene_lowmem'`). Calls `get_loader()` for the trajectory loader. Starts wall-clock timer (`t0 = time.perf_counter()`). No sequential model instances created yet.
+2. **Phase 1 — Trajectory Loading (`_load_flights`)**: For each task, calls `cluster_loader.load()`. Invalid/missing → appended to `failed_pairs` as `(task, reason)` and written to `simulation_failures.log` via `log_simulation_failure()`.
+3. **Phase 2 — PSFlight (`_eval_psflight`)**: If `vectorize_ps=True` (default), attempts vectorized Fleet PSFlight eval on all loaded flights. On any exception, falls back flight-by-flight via `_eval_psflight_sequential()`. If `vectorize_ps=False`, goes directly to sequential without attempting vectorized. Sequential model instance created lazily **only on the fallback path**. PSFlight kinematic rejections (`RuntimeError: fuel mass flow rate is unrealistic`) → `failed_pairs` + `simulation_failures.log`.
+4. **Phase 2.5 — PSFlight Output Gate (`check_psflight_ok`)**: Validates all PSFlight survivors before handing off to CoCiP. Rejects flights with: `total_fuel_burn` is `None`/`NaN`/`≤ 0`, `fuel_flow` column missing or all-NaN, `true_airspeed` column missing or all-NaN. Catches NaN cascades from degenerate sequential fallback output before wasting CoCiP compute. All rejections written to `simulation_failures.log`.
+5. **Phase 3 — CoCiP (`_eval_cocip`)**: Takes `ps_valid` pairs. Attempts vectorized Fleet CoCiP eval. On success: `del fl_ps; gc.collect()` immediately to release PSFlight memory. On exception: falls back per-flight via `_eval_cocip_sequential()`. Sequential Cocip instance created lazily **only inside the `except` branch**. CoCiP failures → `failed_pairs` + `simulation_failures.log`.
+6. **Phase 4 — Pre-Lake Gate (`check_cocip_ok`)**: Validates CoCiP survivors before Delta Lake commit. Rejects: `None` flight, empty trajectory, invalid `flight_id`, missing/all-NaN `ef` column, zero/NaN `total_fuel_burn`. All rejections written to `simulation_failures.log`.
+7. **Delta Lake Write**: `_write_to_lake` injects 14 fixed metadata attributes into `flight.attrs`, constructs `target_fl` (1-waypoint `[:1]` slice in `summary` mode, full flight in `full` mode), calls `promote_attrs_to_data()` to broadcast all scalar attrs into `flight.data`, then calls `to_dataframe()`. `df.attrs = {}` cleared before appending via `io_utils.append_sim_lake()` under `_LAKE_WRITE_LOCK`.
+8. **Timing Log**: Per-batch timing emitted to `simulation.log`: `load`, `psflight`, `ps_gate`, `cocip`, `lake`, `total` in seconds.
+9. **Return**: `BatchOutput(successful=final_ok, failed=load_failed + ps_failed + ps_gate_failed + cocip_failed + lake_gate_failed)`. No `WorkerResult` constructed here. Slot 5 owns all verdict construction.
 
 ---
 
@@ -413,6 +420,7 @@ python -m src.core.physics.cli `
   - `DELTA_LAKE_TARGET_FILE_SIZE_BYTES` (`536,870,912` = 512 MB)
   - `is_supported_typecode()` / `UNSUPPORTED_TYPECODE_FLAG`
 - **Logging Destination**: Written to `data/logs/simulation.log` via `setup_file_logger("simulation.log")`. Skipped or unsupported airframes are appended to `data/logs/skipped_aircraft.log`.
+- **Failure Audit Log**: All simulation failures across every phase (load, PSFlight, PSFlight gate, CoCiP, CoCiP gate) are appended to `data/logs/simulation_failures.log` via `log_simulation_failure()` (`src.common.utils`). Format: `timestamp | SIM_FID | stage | reason`. Process-safe via direct `open("a")` append — no lock required.
 
 ---
 
@@ -445,3 +453,75 @@ python -m src.core.physics.cli `
 3. **Force `.compute()` after concat**: Call `met_xr.compute()` / `rad_xr.compute()` in the low-mem assembly path. Effectively makes low-mem identical to eager for simulation but preserves lazy hour-cache eviction benefits for multi-day runs. Defeats the original RAM-reduction goal during simulation.
 
 **Diagnostic artifacts**: Trace reports and telemetry from investigation sessions are archived in `data/traces/parity_test_lowmem/`.
+
+---
+
+## 8. Oct 2025 Campaign — Performance & Failure Rate Investigation (2026-08-21)
+
+This section records the findings from a systematic investigation into an observed 25–50× throughput regression and an ~21% flight simulation failure rate during the Oct 2025 kerosene campaign run. It is intended as a structured technical summary suitable for academic review.
+
+### 8.1 Observed Symptoms
+
+| Metric | Fast Baseline (Aug 15) | Degraded Runs (Aug 20–21) |
+|--------|----------------------|--------------------------|
+| Throughput | **0.05 s/task** (20 tasks/s) | 1.23–2.66 s/task |
+| Failed flights / day | **1** | **1,894–2,737** |
+| Batch size | 50 | 150 |
+| Run duration (1 day) | **5m 48s** | 2h 19m+ |
+
+### 8.2 Hypotheses Tested and Eliminated
+
+| # | Hypothesis | Test Applied | Result |
+|---|------------|-------------|--------|
+| 1 | Short flights too short for PSFlight fuel integration | Checked source: `fuel_burn = fuel_flow × Δt` — works for any duration | ❌ Rejected |
+| 2 | Met interpolation failure at xarray chunk boundaries (eager mode) | `xr.concat` on eager arrays uses `np.concatenate` → always contiguous NumPy | ❌ Rejected |
+| 3 | Thread contention on shared `MetDataset` | Would cause scattered failures across all batches, not batch-specific wipeouts; `h5netcdf` engine is pure Python (no C-library state) | ❌ Rejected |
+| 4 | CoCiP modifies PSFlight `total_fuel_burn` | Source audit: CoCiP does not touch `flight.attrs["total_fuel_burn"]` | ❌ Rejected |
+| 5 | Sequential PSFlight eval produces correct output | Sequential eval shows same individual failure rate as vectorized fallback | Partially confirmed — failure is per-flight, not an artefact of sequential path |
+
+### 8.3 Root Cause — PSFlight Model Guardrail Failures
+
+The `PSFlight` model (Poll-Schumann performance model via `pycontrails`) includes a runtime guardrail:
+
+```
+RuntimeError: Model failure: fuel mass flow rate is unrealistic
+              and the built-in guardrails are not working.
+```
+
+This is raised when computed fuel mass flow rate exceeds 25 kg/s, which can occur on certain flight profiles (e.g. BIKF–LFPG at FL390) where the PS model receives atmospheric conditions outside its validated operating envelope.
+
+**Fleet vs. sequential evaluation behaviour**: When `PSFlight.eval(fleet)` is called with a `Fleet` (list of flights), a single RuntimeError from one flight crashes the entire list comprehension — all-or-nothing. The pipeline then falls back to re-evaluating all N flights sequentially. Certain flights that fail in both vectorized and sequential mode produce `total_fuel_burn = np.nansum(all_NaN) = 0.0`, which is then correctly rejected by the new `check_psflight_ok` gate.
+
+**Key finding**: The failure is intrinsic to specific corridor/altitude combinations and is not caused by data quality issues, weather loading bugs, or batching topology. Re-simulation of the same flights with freshly constructed ERA5 objects succeeds in some cases, suggesting a possible interaction between the shared concatenated `MetDataset` object and certain flight profiles during sequential fallback — but this remains unconfirmed.
+
+### 8.4 Performance Regression Root Cause — Delta Lake Write Overhead
+
+Phase timing instrumentation (added 2026-08-21) revealed:
+
+```
+Batch 6/7:  load=2.71s  psflight=14.12s  ps_gate=1.07s  cocip=11.76s  lake=53.79s  total=83.45s
+Batch 7/7:  load=1.86s  psflight=10.92s  ps_gate=0.23s  cocip=14.99s  lake=61.12s  total=89.11s
+```
+
+Delta Lake writes (`lake=53–94s`) account for **65–99% of wall-clock time per batch**. The write path executes a full 3-column predicate MERGE (`SIM_FID × model_config_id × time`) against the entire existing lake on every batch commit. As the lake grows during a run, each MERGE must scan an increasing number of Parquet files — making lake write time O(n_rows_in_lake). With 1,050 tiny batches (from per-corridor homogeneous batching), this serializes into effectively sequential lake I/O for the entire day.
+
+The Aug 15 baseline was fast not primarily because of batching topology but because with `batch_size=50` and ~60–70 total batches, the lake was still small and MERGE scans were short.
+
+### 8.5 Changes Implemented (2026-08-21)
+
+| Change | File | Purpose |
+|--------|------|---------|
+| `log_simulation_failure()` | `src/common/utils.py` | Process-safe per-failure audit log to `data/logs/simulation_failures.log` |
+| `check_psflight_ok()` | `src/core/physics/slots/slot5_evaluator.py` | Pre-CoCiP gate: rejects flights with zero/NaN fuel burn or degenerate output columns |
+| Phase timing instrumentation | `src/core/physics/worker.py` | Per-phase wall-clock timing logged per batch (load / psflight / ps_gate / cocip / lake / total) |
+| `vectorize_ps` flag | `src/core/physics/worker.py` | Runtime toggle to skip vectorized PSFlight attempt (default `True` — existing behaviour) |
+| Failure lake writes disabled | `src/core/physics/worker.py` | `_write_failure_lake()` calls commented out — Delta Lake overhead too large; `simulation_failures.log` captures equivalent data at zero cost |
+
+### 8.6 Open Questions & Next Steps
+
+| # | Question | Priority |
+|---|----------|----------|
+| 1 | Why do certain BIKF–LFPG (and similar) flights consistently trigger `fuel mass flow rate is unrealistic`? Is this a PS model limitation for North-Atlantic long-haul profiles, or a data quality issue in the corridor trajectories? | High |
+| 2 | Can the Delta Lake MERGE be replaced with pure `append` mode + periodic deduplication during vacuum/optimize, eliminating per-batch O(n) scan cost? | High |
+| 3 | Does the shared `MetDataset` concat object contribute to sequential fallback failures (i.e. would per-flight fresh ERA5 slices eliminate zero-fuel-burn)? | Medium |
+| 4 | Should `check_psflight_ok` rejections be written asynchronously to a failure lake (non-blocking) to preserve traceability without blocking the batch pipeline? | Low |

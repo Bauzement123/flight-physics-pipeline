@@ -245,6 +245,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-vec-ps",
+        action="store_true",
+        dest="no_vec_ps",
+        help=(
+            "Skip vectorized PSFlight evaluation and go straight to per-flight "
+            "sequential evaluation. CoCiP vectorization is unaffected. "
+            "Use when vectorized PSFlight consistently triggers guardrail failures "
+            "on mixed batches (default: attempt vectorized first, fall back to sequential)."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Re-simulate tasks that already have results in the Delta Lake.",
@@ -331,6 +342,7 @@ def main(argv=None) -> None:
         overwrite=args.overwrite,
         bbox=EUR_BBOX,
         lake_verbosity=args.lake_verbosity,
+        vectorize_ps=not args.no_vec_ps,
     )
 
 

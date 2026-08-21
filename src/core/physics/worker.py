@@ -18,6 +18,7 @@ setup_file_logger() is called once in the orchestrator entrypoint only.
 import gc
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,12 +37,12 @@ from pycontrails.models.ps_model import PSFlight  # noqa: F401 — kept for test
 
 from src.common.adapters import promote_attrs_to_data
 from src.common.config import UNSUPPORTED_TYPECODE_FLAG
-from src.common.utils import log_skipped_aircraft
+from src.common.utils import log_skipped_aircraft, log_simulation_failure
 from src.core.physics.loaders import get_loader
 from src.core.physics.models.ps_cocip import get_model
 from src.data_manager.io_utils import append_sim_lake
 from src.data_manager.schemas import BatchOutput, CorridorCluster, SimTask
-from src.core.physics.slots.slot5_evaluator import check_load_ok, check_cocip_ok
+from src.core.physics.slots.slot5_evaluator import check_load_ok, check_psflight_ok, check_cocip_ok
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def run_batch(
     overwrite: bool = False,
     lake_verbosity: str = "full",
     low_mem: bool = False,
+    vectorize_ps: bool = True,
 ) -> BatchOutput:
     """Execute a batch of SimTasks through the physics pipeline.
 
@@ -115,25 +117,54 @@ def run_batch(
     )
     loader = get_loader(sim_mode=sim_mode, fuel=fuel, step_down_method=step_down_method)
 
+    t0 = time.perf_counter()
+
     # Phase 1: Load + Gate
     loaded_ok, load_failed = _load_flights(batch, corridors_map, loader, sim_mode=sim_mode)
+    t1 = time.perf_counter()
     if not loaded_ok:
+        logger.info("Batch timing: load=%.2fs (early exit — all loads failed)", t1 - t0)
         return BatchOutput(successful=[], failed=load_failed)
 
     # Phase 2: PSFlight (vectorized → sequential fallback / lowmem direct sequential)
     ps_ok, ps_failed = _eval_psflight(
-        loaded_ok, ps_model, model_config_id, met=met, rad=rad, max_age_hours=max_age_hours, low_mem=low_mem
+        loaded_ok, ps_model, model_config_id, met=met, rad=rad, max_age_hours=max_age_hours, low_mem=low_mem, vectorize_ps=vectorize_ps
     )
+    t2 = time.perf_counter()
     if not ps_ok:
+        logger.info("Batch timing: load=%.2fs, psflight=%.2fs (early exit — all PSFlight failed)", t1 - t0, t2 - t1)
         return BatchOutput(successful=[], failed=load_failed + ps_failed)
+
+    # Phase 2.5: PSFlight output validation gate
+    ps_valid, ps_gate_failed = check_psflight_ok(ps_ok)
+    t25 = time.perf_counter()
+
+    # Write PSFlight-gate-failed flights to failure lake (mcguyver summary mode)
+    # DISABLED: Delta Lake write overhead dominates batch time (~70s/batch).
+    # Failure data is captured by log_simulation_failure() text log instead.
+    # if ps_gate_failed:
+    #     _write_failure_lake(ps_gate_failed, stage="psflight", lake_path=lake_path)
+
+    if not ps_valid:
+        logger.info(
+            "Batch timing: load=%.2fs, psflight=%.2fs, ps_gate=%.2fs (early exit — all PSFlight-gate failed)",
+            t1 - t0, t2 - t1, t25 - t2,
+        )
+        return BatchOutput(successful=[], failed=load_failed + ps_failed + ps_gate_failed)
 
     # Phase 3: CoCiP (vectorized → sequential fallback / lowmem direct sequential)
     cocip_ok, cocip_failed = _eval_cocip(
-        ps_ok, cocip_model, model_config_id, met=met, rad=rad, max_age_hours=max_age_hours, low_mem=low_mem
+        ps_valid, cocip_model, model_config_id, met=met, rad=rad, max_age_hours=max_age_hours, low_mem=low_mem
     )
+    t3 = time.perf_counter()
 
     # Phase 4: Slot 5 Universal Pre-Lake Gate
     final_ok, lake_gate_failed = check_cocip_ok(cocip_ok, sim_mode=sim_mode)
+
+    # Write CoCiP-gate-failed flights to failure lake
+    # DISABLED: see PSFlight lake write comment above.
+    # if lake_gate_failed:
+    #     _write_failure_lake(lake_gate_failed, stage="cocip_gate", lake_path=lake_path)
 
     # Write successful trajectories to Delta Lake
     _write_to_lake(
@@ -144,6 +175,12 @@ def run_batch(
         overwrite=overwrite,
         lake_verbosity=lake_verbosity,
     )
+    t4 = time.perf_counter()
+
+    logger.info(
+        "Batch timing: load=%.2fs, psflight=%.2fs, ps_gate=%.2fs, cocip=%.2fs, lake=%.2fs, total=%.2fs",
+        t1 - t0, t2 - t1, t25 - t2, t3 - t25, t4 - t3, t4 - t0,
+    )
 
     # Cleanup large memory structures before next batch
     for _, flight in final_ok:
@@ -152,7 +189,7 @@ def run_batch(
 
     return BatchOutput(
         successful=final_ok,
-        failed=load_failed + ps_failed + cocip_failed + lake_gate_failed,
+        failed=load_failed + ps_failed + ps_gate_failed + cocip_failed + lake_gate_failed,
     )
 
 
@@ -198,6 +235,7 @@ def _eval_psflight(
     rad: Any,
     max_age_hours: int,
     low_mem: bool = False,
+    vectorize_ps: bool = True,
 ) -> Tuple[List[Tuple[SimTask, Flight]], List[Tuple[SimTask, str]]]:
     """Phase 2: Run PSFlight on all flights. Vectorized first, per-flight sequential fallback.
 
@@ -211,33 +249,34 @@ def _eval_psflight(
     if low_mem:
         return _eval_psflight_sequential(pairs, ps_model, model_config_id)
 
-    tasks_list, flights_list = zip(*pairs)
+    if vectorize_ps:
+        tasks_list, flights_list = zip(*pairs)
 
-    # Attempt vectorized
-    try:
-        logger.info("PSFlight vectorized eval: %d flights, model=%s.", len(flights_list), model_config_id)
-        fl_ps_out = ps_model.eval(list(flights_list))
-        fl_ps_list = fl_ps_out.to_flight_list() if isinstance(fl_ps_out, Fleet) else list(fl_ps_out)
-        
-        # Rebuild pairs using flight_id to match back to tasks
-        fid_to_task: Dict[str, SimTask] = {t.sim_fid: t for t in tasks_list}
-        ok_pairs: List[Tuple[SimTask, Flight]] = []
-        for fl in fl_ps_list:
-            fid = fl.attrs.get("flight_id")
-            if task := fid_to_task.get(fid):
-                ok_pairs.append((task, fl))
-                
-        return ok_pairs, []
-    except Exception as vec_err:
-        logger.warning("Vectorized PSFlight failed (%s). Falling back to sequential.", vec_err)
+        # Attempt vectorized
+        try:
+            logger.info("PSFlight vectorized eval: %d flights, model=%s.", len(flights_list), model_config_id)
+            fl_ps_out = ps_model.eval(list(flights_list))
+            fl_ps_list = fl_ps_out.to_flight_list() if isinstance(fl_ps_out, Fleet) else list(fl_ps_out)
+            
+            # Rebuild pairs using flight_id to match back to tasks
+            fid_to_task: Dict[str, SimTask] = {t.sim_fid: t for t in tasks_list}
+            ok_pairs: List[Tuple[SimTask, Flight]] = []
+            for fl in fl_ps_list:
+                fid = fl.attrs.get("flight_id")
+                if task := fid_to_task.get(fid):
+                    ok_pairs.append((task, fl))
+                    
+            return ok_pairs, []
+        except Exception as vec_err:
+            logger.warning("Vectorized PSFlight failed (%s). Falling back to sequential.", vec_err)
 
-    # Sequential fallback — instantiated via get_model factory (copy_source=False)
+    # Sequential — either direct (vectorize_ps=False) or fallback after vectorized failure
     seq_ps, _ = get_model(
         model_config_id=model_config_id,
         met=met,
         rad=rad,
         max_age_hours=max_age_hours,
-        copy_source=False,
+        copy_source=True,
     )
     return _eval_psflight_sequential(pairs, seq_ps, model_config_id)
 
@@ -257,6 +296,7 @@ def _eval_psflight_sequential(
             ok.append((task, fl_ps))
         except Exception as exc:
             logger.error("Sequential PSFlight eval failed for %s: %s", sim_fid, exc)
+            log_simulation_failure(sim_fid, "psflight_sequential", str(exc))
             tc = flight.attrs.get("aircraft_type")
             log_skipped_aircraft(
                 sim_fid, tc or UNSUPPORTED_TYPECODE_FLAG,
@@ -335,6 +375,7 @@ def _eval_cocip_sequential(
             ok.append((task, fl_sim))
         except Exception as exc:
             logger.error("Sequential CoCiP eval failed for %s: %s", sim_fid, exc)
+            log_simulation_failure(sim_fid, "cocip_sequential", str(exc))
             tc = flight.attrs.get("aircraft_type")
             log_skipped_aircraft(
                 sim_fid, tc or UNSUPPORTED_TYPECODE_FLAG,
@@ -423,4 +464,66 @@ def _write_to_lake(
             append_sim_lake(lake_path, combined, overwrite=overwrite)
     except Exception as exc:
         logger.error("Failed to append trajectories to Delta Lake: %s", exc)
+
+
+# ── Failure lake write lock ─────────────────────────────────────────────── #
+_FAILURE_LAKE_WRITE_LOCK = threading.Lock()
+
+
+def _write_failure_lake(
+    failed_pairs: List[Tuple[SimTask, str]],
+    stage: str,
+    lake_path: Path,
+) -> None:
+    """Write failed flight metadata to a stage-specific failure Delta Lake.
+
+    Mcguyver-style summary mode: one row per failed flight using SimTask
+    metadata and rejection reason. Hardcoded path derived from lake_path parent.
+
+    Parameters
+    ----------
+    failed_pairs : List[Tuple[SimTask, str]]
+        (task, reason) pairs from a check gate.
+    stage : str
+        Failure stage identifier (e.g. 'psflight', 'cocip_gate').
+    lake_path : Path
+        Main simulation lake path — failure lake is placed as a sibling.
+    """
+    if not failed_pairs:
+        return
+
+    rows = []
+    for task, reason in failed_pairs:
+        rows.append({
+            "SIM_FID": task.sim_fid,
+            "stage": stage,
+            "reason": str(reason),
+            "dep": task.dep,
+            "arr": task.arr,
+            "route": f"{task.dep}-{task.arr}",
+            "typecode": task.typecode,
+            "cluster_id": task.cluster_id,
+            "FL": task.fl,
+            "firstseen": pd.Timestamp(task.firstseen, unit="s", tz="UTC").tz_localize(None),
+            "lastseen": pd.Timestamp(task.lastseen, unit="s", tz="UTC").tz_localize(None),
+            "icao24": task.icao24,
+            "callsign": task.callsign,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # Hardcoded failure lake path: sibling of main lake
+    failure_lake = lake_path.parent / f"simulation_failures_{stage}"
+
+    try:
+        from deltalake import write_deltalake
+        failure_lake.mkdir(parents=True, exist_ok=True)
+        with _FAILURE_LAKE_WRITE_LOCK:
+            write_deltalake(str(failure_lake), df, mode="append", schema_mode="merge")
+        logger.info(
+            "Wrote %d failure(s) to %s failure lake at %s.",
+            len(df), stage, failure_lake,
+        )
+    except Exception as exc:
+        logger.error("Failed to write to %s failure lake: %s", stage, exc)
 

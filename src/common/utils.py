@@ -67,6 +67,40 @@ def log_skipped_aircraft(
         logger.error(f"Failed to append to skipped_aircraft.log for {clean_id}: {e}")
 
 
+def log_simulation_failure(
+    sim_fid: str,
+    stage: str,
+    reason: str,
+) -> None:
+    """Append a simulation failure entry to data/logs/simulation_failures.log.
+
+    Process-safe via direct file append (O_APPEND). Does not depend on
+    the logging module — safe to call from any worker thread or process.
+
+    Parameters
+    ----------
+    sim_fid : str
+        The SIM_FID of the failed flight.
+    stage : str
+        Pipeline stage where failure occurred: 'check_load_ok',
+        'check_psflight_ok', 'check_cocip_ok', 'psflight_sequential',
+        'cocip_sequential'.
+    reason : str
+        Human-readable rejection reason string.
+    """
+    from datetime import datetime, timezone
+    failure_log = Path(LOGS_DIR) / "simulation_failures.log"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    clean_fid = str(sim_fid).replace("\t", " ").replace("\n", " ").strip()
+    clean_reason = str(reason).replace("\t", " ").replace("\n", " ").strip()
+    try:
+        failure_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(failure_log, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"{ts}\t{clean_fid}\t{stage}\t{clean_reason}\n")
+    except Exception as e:
+        logger.error("Failed to append to simulation_failures.log for %s: %s", clean_fid, e)
+
+
 def load_route_summary(summary_path: str | Path | None = None) -> pd.DataFrame:
     """
     Safely loads the RouteSummary file (supports parquet, pickle, csv) and returns a DataFrame.

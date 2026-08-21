@@ -239,6 +239,7 @@ def run(
     batch_size: int = 50,
     bbox: list = EUR_BBOX,
     lake_verbosity: str = "full",
+    vectorize_ps: bool = True,
 ) -> None:
     """Run the physics pipeline for a list of calendar days.
 
@@ -436,6 +437,7 @@ def run(
             overwrite=overwrite,
             lake_verbosity=lake_verbosity,
             low_mem=low_mem,
+            vectorize_ps=vectorize_ps,
         )
 
         day_succeeded = day_failed = 0
