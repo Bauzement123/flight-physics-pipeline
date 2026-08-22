@@ -473,15 +473,17 @@ def read_sim_lake(lake_path: str | Path, query: SimResultQuery) -> pd.DataFrame:
 
 
 def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = False) -> None:
-    """Upsert (or overwrite) a trajectory DataFrame into the simulation Delta Lake.
+    """Append a trajectory DataFrame into the simulation Delta Lake.
 
     Normal mode (overwrite=False)
     ------------------------------
     - Deduplicates incoming data on ``(SIM_FID, time)`` with ``keep='last'``.
     - Validates mandatory 14-column metadata schema and non-null primary keys.
-    - If incoming DataFrame introduces new physics columns not yet in the Delta schema,
-      falls back to delete-then-append with ``schema_mode='merge'`` to allow schema evolution.
-    - Otherwise, performs atomic MERGE on ``(SIM_FID, model_config_id, time)``.
+    - Appends rows directly via ``write_deltalake(mode='append')``.
+    - Deduplication against existing lake data is handled upstream by the
+      Slot 2 skip-gate (``read_existing_sim_fids`` / ``filter_and_batch``).
+    - If incoming DataFrame introduces new physics columns not yet in the
+      Delta schema, uses ``schema_mode='merge'`` to allow schema evolution.
 
     Overwrite mode (overwrite=True)
     ---------------------------------
@@ -534,22 +536,8 @@ def append_sim_lake(lake_path: str | Path, df: pd.DataFrame, overwrite: bool = F
             "Overwrote" if overwrite else "Appended", len(df), lake_path, has_new_cols,
         )
     else:
-        (
-            dt.merge(
-                source=df,
-                predicate=(
-                    "target.SIM_FID = source.SIM_FID "
-                    "AND target.model_config_id = source.model_config_id "
-                    "AND target.time = source.time"
-                ),
-                source_alias="source",
-                target_alias="target",
-            )
-            .when_matched_update_all()
-            .when_not_matched_insert_all()
-            .execute()
-        )
-        logger.info("Upserted %d waypoint row(s) into Delta Lake at %s", len(df), lake_path)
+        write_deltalake(path_str, df, mode="append", schema_mode="merge")
+        logger.info("Appended %d waypoint row(s) to Delta Lake at %s", len(df), lake_path)
 
 
 # ---------------------------------------------------------------------------

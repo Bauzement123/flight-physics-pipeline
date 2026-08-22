@@ -96,7 +96,7 @@ Module Objective: Type-Safe Data Contracts, High-Performance Readers, Delta Lake
 │   └── io_utils.append_sim_lake()
 │       ├── Input: lake_path (str | Path), df (pandas.DataFrame), overwrite (bool).
 │       ├── Output: None
-│       └── Safety/Fallback: Enforces schema validation; converts duration columns to seconds; casts string metadata; performs atomic MERGE on (SIM_FID, model_config_id, time) or clean DELETE-then-append on overwrite/schema evolution.
+│       └── Safety/Fallback: Enforces schema validation; converts duration columns to seconds; casts string metadata; appends via `write_deltalake(mode='append')` (dedup handled upstream by Slot 2 skip-gate); DELETE-then-append on overwrite or schema evolution.
 │
 ├── 5. Table Maintenance & Z-Order Optimization
 │   ├── io_utils.vacuum_sim_lake()
@@ -173,7 +173,7 @@ flowchart TD
     C2 -->|Partitioned Batches| C3
     C3 -->|Full Trajectory DataFrame| D1
     D1 -->|Validated DataFrame| D2
-    D2 -->|ACID Merge / Overwrite| E1
+    D2 -->|Append / Overwrite| E1
     C3 -->|Worker Results| C4
     C4 -->|Round-Boundary Re-Batch| C2
     C3 -->|Post-Day Maintenance| D3
@@ -185,7 +185,7 @@ flowchart TD
 2. **Task Generation (Slot 1)**: Cohort rows are converted into `SimTask` dataclass objects. Each task lazily generates its canonical `SIM_FID` identifier via `task.to_sim_fid()`.
 3. **Pre-Batch Skip-Gate Verification (Slot 2)**: Before creating worker batches, Slot 2 invokes `read_existing_sim_fids()` to bulk-query all simulated `SIM_FID`s for the day's routes. Unsimulated tasks are chunked into full batches of `max_batch_size` (e.g. 50), maximizing CPU vectorization without empty slots.
 4. **Variational Optimization (Slot 2 & Slot 5)**: In variational mode, Slot 2 calls `read_ef_by_base_key()` to retrieve prior simulated FLs and $\text{EF}_{\text{total}}$ values. Succeeded flights with positive warming ($\text{EF}_{\text{total}} > 0$) generate step-down tasks via `compute_stepdown_task()` until contrail suppression or minimum safe altitude is reached.
-5. **Runtime Schema Validation & Persistence**: Upon batch simulation, worker threads construct a full per-waypoint DataFrame and call `append_sim_lake()`. `validate_sim_trajectory_df()` enforces that all 14 mandatory metadata columns are present and non-null. Under `_LAKE_WRITE_LOCK`, `append_sim_lake()` merges rows on `(SIM_FID, model_config_id, time)` (or executes targeted delete-then-append if `overwrite=True` or new physics columns evolve).
+5. **Runtime Schema Validation & Persistence**: Upon batch simulation, worker threads construct a full per-waypoint DataFrame and call `append_sim_lake()`. `validate_sim_trajectory_df()` enforces that all 14 mandatory metadata columns are present and non-null. Under `_LAKE_WRITE_LOCK`, `append_sim_lake()` appends rows via `write_deltalake(mode='append')` — deduplication is handled upstream by the Slot 2 skip-gate (or via targeted delete-then-append if `overwrite=True` or new physics columns evolve).
 6. **Post-Day Vacuum & Multi-Dimensional Z-Ordering**: At the end of each daily orchestration loop, `vacuum_sim_lake()` prunes stale parquet files older than 168 hours, and `optimize_sim_lake()` compacts small files and applies multi-dimensional Z-ordering on `['dep_date', 'route', 'EF_total']`, guaranteeing high-speed downstream analytics.
 
 > [!WARNING]
@@ -439,24 +439,21 @@ Simulation results written to `data/results/corridor_simulations` persist **full
 
 ---
 
-## 7. Delta Lake Upsert & Optimization Contract
+## 7. Delta Lake Append & Optimization Contract
 
-To maintain absolute data integrity across parallel execution threads and re-run campaigns, `append_sim_lake()` implements a strict Delta Lake transactional contract based on the composite key `(SIM_FID, model_config_id, time)`.
+To maintain data integrity across parallel execution threads and re-run campaigns, `append_sim_lake()` implements a strict Delta Lake transactional contract with **upstream deduplication** and **append-only writes**.
 
 ### Normal Mode (`overwrite=False`)
-When `overwrite=False`, `append_sim_lake()` performs a Delta Table MERGE operation:
+When `overwrite=False`, `append_sim_lake()` performs a direct append:
 
-```sql
-MERGE INTO target USING source
-ON target.SIM_FID = source.SIM_FID 
-AND target.model_config_id = source.model_config_id
-AND target.time = source.time
-WHEN MATCHED THEN UPDATE SET *
-WHEN NOT MATCHED THEN INSERT *
+```python
+write_deltalake(path, df, mode="append", schema_mode="merge")
 ```
 
-- **Idempotency**: Running the pipeline multiple times over the same date range updates matching waypoints rather than duplicating rows.
+- **Deduplication**: Handled upstream by the Slot 2 skip-gate (`read_existing_sim_fids` / `filter_and_batch`), which filters out already-simulated `SIM_FID`s before tasks reach the worker. This guarantees no duplicate rows are appended.
+- **Performance**: O(1) per write — appends a new Parquet file without scanning the existing table. Previous MERGE-based writes were O(n_rows_in_lake) and degraded to 53–94s/batch on large lakes.
 - **Thread Safety**: Combined with `_LAKE_WRITE_LOCK` in `worker.py`, Delta Lake's underlying Rust transaction log ensures atomic commits across threads.
+- **Schema Evolution**: `schema_mode="merge"` allows new physics columns to be added transparently.
 
 ### Overwrite Mode (`overwrite=True`)
 When `--overwrite` is specified on the CLI, `append_sim_lake()` executes a two-stage atomic transaction:

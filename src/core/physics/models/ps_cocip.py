@@ -49,6 +49,7 @@ def _get_kerosene_params(
         "fill_low_altitude_with_zero_wind": False,
         "correct_fuel_flow": False,
         "n_iter": 5,
+        "downselect_met": False,
     }
 
     cocip_params: dict = {

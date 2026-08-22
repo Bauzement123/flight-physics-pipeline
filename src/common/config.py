@@ -81,7 +81,7 @@ CORRIDOR_CLUSTERING_THREADS_PER_WORKER: int = 2
 #
 # Defaults (2 workers, 12 h packets) are safe for local development.
 # Small packets (1–3 h) bound concurrent open file handles on network mounts.
-WEATHER_IO_WORKERS: int = int(os.environ.get("WEATHER_IO_WORKERS", "2"))
+WEATHER_IO_WORKERS: int = int(os.environ.get("WEATHER_IO_WORKERS", "4"))
 WEATHER_OPEN_PACKET_HOURS: int = int(os.environ.get("WEATHER_OPEN_PACKET_HOURS", "12"))
 
 # Trino retry / timeout parameters (§3.3.1)
